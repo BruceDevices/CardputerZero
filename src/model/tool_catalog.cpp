@@ -1,0 +1,90 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Bruce CardputerZero Community
+ *
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
+#include "tool_catalog.h"
+
+namespace model {
+
+const std::vector<ToolCategory>& tool_catalog() {
+    static const std::vector<ToolCategory> catalog = {
+        {
+            "Wi-Fi",
+            "Scan, inspect and toggle the Wi-Fi radio",
+            false,
+            {
+                {"Scan nearby networks", "iw dev wlan0 scan", {"iw", "dev", "wlan0", "scan"}},
+                {"Show Wi-Fi status", "ip addr show wlan0", {"ip", "addr", "show", "wlan0"}},
+                {"Enable Wi-Fi radio", "rfkill unblock wifi", {"rfkill", "unblock", "wifi"}},
+                {"Disable Wi-Fi radio", "rfkill block wifi", {"rfkill", "block", "wifi"}},
+            },
+        },
+        {
+            "Bluetooth LE",
+            "Discover and manage nearby BLE devices",
+            false,
+            {
+                {"Scan for BLE devices (15s)", "timeout 15 hcitool lescan",
+                 {"timeout", "15", "hcitool", "lescan"}},
+                {"Show adapter info", "bluetoothctl show", {"bluetoothctl", "show"}},
+                {"Enable Bluetooth radio", "rfkill unblock bluetooth", {"rfkill", "unblock", "bluetooth"}},
+                {"Disable Bluetooth radio", "rfkill block bluetooth", {"rfkill", "block", "bluetooth"}},
+            },
+        },
+        {
+            "Sub-GHz / RF",
+            "Requires an attached SDR dongle (e.g. RTL-SDR)",
+            false,
+            {
+                {"Capture 433MHz (30s)", "timeout 30 rtl_433", {"timeout", "30", "rtl_433"}},
+                {"List SDR devices", "rtl_test -t", {"rtl_test", "-t"}},
+            },
+        },
+        {
+            "Network Tools",
+            "curl / ping / netcat helpers",
+            false,
+            {
+                {"My public IP (curl)", "curl -s http://ifconfig.me",
+                 {"curl", "-s", "http://ifconfig.me"}},
+                {"Fetch example.com headers (curl)", "curl -sI http://example.com",
+                 {"curl", "-sI", "http://example.com"}},
+                {"Ping default gateway", "ping default gateway x4",
+                 {"sh", "-c", "ping -c 4 \"$(ip route | awk '/default/ {print $3; exit}')\""}},
+                {"Port scan default gateway (nc)", "nc -zv <gateway> 1-1024",
+                 {"sh", "-c", "nc -zv \"$(ip route | awk '/default/ {print $3; exit}')\" 1-1024"}},
+                {"Start netcat listener :4444", "nc -lvp 4444", {"nc", "-lvp", "4444"}},
+            },
+        },
+        {
+            "SMB Client",
+            "Anonymous SMB share discovery",
+            false,
+            {
+                {"List shares on default gateway", "smbclient -L //<gateway> -N",
+                 {"sh", "-c", "smbclient -L \"//$(ip route | awk '/default/ {print $3; exit}')\" -N"}},
+                {"smbclient version", "smbclient --version", {"smbclient", "--version"}},
+            },
+        },
+        {
+            "Responder",
+            "LLMNR/NBT-NS/mDNS poisoner - authorized use only",
+            false,
+            {
+                {"Start Responder on wlan0", "responder -I wlan0", {"responder", "-I", "wlan0"}},
+                {"Start Responder on eth0", "responder -I eth0", {"responder", "-I", "eth0"}},
+            },
+        },
+        {
+            "About",
+            "Version and usage notice",
+            true,
+            {},
+        },
+    };
+    return catalog;
+}
+
+} // namespace model
