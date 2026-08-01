@@ -7,6 +7,7 @@
 #include "tool_run_screen.h"
 
 #include "asset_manager.h"
+#include "theme.h"
 #include "tool_catalog.h"
 #include "ui_const.h"
 

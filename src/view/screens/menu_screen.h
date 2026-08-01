@@ -21,8 +21,11 @@ public:
 
 private:
     void build_content(lv_obj_t* content) override;
+    void build_carousel(lv_obj_t* content); // root menu: Bruce-style icon carousel
+    void build_list(lv_obj_t* content);      // category submenu: vertical action list
     void move_selection(int delta);
     void apply_selection_highlight();
+    void update_carousel();
     void open_selected();
 
     static void move_up_cb(lv_event_t* event);
@@ -34,6 +37,14 @@ private:
     int category_index_{-1};
     size_t selected_index_{0};
     std::vector<lv_obj_t*> rows_;
+
+    // Carousel widgets (root menu only).
+    bool carousel_{false};
+    lv_obj_t* icon_prev_{nullptr};
+    lv_obj_t* icon_curr_{nullptr};
+    lv_obj_t* icon_next_{nullptr};
+    lv_obj_t* name_label_{nullptr};
+    lv_obj_t* desc_label_{nullptr};
 };
 
 } // namespace screen

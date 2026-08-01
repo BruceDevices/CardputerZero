@@ -12,9 +12,9 @@
 
 namespace view {
 
-// Phosphor icon glyphs (verified codepoints only - the bundled Phosphor-Fill.ttf
-// exposes glyph names as generic uniXXXX, so only reuse codepoints already
-// confirmed by the upstream template rather than guessing new ones).
+// Phosphor icon glyphs. Codepoints taken from the official @phosphor-icons/web
+// "Fill" style map and verified by rendering the bundled Phosphor-Fill.ttf, so
+// they are safe to use directly (FreeType renders any codepoint at runtime).
 constexpr const char* ICON_SIGN_OUT = "\uE42A";
 constexpr const char* ICON_MOON     = "\uE330";
 constexpr const char* ICON_SUN      = "\uE474";
@@ -27,6 +27,8 @@ constexpr const char* NAV_BACK   = "Back";
 constexpr const char* NAV_QUIT   = "Quit";
 constexpr const char* NAV_UP     = "Up";
 constexpr const char* NAV_DOWN   = "Down";
+constexpr const char* NAV_PREV   = "Prev";
+constexpr const char* NAV_NEXT   = "Next";
 constexpr const char* NAV_SELECT = "Select";
 constexpr const char* NAV_RUN    = "Run";
 constexpr const char* NAV_STOP   = "Stop";

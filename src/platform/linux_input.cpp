@@ -25,18 +25,47 @@ std::array<lv_obj_t*, kNavKeyCount> nav_buttons{};
 uint32_t last_key = 0;
 bool last_key_pressed = false;
 
+// Debounce for the Cardputer's matrix keyboard: one physical tap can bounce
+// into several press/release pairs, each firing a nav action. Ignore repeats of
+// the same action inside this window. ponytail: tune this one number up if the
+// keys still double-fire on your unit, down if holding feels too sluggish.
+constexpr uint32_t kKeyDebounceMs = 160;
+uint32_t last_dispatch_tick = 0;
+size_t last_dispatch_index = kNavKeyCount;
+
+// Cardputer keyboard mapping (same everywhere in the app):
+//   ESC              -> slot 0  (back; quits at the root menu)
+//   F / up, Z / left -> slot 1  (previous item)
+//   Enter / Ok       -> slot 2  (select / run)
+//   X / down, C /right-> slot 3  (next item)
+//   T                -> slot 4  (theme toggle)
+// Left/right and up/down both just step the 1-D menu selection, so the carousel
+// (horizontal) and the tool lists (vertical) each feel natural. Back is ESC
+// only - never a letter key - so no keystroke can accidentally quit the app.
 size_t nav_key_to_index(uint32_t key) {
     switch (key) {
-        case '4':
         case LV_KEY_ESC:
             return 0;
-        case '5':
+        case 'f':
+        case 'F':
+        case 'z':
+        case 'Z':
+        case LV_KEY_UP:
+        case LV_KEY_LEFT:
+        case LV_KEY_PREV:
             return 1;
-        case '6':
+        case LV_KEY_ENTER:
             return 2;
-        case '7':
+        case 'x':
+        case 'X':
+        case 'c':
+        case 'C':
+        case LV_KEY_DOWN:
+        case LV_KEY_RIGHT:
+        case LV_KEY_NEXT:
             return 3;
-        case '8':
+        case 't':
+        case 'T':
             return 4;
         default:
             return kNavKeyCount;
@@ -48,6 +77,14 @@ void dispatch_nav_key(uint32_t key) {
     if (index >= nav_buttons.size()) {
         return;
     }
+
+    // Swallow bounces / key-repeat of the same action within the debounce window.
+    const uint32_t now = lv_tick_get();
+    if (index == last_dispatch_index && (now - last_dispatch_tick) < kKeyDebounceMs) {
+        return;
+    }
+    last_dispatch_index = index;
+    last_dispatch_tick = now;
 
     auto* button = nav_buttons[index];
     if (!button || !lv_obj_is_valid(button) || !lv_obj_has_flag(button, LV_OBJ_FLAG_CLICKABLE)) {
@@ -85,18 +122,25 @@ struct EvdevKeypad {
 
 uint32_t map_evdev_key(uint16_t code) {
     switch (code) {
+        // Back: the Cardputer's top-left key reports ESC or GRAVE depending on
+        // the keymap; Backspace is an intuitive fallback. All route to "back".
         case KEY_ESC:
+        case KEY_GRAVE:
+        case KEY_BACKSPACE:
             return LV_KEY_ESC;
-        case KEY_4:
-            return '4';
-        case KEY_5:
-            return '5';
-        case KEY_6:
-            return '6';
-        case KEY_7:
-            return '7';
-        case KEY_8:
-            return '8';
+        case KEY_F:
+            return 'f';
+        case KEY_Z:
+            return 'z';
+        case KEY_X:
+            return 'x';
+        case KEY_C:
+            return 'c';
+        case KEY_T:
+            return 't';
+        case KEY_ENTER:
+        case KEY_KPENTER:
+            return LV_KEY_ENTER;
         default:
             return 0;
     }
@@ -113,8 +157,8 @@ bool has_nav_keys(int fd) {
         return (key_bits[code / bits_per_word] & (1UL << (code % bits_per_word))) != 0;
     };
 
-    return has_key(KEY_ESC) || has_key(KEY_4) || has_key(KEY_5) || has_key(KEY_6) ||
-           has_key(KEY_7) || has_key(KEY_8);
+    return has_key(KEY_F) || has_key(KEY_Z) || has_key(KEY_X) || has_key(KEY_C) ||
+           has_key(KEY_T) || has_key(KEY_ENTER);
 }
 
 void evdev_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {

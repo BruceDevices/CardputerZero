@@ -27,6 +27,7 @@ struct ToolAction {
 struct ToolCategory {
     const char* label;
     const char* description;
+    const char* icon; // Phosphor-Fill glyph shown in the main-menu carousel (see ui_const.h)
     bool info_only;
     std::vector<ToolAction> actions;
 };

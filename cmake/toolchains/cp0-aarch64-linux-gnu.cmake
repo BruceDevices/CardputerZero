@@ -16,7 +16,7 @@ set(_CP0_CACHE_DIR "${_CP0_PROJECT_ROOT}/.cache")
 set(_CP0_DEFAULT_SYSROOT "${_CP0_CACHE_DIR}/sdk_bsp-src")
 
 set(CM0_SDK_ROOT "${_CP0_DEFAULT_SYSROOT}" CACHE PATH "Path to CM0/CardputerZero BSP sysroot")
-set(CM0_SDK_VERSION "v0.0.4" CACHE STRING "CM0/CardputerZero BSP release version")
+set(CM0_SDK_VERSION "v0.0.6" CACHE STRING "CM0/CardputerZero BSP release version")
 set(CM0_SDK_URL "https://github.com/CardputerZero/M5CardputerZero-UserDemo/releases/download/${CM0_SDK_VERSION}/sdk_bsp.tar.gz" CACHE STRING "CM0/CardputerZero BSP archive URL")
 set(CM0_ALLOW_FETCH_DEPS ON CACHE BOOL "Allow downloading the CM0/CardputerZero BSP when the sysroot is missing")
 
@@ -35,23 +35,33 @@ if(NOT EXISTS "${CM0_SDK_ROOT}")
     file(MAKE_DIRECTORY "${_CP0_SYSROOT_PARENT}")
     set(_CP0_SDK_ARCHIVE "${_CP0_CACHE_DIR}/sdk_bsp.tar.gz")
 
+    # Always fetch to a fresh temp file: the release asset redirects to a signed
+    # CDN URL that ignores Range, so resuming an existing partial appends a second
+    # copy instead of continuing it. Rename only once the transfer succeeded.
     message(STATUS "CM0 SDK sysroot missing, downloading BSP: ${CM0_SDK_URL}")
+    file(REMOVE "${_CP0_SDK_ARCHIVE}.part")
     file(DOWNLOAD
         "${CM0_SDK_URL}"
-        "${_CP0_SDK_ARCHIVE}"
+        "${_CP0_SDK_ARCHIVE}.part"
         SHOW_PROGRESS
         STATUS _CP0_DOWNLOAD_STATUS
-        TIMEOUT 300
+        INACTIVITY_TIMEOUT 60
     )
     list(GET _CP0_DOWNLOAD_STATUS 0 _CP0_DOWNLOAD_CODE)
     list(GET _CP0_DOWNLOAD_STATUS 1 _CP0_DOWNLOAD_MESSAGE)
     if(NOT _CP0_DOWNLOAD_CODE EQUAL 0)
+        file(REMOVE "${_CP0_SDK_ARCHIVE}.part")
         message(FATAL_ERROR "Failed to download CM0 BSP: ${_CP0_DOWNLOAD_MESSAGE}")
     endif()
+    file(RENAME "${_CP0_SDK_ARCHIVE}.part" "${_CP0_SDK_ARCHIVE}")
 
+    # Extract to a staging dir for the same reason: CM0_SDK_ROOT existing is what
+    # marks the BSP as installed, so a failed extract must not create it.
     message(STATUS "Extracting CM0 BSP to ${CM0_SDK_ROOT}")
-    file(MAKE_DIRECTORY "${CM0_SDK_ROOT}")
-    file(ARCHIVE_EXTRACT INPUT "${_CP0_SDK_ARCHIVE}" DESTINATION "${CM0_SDK_ROOT}")
+    file(REMOVE_RECURSE "${CM0_SDK_ROOT}.part")
+    file(MAKE_DIRECTORY "${CM0_SDK_ROOT}.part")
+    file(ARCHIVE_EXTRACT INPUT "${_CP0_SDK_ARCHIVE}" DESTINATION "${CM0_SDK_ROOT}.part")
+    file(RENAME "${CM0_SDK_ROOT}.part" "${CM0_SDK_ROOT}")
 endif()
 
 if(NOT EXISTS "${CM0_SDK_ROOT}/usr/include" OR NOT EXISTS "${CM0_SDK_ROOT}/usr/lib")
@@ -81,6 +91,11 @@ find_program(_CP0_CXX_COMPILER NAMES aarch64-linux-gnu-g++ REQUIRED)
 set(CMAKE_C_COMPILER "${_CP0_C_COMPILER}" CACHE FILEPATH "aarch64 Linux C compiler" FORCE)
 set(CMAKE_CXX_COMPILER "${_CP0_CXX_COMPILER}" CACHE FILEPATH "aarch64 Linux C++ compiler" FORCE)
 set(CMAKE_LIBRARY_ARCHITECTURE "${CM0_MULTIARCH}")
+
+# Cross builds never run from the build tree, so link with the install RPATH
+# directly. This also avoids CMake's install-time relink, which Ninja refuses to
+# do because CMAKE_EXECUTABLE_FORMAT is not detected under this sysroot.
+set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 
 set(CMAKE_FIND_ROOT_PATH "${CMAKE_SYSROOT}" CACHE STRING "Root paths for cross find_* calls" FORCE)
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
