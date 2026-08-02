@@ -2,8 +2,9 @@
 Type=Application
 Name=@APP_DISPLAY_NAME@
 Comment=@APP_PACKAGE_DESCRIPTION@
-Exec=/usr/bin/@PROJECT_NAME@
-Icon=share/images/template.png
+Exec=/usr/share/APPLaunch/bin/@PROJECT_NAME@
 Terminal=false
+Sysplause=true
+Icon=share/images/template.png
 Categories=Utility;
 StartupNotify=false

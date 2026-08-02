@@ -10,9 +10,11 @@ set(APP_DISPLAY_NAME "BruceCardputerZero" CACHE STRING "Human-readable applicati
 set(APP_DEBIAN_REVISION "bruce1" CACHE STRING "Debian package revision/vendor suffix")
 set(APP_DEBIAN_ARCHITECTURE "arm64" CACHE STRING "Debian package architecture")
 set(APP_MAINTAINER "BruceDevices <support@brucegfx.com>" CACHE STRING "Debian package maintainer")
-set(APP_PACKAGE_DESCRIPTION "Bruce security toolkit UI for CardputerZero" CACHE STRING "Debian package summary")
-set(APP_INSTALL_SYSTEMD_SERVICE ON CACHE BOOL "Install a systemd service file for embedded deployments")
-
+# M5Stack APPLaunch packaging rule: EVERY file must live under
+# /usr/share/APPLaunch/ and the app must NOT run as root. APPLaunch launches the
+# binary directly from the .desktop `Exec` (no systemd service), so we ship no
+# service at all - that satisfies both submission checks. Layout mirrors the
+# official examples: bin/<exec>, share/{fonts,images,audio}, applications/*.desktop.
 set(APP_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/package")
 configure_file(
     "${CMAKE_CURRENT_LIST_DIR}/templates/app.desktop.in"
@@ -20,56 +22,39 @@ configure_file(
     @ONLY
 )
 
-if(APP_INSTALL_SYSTEMD_SERVICE)
-    configure_file(
-        "${CMAKE_CURRENT_LIST_DIR}/templates/app.service.in"
-        "${APP_GENERATED_DIR}/${PROJECT_NAME}.service"
-        @ONLY
-    )
-endif()
-
 install(TARGETS ${PROJECT_NAME}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RUNTIME DESTINATION bin
 )
 
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/audio/"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/${APP_NAME}/audio"
+    DESTINATION "share/audio"
     PATTERN ".DS_Store" EXCLUDE
 )
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/${APP_NAME}/fonts"
+    DESTINATION "share/fonts"
     PATTERN ".DS_Store" EXCLUDE
 )
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/${APP_NAME}/images"
+    DESTINATION "share/images"
     PATTERN ".DS_Store" EXCLUDE
-)
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets/images/"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/APPLaunch/share/images"
-    FILES_MATCHING
-    PATTERN "template*.png"
 )
 
 install(FILES "${APP_GENERATED_DIR}/${PROJECT_NAME}.desktop"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/APPLaunch/applications"
+    DESTINATION "applications"
 )
-
-if(APP_INSTALL_SYSTEMD_SERVICE)
-    install(FILES "${APP_GENERATED_DIR}/${PROJECT_NAME}.service"
-        DESTINATION "${CMAKE_INSTALL_LIBDIR}/systemd/system"
-    )
-endif()
 
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
-    DESTINATION "${CMAKE_INSTALL_DOCDIR}"
+    DESTINATION "share/doc/${PROJECT_NAME}"
 )
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/LICENSE.txt"
-    DESTINATION "${CMAKE_INSTALL_DOCDIR}"
+    DESTINATION "share/doc/${PROJECT_NAME}"
     RENAME "third-party-assets-license.txt"
 )
 
 set(CPACK_GENERATOR "DEB")
-set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+# All install() DESTINATIONs above are relative to this prefix, so everything
+# lands under /usr/share/APPLaunch/ as the app store requires.
+set(CPACK_PACKAGING_INSTALL_PREFIX "/usr/share/APPLaunch")
 set(CPACK_OUTPUT_FILE_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/dist")
 set(CPACK_PACKAGE_NAME "${APP_DISPLAY_NAME}")
 set(CPACK_PACKAGE_VENDOR "M5Stack")
@@ -86,9 +71,9 @@ set(CPACK_DEBIAN_PACKAGE_VERSION "${PROJECT_VERSION}-${APP_DEBIAN_REVISION}")
 set(CPACK_DEBIAN_PACKAGE_RELEASE "${APP_DEBIAN_REVISION}")
 set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "${APP_DEBIAN_ARCHITECTURE}")
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${APP_MAINTAINER}")
-set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
+set(CPACK_DEBIAN_PACKAGE_SECTION "APPLaunch")
 set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libstdc++6, libgcc-s1, libfreetype6, libpng16-16, libjpeg62-turbo, zlib1g, libfmt10, curl, netcat-openbsd, smbclient, iw, wireless-tools, bluez, rfkill, iproute2")
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libstdc++6, libgcc-s1, libfreetype6, libpng16-16, libjpeg62-turbo, zlib1g, libfmt10, curl, netcat-openbsd, smbclient, iw, wireless-tools, bluez, rfkill, iproute2, i2c-tools, gpiod, flashrom")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
 set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION TRUE)
 

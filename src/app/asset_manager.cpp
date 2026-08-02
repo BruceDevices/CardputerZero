@@ -53,6 +53,9 @@ AssetManager::AssetManager(std::string app_name, std::filesystem::path cmake_ass
     add_root_if_valid(std::move(cmake_assets_root));
     add_root_if_valid(default_cmake_assets_root());
     add_root_if_valid(APP_SOURCE_ASSETS_ROOT);
+    // Installed layout: the app store requires everything under
+    // /usr/share/APPLaunch/, so fonts/images/audio resolve from share/ there.
+    add_root_if_valid("/usr/share/APPLaunch/share");
     add_root_if_valid(std::filesystem::path{"/usr/share"} / app_name);
 }
 
