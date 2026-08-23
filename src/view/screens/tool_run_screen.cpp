@@ -55,7 +55,7 @@ void ToolRunScreen::build_content(lv_obj_t* content) {
 
     nav_bar().set_icon(2, view::NAV_RUN, run_stop_cb, this);
     nav_bar().set_icon(3, view::NAV_CLEAR, clear_cb, this);
-    configure_common_nav(view::NAV_BACK, back_cb);
+    configure_common_nav(view::NAV_BACK, back_cb, this);
 }
 
 void ToolRunScreen::toggle_run() {

@@ -41,7 +41,9 @@ protected:
     // toggle) so the bottom bar reads the same way everywhere; only the
     // back label/action differs between the root menu ("Quit") and
     // everything else ("Back").
-    void configure_common_nav(const char* back_text, lv_event_cb_t back_cb);
+    // back_user_data defaults to the view model - pass `this` when the screen's
+    // back_cb casts the user data back to its own type, or the cast is a lie.
+    void configure_common_nav(const char* back_text, lv_event_cb_t back_cb, void* back_user_data = nullptr);
 
 private:
     static void theme_toggle_cb(lv_event_t* event);

@@ -22,6 +22,7 @@ set(APP_NAME "${PROJECT_NAME}" CACHE STRING "Application name used for installed
 set(APP_ASSETS_ROOT "" CACHE PATH "Optional runtime assets root. Expected subdirectories include fonts/")
 set(APP_KEY_INPUT_DEVICE "" CACHE STRING "Optional Linux evdev keyboard/keypad device path, e.g. /dev/input/event0")
 set(APP_FRAMEBUFFER_DEVICE "/dev/fb0" CACHE STRING "Linux framebuffer device path used by embedded builds")
+set(APP_CC1101_SPIDEV "/dev/spidev0.0" CACHE STRING "Default spidev node for the M5 CAP CC1101 detect probe")
 set(APP_DRM_DEVICE "/dev/dri/card0" CACHE STRING "Linux DRM device path used when APP_USE_DRM=ON")
 set(APP_DRM_CONNECTOR_ID "-1" CACHE STRING "DRM connector id used when APP_USE_DRM=ON; -1 auto-selects")
 set(APP_USE_DRM OFF CACHE BOOL "Enable LVGL Linux DRM/KMS backend for embedded Linux builds")
@@ -410,6 +411,7 @@ target_compile_definitions(${PROJECT_NAME}_platform
     PUBLIC
         APP_KEY_INPUT_DEVICE="${APP_KEY_INPUT_DEVICE}"
         APP_FRAMEBUFFER_DEVICE="${APP_FRAMEBUFFER_DEVICE}"
+        APP_CC1101_SPIDEV="${APP_CC1101_SPIDEV}"
         APP_DRM_DEVICE="${APP_DRM_DEVICE}"
         APP_DRM_CONNECTOR_ID=${APP_DRM_CONNECTOR_ID}
 )

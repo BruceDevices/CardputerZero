@@ -73,8 +73,8 @@ view::widgets::NavBar& BaseScreen::nav_bar() {
     return *nav_bar_;
 }
 
-void BaseScreen::configure_common_nav(const char* back_text, lv_event_cb_t back_cb) {
-    nav_bar_->set_icon(0, back_text, back_cb, &view_model_);
+void BaseScreen::configure_common_nav(const char* back_text, lv_event_cb_t back_cb, void* back_user_data) {
+    nav_bar_->set_icon(0, back_text, back_cb, back_user_data ? back_user_data : &view_model_);
     nav_bar_->set_icon(4,
                        view_model_.is_dark_mode() ? view::NAV_LIGHT : view::NAV_DARK,
                        theme_toggle_cb,

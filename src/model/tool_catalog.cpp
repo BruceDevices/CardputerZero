@@ -6,7 +6,96 @@
 
 #include "tool_catalog.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <deque>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 namespace model {
+namespace {
+
+// The "Use CC1101 CAP" action re-execs this very binary with --cc1101-detect.
+// The app installs outside PATH (/usr/share/APPLaunch/bin), so resolve the
+// running executable instead of relying on execvp's PATH search; fall back to
+// the bare name if /proc is unavailable.
+std::string self_exe_path() {
+    char buf[4096];
+    const ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        return "bruce_cardputerzero";
+    }
+    buf[n] = '\0';
+    return std::string(buf);
+}
+
+// Where user scripts live: $BRUCE_SCRIPTS_DIR, else ~/.bruce/scripts.
+std::string scripts_dir() {
+    if (const char* env = std::getenv("BRUCE_SCRIPTS_DIR"); env && env[0] != '\0') {
+        return env;
+    }
+    if (const char* home = std::getenv("HOME"); home && home[0] != '\0') {
+        return std::string(home) + "/.bruce/scripts";
+    }
+    return "/root/.bruce/scripts";
+}
+
+// ToolAction stores label/description as const char*, so dynamically discovered
+// script names need storage that outlives catalog init. A function-local deque
+// (stable addresses across push_back, unlike vector) owns them for the process
+// lifetime. ponytail: scan runs once at first catalog access, so new scripts
+// need an app restart - fine for v1; make the catalog rebuildable if that itches.
+std::vector<ToolAction> scan_scripts() {
+    static std::deque<std::string> pool;
+    const std::string dir = scripts_dir();
+
+    std::vector<std::string> names;
+    if (DIR* d = opendir(dir.c_str())) {
+        while (dirent* entry = readdir(d)) {
+            if (entry->d_name[0] == '.') {
+                continue; // skip ., .., and dotfiles
+            }
+            const std::string path = dir + "/" + entry->d_name;
+            struct stat st{};
+            if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+                continue;
+            }
+            if ((st.st_mode & S_IXUSR) == 0) {
+                continue; // executable bit required - run via the script's shebang
+            }
+            names.emplace_back(entry->d_name);
+        }
+        closedir(d);
+    }
+    std::sort(names.begin(), names.end());
+
+    std::vector<ToolAction> actions;
+    for (const auto& name : names) {
+        pool.push_back(name);
+        const char* label = pool.back().c_str();
+        pool.push_back(dir + "/" + name);
+        const std::string& full = pool.back();
+        actions.push_back(ToolAction{label, full.c_str(), {full}});
+    }
+
+    if (actions.empty()) {
+        // The menu can't show an empty runnable category, so guide the user.
+        pool.push_back("No scripts yet");
+        const char* label = pool.back().c_str();
+        pool.push_back("Add an executable script (shebang + chmod +x) to " + dir);
+        const char* desc = pool.back().c_str();
+        actions.push_back(ToolAction{
+            label, desc,
+            {"sh", "-c",
+             "echo 'No executable scripts found in " + dir + "'; "
+             "echo 'Add a script with a shebang, chmod +x, then restart Bruce.'"}});
+    }
+
+    return actions;
+}
+
+} // namespace
 
 // Phosphor-Fill glyph codepoints (official @phosphor-icons "Fill" map, verified
 // against the bundled font). Kept here as data so the model owns nothing from
@@ -55,10 +144,14 @@ const std::vector<ToolCategory>& tool_catalog() {
         },
         {
             "Sub-GHz / RF",
-            "Requires an attached SDR dongle (e.g. RTL-SDR)",
+            "M5 CAP CC1101 over SPI, or an SDR dongle (e.g. RTL-SDR)",
             icon::kRf,
             false,
             {
+                {"Use CC1101 CAP (detect)",
+                 "Select the M5 CAP CC1101: probe it over spidev and confirm the "
+                 "chip responds before using RF tools.",
+                 {self_exe_path(), "--cc1101-detect"}},
                 {"Capture 433MHz (30s)", "timeout 30 rtl_433", {"timeout", "30", "rtl_433"}},
                 {"List SDR devices", "rtl_test -t", {"rtl_test", "-t"}},
             },
@@ -166,6 +259,13 @@ const std::vector<ToolCategory>& tool_catalog() {
                  {"gpioset", "--mode=time", "--sec=5", "gpiochip0", "7=1"}},
                 {"Monitor line 7", "gpiomon gpiochip0 7", {"gpiomon", "gpiochip0", "7"}},
             },
+        },
+        {
+            "Scripts",
+            "Run your own executable scripts from ~/.bruce/scripts (GPIO, RF, net...)",
+            icon::kUart,
+            false,
+            scan_scripts(),
         },
         {
             "About",
