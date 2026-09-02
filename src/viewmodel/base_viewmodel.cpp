@@ -84,12 +84,18 @@ void BaseViewModel::show_about() {
     publish_all();
 }
 
+void BaseViewModel::show_config() {
+    model_.set_current_page(model::AppPage::Config);
+    publish_all();
+}
+
 void BaseViewModel::go_back() {
     switch (model_.current_page()) {
         case model::AppPage::ToolRun:
             show_menu(model_.active_category());
             break;
         case model::AppPage::About:
+        case model::AppPage::Config:
             show_menu(-1);
             break;
         case model::AppPage::Menu:

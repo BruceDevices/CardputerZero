@@ -30,6 +30,10 @@ struct ToolCategory {
     const char* icon; // Phosphor-Fill glyph shown in the main-menu carousel (see ui_const.h)
     bool info_only;
     std::vector<ToolAction> actions;
+    // Opens the interactive settings screen instead of a tool list. Trailing so
+    // the existing positional initializers (which stop at `actions`) still
+    // compile; only the Config category sets it.
+    bool is_config = false;
 };
 
 // Static catalog of every category/action the menu can show. Defined once in

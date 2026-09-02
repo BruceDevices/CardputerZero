@@ -40,6 +40,7 @@ public:
     void show_menu(int category_index);
     void show_tool_run(int category_index, int item_index);
     void show_about();
+    void show_config();
     void go_back();
     void request_quit();
 

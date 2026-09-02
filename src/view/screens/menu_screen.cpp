@@ -185,7 +185,10 @@ void MenuScreen::apply_selection_highlight() {
 void MenuScreen::open_selected() {
     if (carousel_) {
         const auto& category = model::tool_catalog()[selected_index_];
-        if (category.info_only) {
+        if (category.is_config) {
+            view_model().show_config();
+        }
+        else if (category.info_only) {
             view_model().show_about();
         }
         else {

@@ -388,6 +388,34 @@ endif()
 
 
 # ====================================================
+# libgpiod (optional) - CC1101 GDO0 async capture / bit-bang TX
+# ----------------------------------------------------
+# The Sub-GHz RF path reads/drives the CC1101 GDO0 line with libgpiod's C API
+# (kernel edge-event timestamps). When the library is present the platform layer
+# compiles the real GDO0 capture/transmit; otherwise it falls back to safe stubs
+# (APP_HAVE_LIBGPIOD undefined) so desktop/emulator builds still link. The v1 API
+# (gpiod.h with gpiod_line_request_*) is targeted.
+# ====================================================
+if(USE_DESKTOP)
+    find_path(GPIOD_INCLUDE_DIR gpiod.h)
+    find_library(GPIOD_LIBRARY NAMES gpiod)
+else()
+    cm0_find_header(GPIOD_INCLUDE_DIR gpiod.h
+        "${CM0_SYSROOT}/usr/include"
+    )
+    cm0_find_library(GPIOD_LIBRARY gpiod libgpiod.so libgpiod.so.2 libgpiod.a)
+endif()
+
+if(GPIOD_INCLUDE_DIR AND GPIOD_LIBRARY)
+    set(APP_HAVE_LIBGPIOD ON)
+    message(STATUS "libgpiod found (${GPIOD_LIBRARY}) - RF GDO0 capture/TX enabled")
+else()
+    set(APP_HAVE_LIBGPIOD OFF)
+    message(STATUS "libgpiod NOT found - RF GDO0 capture/TX will be stubbed")
+endif()
+
+
+# ====================================================
 # Platform sources
 # ====================================================
 # Create application platform sources and static library
@@ -405,6 +433,7 @@ target_include_directories(${PROJECT_NAME}_platform
     PUBLIC
         ${LVGL_INCLUDE_DIR}
         "${CMAKE_CURRENT_SOURCE_DIR}/src/platform"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf"
 )
 
 target_compile_definitions(${PROJECT_NAME}_platform
@@ -422,6 +451,13 @@ target_link_libraries(${PROJECT_NAME}_platform
         lvgl
         Threads::Threads
 )
+
+# Wire libgpiod into the RF GDO0 capture/TX path when it was found above.
+if(APP_HAVE_LIBGPIOD)
+    target_compile_definitions(${PROJECT_NAME}_platform PUBLIC APP_HAVE_LIBGPIOD=1)
+    target_include_directories(${PROJECT_NAME}_platform PUBLIC ${GPIOD_INCLUDE_DIR})
+    target_link_libraries(${PROJECT_NAME}_platform PUBLIC ${GPIOD_LIBRARY})
+endif()
 
 # ====================================================
 # Model sources

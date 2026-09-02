@@ -113,6 +113,7 @@ constexpr const char* kSpi       = ""; // memory
 constexpr const char* kUart      = ""; // terminal-window
 constexpr const char* kOneWire   = ""; // git-commit
 constexpr const char* kGpio      = ""; // cpu
+constexpr const char* kGear      = ""; // gear (Config)
 } // namespace icon
 
 const std::vector<ToolCategory>& tool_catalog() {
@@ -266,6 +267,14 @@ const std::vector<ToolCategory>& tool_catalog() {
             icon::kUart,
             false,
             scan_scripts(),
+        },
+        {
+            "Config",
+            "Configure module pins/buses (CC1101 today; more as they land)",
+            icon::kGear,
+            false,
+            {},
+            true, // is_config -> opens the settings screen, not a tool list
         },
         {
             "About",
