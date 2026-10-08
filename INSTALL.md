@@ -83,7 +83,7 @@ This copies the `.deb` to the device's home folder. Then SSH in and install:
 
 ```bash
 ssh pi@192.168.1.50
-sudo apt install --no-install-recommends ./BruceCardputerZero_0.1.0_bruce1_arm64.deb
+sudo apt install ./BruceCardputerZero_0.1.0_bruce1_arm64.deb
 ```
 
 ### The manual way
@@ -91,13 +91,21 @@ sudo apt install --no-install-recommends ./BruceCardputerZero_0.1.0_bruce1_arm64
 ```bash
 scp dist/BruceCardputerZero_0.1.0_bruce1_arm64.deb pi@192.168.1.50:~
 ssh pi@192.168.1.50
-sudo apt install --no-install-recommends ./BruceCardputerZero_0.1.0_bruce1_arm64.deb
+sudo apt install ./BruceCardputerZero_0.1.0_bruce1_arm64.deb
 ```
 
-> `apt` installs the app **and** the tools it drives (curl, netcat-openbsd,
-> smbclient, iw, wireless-tools, bluez, rfkill, iproute2). `responder` and
-> `rtl_433` are not in the base package — install them yourself if you want
-> those menu entries to work: `sudo apt install responder rtl-433`.
+> Only the shared libraries are hard dependencies, so the package **always
+> installs cleanly** — a missing CLI tool never blocks it. The tools the menu
+> drives (curl, netcat-openbsd, smbclient, iw, wireless-tools, bluez, rfkill,
+> iproute2, nmap, i2c-tools, gpiod, flashrom) are **Recommends**: `apt install`
+> pulls them in automatically (use `--no-install-recommends` to skip them, or
+> `dpkg -i` — either still installs the app). Heavier attack tooling
+> (aircrack-ng, mdk4, hostapd, arp-scan, dnsmasq, rtl-433) and `responder` are
+> **Suggests** — install per feature, e.g. `sudo apt install aircrack-ng mdk4`.
+> The RFID menu's **PN532** entries use libnfc: `sudo apt install libnfc-bin
+> libnfc-examples`, then point it at your reader in `/etc/nfc/libnfc.conf`
+> (e.g. `device.connstring = "pn532_i2c:/dev/i2c-1"`). The ST25R3916 entries use
+> the M5 CAP directly and need no extra packages.
 
 ---
 

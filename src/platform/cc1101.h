@@ -32,4 +32,26 @@ std::string cc1101_detect_report(const std::string& spidev_path, bool& detected)
 // report to stdout and returns 0 when a CC1101 responded, 1 otherwise.
 int cc1101_detect_main(int argc, char** argv);
 
+// --- ST25R3916 (NFC/RFID half of the M5 RF+NFC CAP) ---------------------------
+
+// SPI header byte to READ an ST25R3916 register in space A (0x00-0x3F): the top
+// two mode bits must be 0b01, i.e. addr | 0x40. IC_IDENTITY lives at 0x3F, so
+// the identity read header is 0x7F. constexpr so the self-check can pin framing
+// without hardware. (Space-B registers, not needed for detection, use a 0xFB
+// prefix - deliberately out of scope here.)
+constexpr uint8_t st25r_reg_read_header(uint8_t addr) {
+    return static_cast<uint8_t>((addr & 0x3F) | 0x40);
+}
+
+// Probe the M5 CAP ST25R3916 over spidev and return a human-readable report.
+// `detected` is set true only when the IC_IDENTITY register reports the
+// ST25R3916 device type. Detection is read-only (static ID register, readable
+// after power-on); it does not enable the RF field.
+std::string st25r_detect_report(const std::string& spidev_path, bool& detected);
+
+// Entry point for the app's `--st25r-detect [spidev]` subcommand. Same arg rules
+// as cc1101_detect_main but with $ST25R_SPIDEV / APP_ST25R_SPIDEV. Returns 0 when
+// an ST25R3916 responded, 1 otherwise.
+int st25r_detect_main(int argc, char** argv);
+
 } // namespace platform

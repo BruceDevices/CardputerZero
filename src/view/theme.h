@@ -30,4 +30,13 @@ struct ThemePalette {
 ThemePalette palette(bool dark_mode);
 void apply_lvgl_theme(lv_display_t* display, bool dark_mode);
 
+// --- Accent color selection (backed by model::accent_presets) ----------------
+
+// Current accent index into model::accent_presets().
+int accent_index();
+// Select an accent (clamped to the valid range) and persist it to ~/.bruce.
+void set_accent(int index);
+// Load the persisted accent at startup; defaults to 0 (Bruce purple) if unset.
+void load_accent();
+
 } // namespace view

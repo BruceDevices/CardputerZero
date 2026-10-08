@@ -20,6 +20,7 @@ BaseViewModel::BaseViewModel()
       dark_mode_subject_(model_.dark_mode()),
       current_page_subject_(page_to_int(model_.current_page())),
       nav_token_subject_(0),
+      theme_epoch_subject_(0),
       quit_requested_subject_(false) {}
 
 BaseViewModel::~BaseViewModel() = default;
@@ -38,6 +39,10 @@ lv_subject_t* BaseViewModel::current_page_subject() {
 
 lv_subject_t* BaseViewModel::nav_token_subject() {
     return nav_token_subject_.native();
+}
+
+lv_subject_t* BaseViewModel::theme_epoch_subject() {
+    return theme_epoch_subject_.native();
 }
 
 lv_subject_t* BaseViewModel::quit_requested_subject() {
@@ -102,6 +107,13 @@ void BaseViewModel::go_back() {
 
 void BaseViewModel::request_quit() {
     quit_requested_subject_.set(true);
+}
+
+void BaseViewModel::refresh_theme() {
+    // Bump the theme epoch (app re-applies the LVGL theme) and the nav token
+    // (ScreenManager rebuilds the current screen with the new palette colors).
+    theme_epoch_subject_.set(theme_epoch_subject_.value() + 1);
+    nav_token_subject_.set(nav_token_subject_.value() + 1);
 }
 
 void BaseViewModel::publish_all() {

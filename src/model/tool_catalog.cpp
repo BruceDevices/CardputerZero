@@ -7,9 +7,12 @@
 #include "tool_catalog.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <dirent.h>
+#include <fstream>
+#include <string>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -95,7 +98,140 @@ std::vector<ToolAction> scan_scripts() {
     return actions;
 }
 
+// --- Nmap guided flow: discover hosts -> pick host -> Fast/Full port scan -----
+//
+// The menu is a flat two-level list, so the drill-down is driven by two tiny
+// state files under /tmp/bruce-nmap: `hosts` (one live IP per line, written by
+// the discovery step) and `selected` (the host the user tapped). The "Nmap"
+// category's action list is rebuilt from this state on every menu entry
+// (refresh_dynamic_categories), and host/"back" rows carry an empty argv so the
+// menu treats them as navigation (on_navigation_action) rather than tools.
+
+std::string nmap_dir() { return "/tmp/bruce-nmap"; }
+
+std::string read_first_line(const std::string& path) {
+    std::ifstream in(path);
+    std::string line;
+    std::getline(in, line);
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+        line.pop_back();
+    }
+    return line;
+}
+
+std::vector<std::string> read_lines(const std::string& path) {
+    std::vector<std::string> out;
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+            line.pop_back();
+        }
+        if (!line.empty()) {
+            out.push_back(line);
+        }
+    }
+    return out;
+}
+
+void write_file(const std::string& path, const std::string& content) {
+    std::ofstream(path) << content;
+}
+
+std::vector<ToolAction> build_nmap_actions() {
+    // Owns the dynamically built label strings (ToolAction::label is const char*).
+    // Cleared each rebuild; safe because screens copy label text when they build,
+    // and no rebuild happens while a ToolRunScreen is live (see menu_screen.cpp).
+    static std::deque<std::string> pool;
+    pool.clear();
+    auto own = [](std::string s) -> const char* {
+        pool.push_back(std::move(s));
+        return pool.back().c_str();
+    };
+
+    const std::string dir = nmap_dir();
+    const std::string selected = read_first_line(dir + "/selected");
+
+    std::vector<ToolAction> acts;
+
+    if (selected.empty()) {
+        // Step 1: discover hosts on the local subnet.
+        acts.push_back(ToolAction{
+            "1. Scan / refresh hosts",
+            "Ping-sweep the local subnet for live hosts, then go Back and pick one.",
+            {"sh", "-c",
+             "mkdir -p " + dir + "; "
+             "net=$(ip -o -f inet addr show | awk '$2!=\"lo\"{print $4; exit}'); "
+             "if [ -z \"$net\" ]; then echo 'no network (connect Wi-Fi first)'; exit 1; fi; "
+             "echo \"Discovering hosts on $net ...\"; "
+             "rm -f " + dir + "/selected; "
+             "nmap -sn \"$net\" -oG - 2>/dev/null | awk '/Status: Up/{print $2}' | tee " + dir + "/hosts; "
+             "echo; echo 'Done. Go Back, pick a host, then choose Fast or Full.'"}});
+
+        // Step 2: one navigation row per discovered host (empty argv).
+        const auto hosts = read_lines(dir + "/hosts");
+        if (hosts.empty()) {
+            acts.push_back(ToolAction{
+                "(no hosts yet - run Scan above)",
+                "Run 'Scan / refresh hosts' first; discovered hosts appear here.",
+                {"sh", "-c", "echo 'Run Scan / refresh hosts first.'"}});
+        } else {
+            for (const auto& h : hosts) {
+                acts.push_back(ToolAction{
+                    own("Host " + h + "  >  choose scan"),
+                    "Select this host, then pick Fast or Full port scan.",
+                    {}}); // empty argv => navigation row
+            }
+        }
+    } else {
+        // Step 3: a host is selected - offer Fast / Full, plus a way back.
+        acts.push_back(ToolAction{
+            "< Back to host list",
+            "Clear the selected host and choose another.",
+            {}}); // navigation row
+        acts.push_back(ToolAction{
+            own("Fast scan " + selected + "  (top 100 ports)"),
+            "nmap -F -T4: quick scan of the most common ports.",
+            {"nmap", "-F", "-T4", selected}});
+        acts.push_back(ToolAction{
+            own("Full scan " + selected + "  (all 65535 ports)"),
+            "nmap -p- -T4: every TCP port - thorough but slower.",
+            {"nmap", "-p-", "-T4", selected}});
+    }
+
+    return acts;
+}
+
+std::vector<ToolAction> build_theme_actions() {
+    // Names are string literals (static lifetime), so no owning pool is needed.
+    // Empty argv marks each row as a navigation row: selecting it applies the
+    // accent via the view layer instead of launching a tool (see menu_screen).
+    std::vector<ToolAction> acts;
+    for (const auto& preset : accent_presets()) {
+        acts.push_back(ToolAction{preset.name, "Set the UI accent color (applies instantly).", {}});
+    }
+    return acts;
+}
+
 } // namespace
+
+const std::vector<AccentPreset>& accent_presets() {
+    static const std::vector<AccentPreset> presets = {
+        {"Purple (Bruce)", 0xB026FF, 0xD48BFF},
+        {"Violet",         0x7C4DFF, 0xB39DFF},
+        {"Blue",           0x2B6BFF, 0x7AA6FF},
+        {"Cyan",           0x00C8D4, 0x6FF0F7},
+        {"Teal",           0x1BC4A6, 0x79E8D4},
+        {"Green",          0x24D17A, 0x7FF0B5},
+        {"Lime",           0x9CCC00, 0xCDF06A},
+        {"Yellow",         0xF2C200, 0xFFE066},
+        {"Orange",         0xFF8A1F, 0xFFB366},
+        {"Red",            0xFF3B30, 0xFF8A82},
+        {"Pink",           0xFF3EA5, 0xFF9FD0},
+        {"White",          0xD7D7E4, 0xFFFFFF},
+    };
+    return presets;
+}
 
 // Phosphor-Fill glyph codepoints (official @phosphor-icons "Fill" map, verified
 // against the bundled font). Kept here as data so the model owns nothing from
@@ -104,6 +240,14 @@ namespace icon {
 constexpr const char* kWifi      = ""; // wifi-high
 constexpr const char* kBluetooth = ""; // bluetooth
 constexpr const char* kRf        = ""; // broadcast
+constexpr const char* kNfc       = "\U0000EBB6"; // scan (ST25R3916 NFC/RFID)
+constexpr const char* kScan      = "\U0000EBE0"; // list-magnifying-glass (nmap)
+constexpr const char* kIr        = "\U0000E754"; // television (infrared)
+constexpr const char* kGps       = "\U0000E316"; // map-pin (GPS)
+constexpr const char* kEth       = "\U0000EB5A"; // plugs-connected (ethernet)
+constexpr const char* kFiles     = "\U0000E260"; // folders (files)
+constexpr const char* kClock     = "\U0000E19A"; // clock (system/clock)
+constexpr const char* kPalette   = "\U0000E6C8"; // palette (theme colors)
 constexpr const char* kNetwork   = ""; // network
 constexpr const char* kStorage   = ""; // hard-drives
 constexpr const char* kShield    = ""; // shield-warning
@@ -115,16 +259,59 @@ constexpr const char* kOneWire   = ""; // git-commit
 constexpr const char* kGpio      = ""; // cpu
 } // namespace icon
 
-const std::vector<ToolCategory>& tool_catalog() {
-    static const std::vector<ToolCategory> catalog = {
+// Mutable backing store so data-driven categories (Nmap) can be rebuilt in
+// place; tool_catalog() hands out a const view of it.
+std::vector<ToolCategory>& mutable_catalog() {
+    static std::vector<ToolCategory> catalog = {
         {
             "Wi-Fi",
-            "Scan, inspect and toggle the Wi-Fi radio",
+            "Scan, recon and 802.11 attacks (wlan0; monitor mode = wlan0mon)",
             icon::kWifi,
             false,
             {
+                // --- recon ---
                 {"Scan nearby networks", "iw dev wlan0 scan", {"iw", "dev", "wlan0", "scan"}},
+                {"List SSIDs + signal", "iw scan | ssid/signal/freq",
+                 {"sh", "-c",
+                  "iw dev wlan0 scan 2>/dev/null | grep -E 'SSID:|signal:|freq:' || "
+                  "echo 'scan failed (is wlan0 up? try Enable Wi-Fi radio)'"}},
+                {"Channel usage (APs/chan)", "scan grouped by channel",
+                 {"sh", "-c",
+                  "iw dev wlan0 scan 2>/dev/null | awk '/freq:/{print $2}' | sort -n | uniq -c | "
+                  "awk '{printf \"  %s MHz: %s APs\\n\", $2, $1}' || echo 'scan failed'"}},
                 {"Show Wi-Fi status", "ip addr show wlan0", {"ip", "addr", "show", "wlan0"}},
+                {"Scan LAN hosts (arp-scan)", "arp-scan --localnet",
+                 {"sh", "-c", "arp-scan --localnet 2>&1 || echo 'needs arp-scan + root'"}},
+                {"Scan LAN hosts (nmap)", "nmap -sn <subnet>",
+                 {"sh", "-c",
+                  "nmap -sn \"$(ip -o -f inet addr show wlan0 | awk '{print $4}')\" 2>&1 || "
+                  "echo 'needs nmap; is wlan0 connected?'"}},
+
+                // --- monitor mode (prerequisite for the attacks below) ---
+                {"Monitor mode ON (airmon-ng)", "airmon-ng check kill; start wlan0",
+                 {"sh", "-c", "airmon-ng check kill 2>&1; airmon-ng start wlan0 2>&1 || "
+                  "echo 'needs aircrack-ng + root'"}},
+                {"Monitor mode OFF", "airmon-ng stop wlan0mon; restart NM",
+                 {"sh", "-c", "airmon-ng stop wlan0mon 2>&1; systemctl restart NetworkManager 2>/dev/null; "
+                  "echo done"}},
+                {"Airodump scan (APs+clients)", "airodump-ng wlan0mon",
+                 {"sh", "-c", "airodump-ng wlan0mon 2>&1 || echo 'enable Monitor mode first'"}},
+                {"Capture handshakes -> /tmp", "airodump-ng -w /tmp/bruce-wifi wlan0mon",
+                 {"sh", "-c", "airodump-ng -w /tmp/bruce-wifi wlan0mon 2>&1 || "
+                  "echo 'enable Monitor mode first'"}},
+
+                // --- attacks (authorized testing only) ---
+                {"Deauth flood (mdk4)", "mdk4 wlan0mon d",
+                 {"sh", "-c", "mdk4 wlan0mon d 2>&1 || echo 'needs mdk4 + Monitor mode'"}},
+                {"Beacon spam (mdk4)", "mdk4 wlan0mon b -s 100",
+                 {"sh", "-c", "mdk4 wlan0mon b -s 100 2>&1 || echo 'needs mdk4 + Monitor mode'"}},
+                {"Rogue open AP (hostapd)", "open AP 'Free WiFi' on wlan0",
+                 {"sh", "-c",
+                  "cfg=$(mktemp); printf 'interface=wlan0\\nssid=Free WiFi\\nchannel=6\\n"
+                  "hw_mode=g\\n' > \"$cfg\"; echo \"starting open AP (Ctrl-C/back to stop)\"; "
+                  "hostapd \"$cfg\" 2>&1 || echo 'needs hostapd + root; disable Monitor mode first'"}},
+
+                // --- radio toggles ---
                 {"Enable Wi-Fi radio", "rfkill unblock wifi", {"rfkill", "unblock", "wifi"}},
                 {"Disable Wi-Fi radio", "rfkill block wifi", {"rfkill", "block", "wifi"}},
             },
@@ -138,8 +325,88 @@ const std::vector<ToolCategory>& tool_catalog() {
                 {"Scan for BLE devices (15s)", "timeout 15 hcitool lescan",
                  {"timeout", "15", "hcitool", "lescan"}},
                 {"Show adapter info", "bluetoothctl show", {"bluetoothctl", "show"}},
+                {"BLE Spam: Apple pairing", "Broadcast Apple Continuity pairing popups",
+                 {self_exe_path(), "--ble-spam", "apple"}},
+                {"BLE Spam: Apple action", "Broadcast Apple NearbyAction setup modals",
+                 {self_exe_path(), "--ble-spam", "apple-action"}},
+                {"BLE Spam: Android (Fast Pair)", "Broadcast Google Fast Pair popups",
+                 {self_exe_path(), "--ble-spam", "google"}},
+                {"BLE Spam: Samsung", "Broadcast Samsung EasySetup (Watch/Buds) popups",
+                 {self_exe_path(), "--ble-spam", "samsung"}},
+                {"BLE Spam: Windows (Swift Pair)", "Broadcast Microsoft Swift Pair toasts",
+                 {self_exe_path(), "--ble-spam", "microsoft"}},
+                {"BLE Spam: All (rotate)", "Rotate through all BLE spam families",
+                 {self_exe_path(), "--ble-spam", "all"}},
                 {"Enable Bluetooth radio", "rfkill unblock bluetooth", {"rfkill", "unblock", "bluetooth"}},
                 {"Disable Bluetooth radio", "rfkill block bluetooth", {"rfkill", "block", "bluetooth"}},
+            },
+        },
+        {
+            "RFID",
+            "13.56MHz NFC - M5 ST25R3916 CAP (native) or a PN532 reader (via libnfc)",
+            icon::kNfc,
+            false,
+            {
+                // --- M5 RF+NFC CAP: ST25R3916 over spidev (native driver) ---
+                {"ST25R: Read tag (UID/ATQA/SAK)",
+                 "Power the field and read a 13.56MHz ISO14443A tag's UID, ATQA and SAK.",
+                 {self_exe_path(), "--rfid-read"}},
+                {"ST25R: Dump tag (Type-2 / NTAG)",
+                 "Read UID then dump the data pages of a Type-2 tag (NTAG/Ultralight).",
+                 {self_exe_path(), "--rfid-dump"}},
+                {"ST25R: Clone -> emulate tag",
+                 "Read a tag's UID, then emulate it as an NFC-A target until you go back.",
+                 {self_exe_path(), "--rfid-clone"}},
+                {"ST25R: Detect chip",
+                 "Probe the ST25R3916 over spidev (reads IC_IDENTITY); verifies CAP seating.",
+                 {self_exe_path(), "--st25r-detect"}},
+
+                // --- PN532 reader over I2C/SPI/UART (via libnfc) ---
+                {"PN532: Scan via I2C (/dev/i2c-1)",
+                 "Test a PN532 wired on I2C bus 1 and read any tag present (nfc-list).",
+                 {"sh", "-c",
+                  "LIBNFC_DEFAULT_DEVICE=pn532_i2c:/dev/i2c-1 nfc-list -v 2>&1 || "
+                  "echo 'No PN532 on I2C bus 1. Check wiring / install libnfc-bin.'"}},
+                {"PN532: Scan via UART (/dev/ttyS0)",
+                 "Test a PN532 wired on UART and read any tag present (nfc-list).",
+                 {"sh", "-c",
+                  "LIBNFC_DEFAULT_DEVICE=pn532_uart:/dev/ttyS0 nfc-list -v 2>&1 || "
+                  "echo 'No PN532 on ttyS0. Check wiring/baud / install libnfc-bin.'"}},
+                {"PN532: Poll for tag (configured)",
+                 "nfc-poll using the device in /etc/nfc/libnfc.conf or $LIBNFC_DEFAULT_DEVICE.",
+                 {"sh", "-c",
+                  "nfc-poll 2>&1 || echo 'No PN532 found. Use a Scan entry to test the bus, "
+                  "or set /etc/nfc/libnfc.conf. Needs libnfc-bin.'"}},
+                {"PN532: Dump MIFARE Classic",
+                 "nfc-mfclassic read (default keys) to /tmp/bruce-mfc.mfd.",
+                 {"sh", "-c",
+                  "nfc-mfclassic r a /tmp/bruce-mfc.mfd 2>&1 || "
+                  "echo 'Needs a PN532 + MIFARE Classic tag (default keys). Install libnfc-bin.'"}},
+                {"PN532: Dump Ultralight/NTAG",
+                 "nfc-mfultralight read to /tmp/bruce-ul.mfd.",
+                 {"sh", "-c",
+                  "nfc-mfultralight r /tmp/bruce-ul.mfd 2>&1 || "
+                  "echo 'Needs a PN532 + Ultralight/NTAG tag. Install libnfc-bin.'"}},
+                {"PN532: Emulate NDEF tag",
+                 "Emulate a Type-2 NDEF tag (nfc-emulate-forum-tag2).",
+                 {"sh", "-c",
+                  "nfc-emulate-forum-tag2 2>&1 || "
+                  "echo 'Needs a PN532. nfc-emulate-forum-tag2 is in libnfc-examples.'"}},
+                {"PN532: Emulate UID 01:02:03:04",
+                 "Emulate a tag advertising a fixed UID (nfc-emulate-uid).",
+                 {"sh", "-c",
+                  "nfc-emulate-uid 01020304 2>&1 || "
+                  "echo 'Needs a PN532. nfc-emulate-uid is in libnfc-examples.'"}},
+                {"PN532: Setup / buses help",
+                 "How to point libnfc at your PN532, and list available buses.",
+                 {"sh", "-c",
+                  "echo 'PN532 via libnfc. Set the device persistently in /etc/nfc/libnfc.conf:'; "
+                  "echo '  device.connstring = \"pn532_i2c:/dev/i2c-1\"   (or pn532_uart:/dev/ttyS0,'; "
+                  "echo '   pn532_spi:/dev/spidev0.0:500000)  and  allow_autoscan = true'; echo; "
+                  "echo 'I2C buses:'; ls /dev/i2c-* 2>/dev/null || echo '  (none; enable i2c overlay)'; "
+                  "echo 'SPI:'; ls /dev/spidev* 2>/dev/null || echo '  (none)'; "
+                  "echo 'Serial:'; ls /dev/ttyS* /dev/ttyUSB* /dev/ttyAMA* 2>/dev/null || echo '  (none)'; "
+                  "echo; nfc-list -v 2>&1 | head -4 || echo 'install libnfc-bin'"}},
             },
         },
         {
@@ -154,6 +421,10 @@ const std::vector<ToolCategory>& tool_catalog() {
                  {self_exe_path(), "--cc1101-detect"}},
                 {"Capture 433MHz (30s)", "timeout 30 rtl_433", {"timeout", "30", "rtl_433"}},
                 {"List SDR devices", "rtl_test -t", {"rtl_test", "-t"}},
+                {"FM radio RX 100.0MHz (RTL-SDR)", "rtl_fm | aplay",
+                 {"sh", "-c",
+                  "rtl_fm -f 100M -M wbfm -s 200k -r 48k 2>/dev/null | aplay -r 48k -f S16_LE 2>&1 || "
+                  "echo 'needs an RTL-SDR dongle + alsa-utils (aplay)'"}},
             },
         },
         {
@@ -172,6 +443,13 @@ const std::vector<ToolCategory>& tool_catalog() {
                  {"sh", "-c", "nc -zv \"$(ip route | awk '/default/ {print $3; exit}')\" 1-1024"}},
                 {"Start netcat listener :4444", "nc -lvp 4444", {"nc", "-lvp", "4444"}},
             },
+        },
+        {
+            "Nmap",
+            "Guided scan: discover hosts, pick one, then Fast or Full port scan",
+            icon::kScan,
+            false,
+            build_nmap_actions(),
         },
         {
             "SMB Client",
@@ -228,10 +506,28 @@ const std::vector<ToolCategory>& tool_catalog() {
             {
                 {"List serial ports", "ls /dev/ttyS* ...",
                  {"sh", "-c", "ls -l /dev/ttyS* /dev/ttyAMA* /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || echo 'no serial ports found'"}},
-                {"Monitor ttyS0 @115200", "stty 115200; cat /dev/ttyS0",
-                 {"sh", "-c", "stty -F /dev/ttyS0 115200 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
+                {"Monitor ttyS0 @1200", "stty 1200; cat /dev/ttyS0",
+                 {"sh", "-c", "stty -F /dev/ttyS0 1200 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
+                {"Monitor ttyS0 @2400", "stty 2400; cat /dev/ttyS0",
+                 {"sh", "-c", "stty -F /dev/ttyS0 2400 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
+                {"Monitor ttyS0 @4800", "stty 4800; cat /dev/ttyS0",
+                 {"sh", "-c", "stty -F /dev/ttyS0 4800 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
                 {"Monitor ttyS0 @9600", "stty 9600; cat /dev/ttyS0",
                  {"sh", "-c", "stty -F /dev/ttyS0 9600 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
+                {"Monitor ttyS0 @19200", "stty 19200; cat /dev/ttyS0",
+                 {"sh", "-c", "stty -F /dev/ttyS0 19200 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
+                {"Monitor ttyS0 @38400", "stty 38400; cat /dev/ttyS0",
+                 {"sh", "-c", "stty -F /dev/ttyS0 38400 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
+                {"Monitor ttyS0 @57600", "stty 57600; cat /dev/ttyS0",
+                 {"sh", "-c", "stty -F /dev/ttyS0 57600 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
+                {"Monitor ttyS0 @115200", "stty 115200; cat /dev/ttyS0",
+                 {"sh", "-c", "stty -F /dev/ttyS0 115200 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
+                {"Monitor ttyS0 @230400", "stty 230400; cat /dev/ttyS0",
+                 {"sh", "-c", "stty -F /dev/ttyS0 230400 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
+                {"Monitor ttyS0 @460800", "stty 460800; cat /dev/ttyS0",
+                 {"sh", "-c", "stty -F /dev/ttyS0 460800 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
+                {"Monitor ttyS0 @921600", "stty 921600; cat /dev/ttyS0",
+                 {"sh", "-c", "stty -F /dev/ttyS0 921600 raw -echo 2>/dev/null; cat /dev/ttyS0"}},
             },
         },
         {
@@ -261,11 +557,110 @@ const std::vector<ToolCategory>& tool_catalog() {
             },
         },
         {
+            "Infrared",
+            "Send/receive IR via a gpio-ir overlay (/dev/lirc*) - needs an IR LED/RX",
+            icon::kIr,
+            false,
+            {
+                {"List IR devices", "ls /dev/lirc*",
+                 {"sh", "-c", "ls -l /dev/lirc* 2>/dev/null || "
+                  "echo 'no /dev/lirc* - enable the gpio-ir / gpio-ir-tx overlay'"}},
+                {"IR receive (record 15s)", "ir-ctl -r -d /dev/lirc0",
+                 {"sh", "-c", "timeout 15 ir-ctl -r -d /dev/lirc1 2>&1 || timeout 15 ir-ctl -r "
+                  "-d /dev/lirc0 2>&1 || echo 'needs an IR receiver + v4l-utils (ir-ctl)'"}},
+                {"IR send last capture", "ir-ctl -d /dev/lirc0 --send=/tmp/ir.txt",
+                 {"sh", "-c", "[ -f /tmp/ir.txt ] && ir-ctl -d /dev/lirc0 --send=/tmp/ir.txt 2>&1 || "
+                  "echo 'capture first (redirect IR receive to /tmp/ir.txt), or use lirc/irsend'"}},
+                {"TV-B-Gone (note)", "power-off code blast needs a code DB",
+                 {"sh", "-c", "echo 'TV-B-Gone needs a per-brand IR code set. Capture codes with IR "
+                  "receive, save under ~/.bruce/scripts as a sender script, then run from Scripts.'"}},
+            },
+        },
+        {
+            "GPS",
+            "Read a GPS on serial/USB via gpsd; feed wardriving",
+            icon::kGps,
+            false,
+            {
+                {"GPS fix (gpspipe)", "gpspipe -w (gpsd)",
+                 {"sh", "-c", "timeout 20 gpspipe -w 2>&1 || echo 'needs gpsd + a GPS (gpsd-clients). "
+                  "Start: sudo gpsd /dev/ttyUSB0 -F /var/run/gpsd.sock'"}},
+                {"Raw NMEA (ttyUSB0 @9600)", "stty 9600; cat /dev/ttyUSB0",
+                 {"sh", "-c", "stty -F /dev/ttyUSB0 9600 raw -echo 2>/dev/null; timeout 15 cat /dev/ttyUSB0 "
+                  "2>&1 || echo 'no GPS on ttyUSB0 (try ttyS0/ttyACM0)'"}},
+                {"Wardriving -> WiGLE CSV",
+                 "Scan Wi-Fi + GPS fix and log APs in WiGLE format (upload to wigle.net). "
+                 "Needs gpsd running and wlan0 up.",
+                 {self_exe_path(), "--wardrive", "wlan0"}},
+            },
+        },
+        {
+            "Ethernet",
+            "Wired-LAN recon and L2 attacks on eth0 - authorized use only",
+            icon::kEth,
+            false,
+            {
+                {"Scan hosts (arp-scan eth0)", "arp-scan -I eth0 --localnet",
+                 {"sh", "-c", "arp-scan -I eth0 --localnet 2>&1 || echo 'needs arp-scan + eth0 up + root'"}},
+                {"MAC flood (macof)", "macof -i eth0",
+                 {"sh", "-c", "macof -i eth0 2>&1 || echo 'needs dsniff (macof) + root'"}},
+                {"DHCP starvation (dhcpstarv)", "dhcpstarv -i eth0",
+                 {"sh", "-c", "dhcpstarv -i eth0 2>&1 || echo 'needs dhcpstarv (or yersinia) + root'"}},
+            },
+        },
+        {
+            "Files",
+            "Browse storage and serve files over HTTP (WebUI)",
+            icon::kFiles,
+            false,
+            {
+                {"List home + removable", "ls ~ /media /mnt",
+                 {"sh", "-c", "echo '== home =='; ls -la ~ 2>/dev/null; echo '== /media =='; "
+                  "ls -la /media/* 2>/dev/null; echo '== /mnt =='; ls -la /mnt 2>/dev/null"}},
+                {"Disk usage", "df -h", {"df", "-h"}},
+                {"WebUI: serve home :8080", "python3 -m http.server 8080",
+                 {"sh", "-c", "cd ~ && echo \"Serving $PWD at http://$(hostname -I 2>/dev/null | "
+                  "awk '{print $1}'):8080 (Ctrl-C/back to stop)\"; python3 -m http.server 8080 2>&1 || "
+                  "echo 'needs python3'"}},
+            },
+        },
+        {
+            "System / Clock",
+            "Clock, timer, uptime and handy local tools",
+            icon::kClock,
+            false,
+            {
+                {"Clock (live)", "date every second",
+                 {"sh", "-c", "while true; do printf '\\r%s' \"$(date '+%Y-%m-%d %H:%M:%S')\"; sleep 1; done"}},
+                {"Countdown timer (60s)", "sleep 60; beep",
+                 {"sh", "-c", "for i in $(seq 60 -1 1); do printf '\\r%2ds remaining ' \"$i\"; sleep 1; done; "
+                  "echo; echo 'Time up!'"}},
+                {"Uptime + load", "uptime", {"uptime"}},
+                {"QR code (this device URL)", "qrencode -t UTF8",
+                 {"sh", "-c", "ip=$(hostname -I 2>/dev/null | awk '{print $1}'); "
+                  "qrencode -t UTF8 \"http://$ip:8080\" 2>&1 || echo 'needs qrencode'"}},
+                {"Microphone record (5s)", "arecord -d 5 /tmp/rec.wav",
+                 {"sh", "-c", "arecord -d 5 -f cd /tmp/bruce-rec.wav 2>&1 && echo 'saved /tmp/bruce-rec.wav' || "
+                  "echo 'needs a mic + alsa-utils (arecord)'"}},
+                {"iButton read (1-Wire ROM)", "cat /sys/bus/w1/devices/*/id",
+                 {"sh", "-c", "for d in /sys/bus/w1/devices/*/; do n=$(basename \"$d\"); "
+                  "[ \"$n\" != w1_bus_master1 ] && echo \"iButton/1-Wire: $n\"; done 2>/dev/null || "
+                  "echo 'no 1-Wire device (needs w1-gpio overlay + an iButton)'"}},
+            },
+        },
+        {
             "Scripts",
             "Run your own executable scripts from ~/.bruce/scripts (GPIO, RF, net...)",
             icon::kUart,
             false,
             scan_scripts(),
+        },
+        {
+            "Theme",
+            "Pick the UI accent color - applies instantly",
+            icon::kPalette,
+            false,
+            build_theme_actions(),
         },
         {
             "About",
@@ -276,6 +671,44 @@ const std::vector<ToolCategory>& tool_catalog() {
         },
     };
     return catalog;
+}
+
+const std::vector<ToolCategory>& tool_catalog() {
+    return mutable_catalog();
+}
+
+void refresh_dynamic_categories() {
+    for (auto& category : mutable_catalog()) {
+        if (std::string(category.label) == "Nmap") {
+            category.actions = build_nmap_actions();
+        }
+    }
+}
+
+void on_navigation_action(int category_index, int item_index) {
+    if (category_index < 0) {
+        return;
+    }
+    const auto& catalog = mutable_catalog();
+    if (category_index >= static_cast<int>(catalog.size()) ||
+        std::string(catalog[static_cast<size_t>(category_index)].label) != "Nmap") {
+        return;
+    }
+
+    // Mirror build_nmap_actions()'s row layout to map the tapped row to an action.
+    const std::string dir = nmap_dir();
+    const std::string selected = read_first_line(dir + "/selected");
+    if (selected.empty()) {
+        // Row 0 is "Scan" (runnable); rows >= 1 are discovered hosts.
+        const auto hosts = read_lines(dir + "/hosts");
+        const int host = item_index - 1;
+        if (host >= 0 && host < static_cast<int>(hosts.size())) {
+            write_file(dir + "/selected", hosts[static_cast<size_t>(host)]);
+        }
+    } else if (item_index == 0) {
+        // Row 0 is "Back to host list".
+        std::remove((dir + "/selected").c_str());
+    }
 }
 
 } // namespace model

@@ -73,7 +73,16 @@ set(CPACK_DEBIAN_PACKAGE_ARCHITECTURE "${APP_DEBIAN_ARCHITECTURE}")
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${APP_MAINTAINER}")
 set(CPACK_DEBIAN_PACKAGE_SECTION "APPLaunch")
 set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libstdc++6, libgcc-s1, libfreetype6, libpng16-16, libjpeg62-turbo, zlib1g, libfmt10, curl, netcat-openbsd, smbclient, iw, wireless-tools, bluez, rfkill, iproute2, i2c-tools, gpiod, flashrom")
+# Depends = only the shared libraries the executable actually links against. The
+# app must not start without these.
+set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libstdc++6, libgcc-s1, libfreetype6, libpng16-16, libjpeg62-turbo, zlib1g, libfmt10")
+# Recommends = the CLI tools the menu shells out to. The app runs fine without
+# any of them (each menu entry just fails with a hint), so a missing tool must
+# never block installation - which a hard Depends does under `dpkg -i` / offline
+# apt. `apt install ./pkg.deb` still pulls these in automatically by default.
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "iproute2, iw, wireless-tools, rfkill, bluez, curl, netcat-openbsd, nmap, smbclient, i2c-tools, gpiod, flashrom")
+# Suggests = heavier / attack tooling the user opts into per feature.
+set(CPACK_DEBIAN_PACKAGE_SUGGESTS "aircrack-ng, mdk4, hostapd, arp-scan, dnsmasq, rtl-433, libnfc-bin, libnfc-examples, gpsd, gpsd-clients, v4l-utils, lirc, qrencode, alsa-utils, dsniff, kismet")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
 set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION TRUE)
 

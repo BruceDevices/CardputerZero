@@ -53,6 +53,22 @@ void dark_mode_theme_observer(lv_observer_t* observer, lv_subject_t* subject) {
     }
 }
 
+// Pairs the display with the view model so the accent/theme observer can
+// re-apply the LVGL theme using the current dark-mode state.
+struct ThemeContext {
+    lv_display_t* display;
+    viewmodel::BaseViewModel* view_model;
+};
+
+// Re-apply the LVGL theme when the theme epoch bumps (e.g. accent color change).
+void theme_epoch_observer(lv_observer_t* observer, lv_subject_t* subject) {
+    LV_UNUSED(subject);
+    auto* ctx = static_cast<ThemeContext*>(lv_observer_get_user_data(observer));
+    if (ctx && ctx->display && ctx->view_model) {
+        view::apply_lvgl_theme(ctx->display, ctx->view_model->is_dark_mode());
+    }
+}
+
 lv_display_t* init_display() {
 #if USE_DESKTOP
     auto* display = lv_sdl_window_create(view::kScreenWidth, view::kScreenHeight);
@@ -116,6 +132,7 @@ int Application::run() {
     }
 
     viewmodel::BaseViewModel view_model;
+    view::load_accent(); // restore the user's chosen accent color before theming
     view::apply_lvgl_theme(display, view_model.is_dark_mode());
 
     ScreenManager screen_manager(view_model, assets);
@@ -128,6 +145,10 @@ int Application::run() {
     auto* theme_observer = lv_subject_add_observer(view_model.dark_mode_subject(),
                                                    dark_mode_theme_observer,
                                                    display);
+    ThemeContext theme_context{display, &view_model};
+    auto* accent_observer = lv_subject_add_observer(view_model.theme_epoch_subject(),
+                                                    theme_epoch_observer,
+                                                    &theme_context);
 
     LOG_INFO("LVGL app started at {}x{}", lv_display_get_horizontal_resolution(display),
              lv_display_get_vertical_resolution(display));
@@ -141,6 +162,9 @@ int Application::run() {
     }
     if (theme_observer) {
         lv_observer_remove(theme_observer);
+    }
+    if (accent_observer) {
+        lv_observer_remove(accent_observer);
     }
 
     return 0;

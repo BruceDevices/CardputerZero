@@ -17,10 +17,11 @@ namespace {
 
 constexpr int32_t kHeaderHeight = 20;
 
-// Constant Bruce neon-purple accent for the carousel icons (same in light/dark,
-// so the icons need no theme observer - only the text labels flip with theme).
+// The Bruce accent for carousel icons / selection pill. Follows the user's
+// chosen theme color (view::palette reads the current accent); same hue in
+// light/dark, so the icons only need a rebuild on accent change, not per theme.
 inline lv_color_t bruce_accent() {
-    return lv_color_hex(view::color::dark::kPrimary);
+    return view::palette(true).primary;
 }
 
 } // namespace
@@ -108,6 +109,9 @@ void MenuScreen::update_carousel() {
 }
 
 void MenuScreen::build_list(lv_obj_t* content) {
+    // Rebuild data-driven categories (e.g. Nmap's host list) before reading them,
+    // so a just-finished discovery / host selection shows up on (re)entry.
+    model::refresh_dynamic_categories();
     const auto& catalog = model::tool_catalog();
 
     auto* header = lv_label_create(content);
@@ -197,6 +201,22 @@ void MenuScreen::open_selected() {
     if (selected_index_ >= rows_.size()) {
         return;
     }
+
+    // A row with no argv is a navigation row (not a launchable tool).
+    const auto& category = model::tool_catalog()[static_cast<size_t>(category_index_)];
+    if (category.actions[selected_index_].argv.empty()) {
+        if (std::string(category.label) == "Theme") {
+            // Apply the picked accent color and re-theme + rebuild in place.
+            view::set_accent(static_cast<int>(selected_index_));
+            view_model().refresh_theme();
+        } else {
+            // e.g. Nmap's "pick host" / "back": mutate state, re-enter category.
+            model::on_navigation_action(category_index_, static_cast<int>(selected_index_));
+            view_model().show_menu(category_index_);
+        }
+        return;
+    }
+
     view_model().show_tool_run(category_index_, static_cast<int>(selected_index_));
 }
 

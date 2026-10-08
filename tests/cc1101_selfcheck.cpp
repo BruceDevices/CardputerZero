@@ -27,6 +27,15 @@ int main() {
     for (uint8_t addr = 0x30; addr <= 0x3D; ++addr) {
         assert((platform::cc1101_status_read_header(addr) & 0xC0) == 0xC0);
     }
-    std::puts("cc1101 self-check OK");
+
+    // ST25R3916 space-A register read: top two mode bits must be 0b01 (addr|0x40),
+    // never the CC1101-style burst bits. IC_IDENTITY (0x3F) -> 0x7F.
+    assert(platform::st25r_reg_read_header(0x3F) == 0x7F);
+    assert(platform::st25r_reg_read_header(0x00) == 0x40);
+    for (uint8_t addr = 0x00; addr <= 0x3F; ++addr) {
+        assert((platform::st25r_reg_read_header(addr) & 0xC0) == 0x40);
+    }
+
+    std::puts("cc1101 + st25r self-check OK");
     return 0;
 }
