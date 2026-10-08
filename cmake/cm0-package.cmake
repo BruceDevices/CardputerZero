@@ -10,6 +10,16 @@ set(APP_DISPLAY_NAME "BruceCardputerZero" CACHE STRING "Human-readable applicati
 set(APP_DEBIAN_REVISION "bruce1" CACHE STRING "Debian package revision/vendor suffix")
 set(APP_DEBIAN_ARCHITECTURE "arm64" CACHE STRING "Debian package architecture")
 set(APP_MAINTAINER "BruceDevices <support@brucegfx.com>" CACHE STRING "Debian package maintainer")
+# Package summary / .desktop comment. Must be non-empty: CMake >= 4.x CPackDeb
+# errors on an empty summary (older CPack silently fell back to the project
+# DESCRIPTION). Falls back to the project() description if unset.
+if(NOT APP_PACKAGE_DESCRIPTION)
+    if(PROJECT_DESCRIPTION)
+        set(APP_PACKAGE_DESCRIPTION "${PROJECT_DESCRIPTION}")
+    else()
+        set(APP_PACKAGE_DESCRIPTION "Bruce security toolkit UI for CardputerZero")
+    endif()
+endif()
 # M5Stack APPLaunch packaging rule: EVERY file must live under
 # /usr/share/APPLaunch/ and the app must NOT run as root. APPLaunch launches the
 # binary directly from the .desktop `Exec` (no systemd service), so we ship no

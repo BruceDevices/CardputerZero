@@ -27,9 +27,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ninja-build crossbuild-essential-arm64 dpkg-dev ca-certificates git
           # The workflow preset requires CMake >= 3.31; Ubuntu ships older. pipx
-          # (preinstalled on the runner) sidesteps PEP 668 and puts a current
-          # cmake/cpack on PATH without needing a venv.
-          pipx install cmake
+          # (preinstalled on the runner) sidesteps PEP 668 and puts cmake/cpack
+          # on PATH without a venv. Pin the 3.31 line that the project targets -
+          # floating to CMake 4.x changes CPackDeb behaviour.
+          pipx install "cmake==3.31.*"
+          pipx ensurepath
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Show tool versions
