@@ -7,6 +7,7 @@
 #include "app.h"
 
 #include "asset_manager.h"
+#include "boot_anim.h"
 #include "logger.h"
 #include "linux_input.h"
 #include "screen_manager.h"
@@ -137,6 +138,10 @@ int Application::run() {
 
     ScreenManager screen_manager(view_model, assets);
     screen_manager.start();
+
+    // Bruce boot animation: the shark lunges toward the screen over the menu,
+    // then fades out. Non-blocking; driven by the LVGL timer loop below.
+    view::play_boot_animation(assets, view::palette(view_model.is_dark_mode()).primary);
 
     bool running = true;
     auto* quit_observer = lv_subject_add_observer(view_model.quit_requested_subject(),

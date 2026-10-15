@@ -47,7 +47,6 @@ void MenuScreen::build_carousel(lv_obj_t* content) {
     auto* icon_big   = assets().load_font("Phosphor-Fill.ttf", 60);
     auto* icon_small = assets().load_font("Phosphor-Fill.ttf", 30);
     auto* name_font  = assets().load_font("inter-bold.ttf", 18);
-    auto* desc_font  = assets().load_font("inter-regular.ttf", 11);
 
     // Dim neighbour icons flanking the big centred one - the classic Bruce look.
     icon_prev_ = lv_label_create(content);
@@ -65,19 +64,13 @@ void MenuScreen::build_carousel(lv_obj_t* content) {
     lv_obj_set_style_text_color(icon_curr_, bruce_accent(), 0);
     lv_obj_align(icon_curr_, LV_ALIGN_TOP_MID, 0, 2);
 
+    // Main menu shows just the big icon + category name - no description text,
+    // for a clean Bruce-style carousel. Per-tool help still shows on the tool
+    // list / run screens via each action's description.
     name_label_ = lv_label_create(content);
     lv_obj_set_style_text_font(name_label_, name_font ? name_font : &lv_font_montserrat_18, 0);
-    lv_obj_align(name_label_, LV_ALIGN_TOP_MID, 0, 66);
+    lv_obj_align(name_label_, LV_ALIGN_TOP_MID, 0, 74);
     reactive::bind_theme(name_label_, view_model().dark_mode_subject(), reactive::ThemeRole::Text);
-
-    desc_label_ = lv_label_create(content);
-    lv_obj_set_style_text_font(desc_label_, desc_font ? desc_font : &lv_font_montserrat_12, 0);
-    lv_obj_set_width(desc_label_, view::kScreenWidth - 40);
-    lv_obj_set_style_text_align(desc_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(desc_label_, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_opa(desc_label_, LV_OPA_60, 0);
-    lv_obj_align(desc_label_, LV_ALIGN_TOP_MID, 0, 90);
-    reactive::bind_theme(desc_label_, view_model().dark_mode_subject(), reactive::ThemeRole::Text);
 
     update_carousel();
 
@@ -105,7 +98,6 @@ void MenuScreen::update_carousel() {
     lv_label_set_text(icon_prev_, catalog[static_cast<size_t>(prev)].icon);
     lv_label_set_text(icon_next_, catalog[static_cast<size_t>(next)].icon);
     lv_label_set_text(name_label_, catalog[static_cast<size_t>(curr)].label);
-    lv_label_set_text(desc_label_, catalog[static_cast<size_t>(curr)].description);
 }
 
 void MenuScreen::build_list(lv_obj_t* content) {

@@ -44,7 +44,6 @@ private:
     lv_obj_t* icon_curr_{nullptr};
     lv_obj_t* icon_next_{nullptr};
     lv_obj_t* name_label_{nullptr};
-    lv_obj_t* desc_label_{nullptr};
 };
 
 } // namespace screen
