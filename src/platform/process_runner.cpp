@@ -28,7 +28,8 @@ ProcessRunner::~ProcessRunner() {
     stop();
 }
 
-bool ProcessRunner::start(const std::vector<std::string>& argv, UpdateCallback on_update, void* owner) {
+bool ProcessRunner::start(const std::vector<std::string>& argv, UpdateCallback on_update, void* owner,
+                          const std::string& stdin_payload) {
     if (running_ || argv.empty() || !on_update) {
         return false;
     }
@@ -48,10 +49,22 @@ bool ProcessRunner::start(const std::vector<std::string>& argv, UpdateCallback o
         return false;
     }
 
+    // Optional stdin feed (sudo -S password): the child reads it, then EOF.
+    int stdin_fds[2] = {-1, -1};
+    if (!stdin_payload.empty() && pipe(stdin_fds) != 0) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return false;
+    }
+
     const pid_t pid = fork();
     if (pid < 0) {
         close(pipe_fds[0]);
         close(pipe_fds[1]);
+        if (stdin_fds[0] >= 0) {
+            close(stdin_fds[0]);
+            close(stdin_fds[1]);
+        }
         return false;
     }
 
@@ -64,6 +77,11 @@ bool ProcessRunner::start(const std::vector<std::string>& argv, UpdateCallback o
         dup2(pipe_fds[1], STDOUT_FILENO);
         dup2(pipe_fds[1], STDERR_FILENO);
         close(pipe_fds[1]);
+        if (stdin_fds[0] >= 0) {
+            dup2(stdin_fds[0], STDIN_FILENO);
+            close(stdin_fds[0]);
+            close(stdin_fds[1]);
+        }
 
         std::vector<char*> exec_argv;
         exec_argv.reserve(argv.size() + 1);
@@ -73,12 +91,37 @@ bool ProcessRunner::start(const std::vector<std::string>& argv, UpdateCallback o
         exec_argv.push_back(nullptr);
 
         execvp(exec_argv[0], exec_argv.data());
-        const std::string message = "exec failed: " + argv[0] + ": " + std::strerror(errno) + "\n";
+        std::string message = "exec failed: " + argv[0] + ": " + std::strerror(errno) + "\n";
+        if (errno == ENOENT) {
+            // The classic "rtl_test: No such file or directory" - the tool is
+            // simply not installed on this system.
+            message += "hint: '" + argv[0] + "' is not installed on this device.\n";
+            message += "      Install it, e.g.: sudo apt install " + argv[0] + "\n";
+        } else if (errno == EACCES || errno == EPERM) {
+            message += "hint: permission denied - try running the app with sudo.\n";
+        }
         write(STDERR_FILENO, message.c_str(), message.size());
         _exit(127);
     }
 
     close(pipe_fds[1]);
+    if (stdin_fds[0] >= 0) {
+        // Feed the payload (e.g. the sudo password line) and close: the child
+        // sees EOF after it, so `sudo -S` makes exactly one attempt. A short
+        // blocking write cannot happen for password-sized payloads (64K pipe).
+        close(stdin_fds[0]);
+        size_t off = 0;
+        const std::string payload = stdin_payload + "\n";
+        while (off < payload.size()) {
+            const ssize_t n = ::write(stdin_fds[1], payload.data() + off, payload.size() - off);
+            if (n <= 0) {
+                if (n < 0 && errno == EINTR) continue;
+                break; // child died before reading; nothing sensible to do
+            }
+            off += static_cast<size_t>(n);
+        }
+        close(stdin_fds[1]);
+    }
     child_pid_ = pid;
     read_fd_ = pipe_fds[0];
     on_update_ = on_update;

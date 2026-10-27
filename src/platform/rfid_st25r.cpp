@@ -24,10 +24,13 @@
 #if defined(__linux__)
 #include <cerrno>
 #include <fcntl.h>
+#include <linux/gpio.h>
 #include <linux/spi/spidev.h>
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "cap_bringup.h"
 #endif
 
 #ifndef APP_ST25R_SPIDEV
@@ -189,6 +192,23 @@ constexpr uint8_t kAnalogTxDriver = 0x00;
 
 #if defined(__linux__)
 int g_fd = -1;
+int g_cs_fd = -1;      // GPIO line handle: the cap's NFC_CS (active low)
+unsigned g_cs_line = 22;
+
+std::string env_or(const char* name, const char* fallback) {
+    const char* v = std::getenv(name);
+    return (v && v[0] != '\0') ? v : fallback;
+}
+
+// CS framing: ST25R3916 latches the access per chip-select frame, and each
+// spi_xfer() is exactly one access. tCSN setup is nanoseconds at 2 MHz; the
+// ioctl round-trip provides ample slack, no delay needed.
+void cs_set(bool high) {
+    if (g_cs_fd < 0) return;
+    gpiohandle_data data{};
+    data.values[0] = high ? 1 : 0;
+    ioctl(g_cs_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &data);
+}
 
 void sleep_ms(long ms) {
     timespec ts{ms / 1000, (ms % 1000) * 1000000L};
@@ -202,7 +222,10 @@ bool spi_xfer(const uint8_t* tx, uint8_t* rx, size_t len) {
     tr.len = static_cast<uint32_t>(len);
     tr.speed_hz = 2000000; // 2 MHz - conservative for ST25R3916 (max ~6 MHz)
     tr.bits_per_word = 8;
-    return ioctl(g_fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
+    cs_set(false);
+    const bool ok = ioctl(g_fd, SPI_IOC_MESSAGE(1), &tr) >= 0;
+    cs_set(true);
+    return ok;
 }
 
 uint8_t reg_read(uint8_t addr) {
@@ -400,18 +423,41 @@ bool t2t_write_page(uint8_t page, const uint8_t in4[4]) {
 }
 
 // Open spidev (MODE1, MSB-first) and verify an ST25R3916 answers.
+//
+// The cap's NFC_CS is a plain GPIO on this board (G22, HAT_P0/P1 bus) - not a
+// spidev chip select. The spidev node is therefore opened with SPI_NO_CS (so
+// no internal CS - on this board they are the LCD's G8 or the CC1101's G7 -
+// glitches during NFC traffic) and CS is bit-banged around every access.
 bool open_chip(const std::string& path, std::string& report) {
+    report += cap_bringup().text;
+
+    g_cs_fd = -1;
+    const std::string cs_chip = env_or("ST25R_CS_CHIP", "/dev/gpiochip0");
+    g_cs_line = static_cast<unsigned>(std::atoi(env_or("ST25R_CS_GPIO", "22").c_str()));
+    if (!gpio_claim_output(cs_chip.c_str(), g_cs_line, true, &g_cs_fd)) {
+        report += "error: cannot claim NFC CS GPIO" + std::to_string(g_cs_line) + " on " +
+                  cs_chip + " (" + std::strerror(errno) + ")\n";
+        return false;
+    }
+
     g_fd = open(path.c_str(), O_RDWR);
     if (g_fd < 0) {
         report += "error: cannot open spidev " + path + " (" + std::strerror(errno) + ")\n";
+        if (errno == ENOENT) {
+            report += "hint: SPI is off on this system. Run: sudo raspi-config nonint do_spi 0 "
+                      "and reboot, then retry.\n";
+        }
         return false;
     }
-    uint8_t mode = SPI_MODE_1; // ST25R3916 uses SPI mode 1
+    uint8_t mode = SPI_MODE_1 | SPI_NO_CS; // CS is the GPIO above
     uint8_t bits = 8;
     uint32_t speed = 2000000;
     ioctl(g_fd, SPI_IOC_WR_MODE, &mode);
     ioctl(g_fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
     ioctl(g_fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
+
+    report += "NFC CS: GPIO" + std::to_string(g_cs_line) + " (manual, SPI_NO_CS on " +
+              path + ")\n";
 
     cmd(CMD_SET_DEFAULT);
     sleep_ms(1);
@@ -420,7 +466,8 @@ bool open_chip(const std::string& path, std::string& report) {
     if (ic != IC_TYPE_3916 && ic != IC_TYPE_3916B) {
         char line[96];
         std::snprintf(line, sizeof(line),
-                      "error: no ST25R3916 (IC_IDENTITY=0x%02X). Check the CAP seating / spidev node.\n",
+                      "error: no ST25R3916 (IC_IDENTITY=0x%02X). Check the CAP seating, the "
+                      "power lines above, and the CS GPIO.\n",
                       id);
         report += line;
         close(g_fd);
@@ -444,7 +491,12 @@ std::string resolve_spidev(int argc, char** argv, int path_arg) {
         return argv[path_arg];
     }
     const char* env = std::getenv("ST25R_SPIDEV");
-    return (env && env[0] != '\0') ? env : APP_ST25R_SPIDEV;
+    if (env && env[0] != '\0') {
+        return env;
+    }
+    // With SPI_NO_CS any spidev node works - pick whichever the kernel made.
+    const std::string picked = spidev_pick({APP_ST25R_SPIDEV, "/dev/spidev0.1", "/dev/spidev0.0"});
+    return picked.empty() ? std::string(APP_ST25R_SPIDEV) : picked;
 }
 #endif // __linux__
 

@@ -1,0 +1,37 @@
+#!/bin/sh
+# Debian maintainer script: runs as root during `apt install`/`dpkg`.
+# It writes the scoped sudoers rule so the GUI-launched (non-root) app can
+# self-escalate its native tools via `sudo -n` with NO password prompt - and,
+# through the app's own --root-sh passthrough, run apt installs the same way.
+# This is generated here, not shipped as a packaged file, so the data payload
+# still lives entirely under /usr/share/APPLaunch/ (APPLaunch store rule).
+set -e
+
+BIN=/usr/share/APPLaunch/bin/bruce_cardputerzero
+RULE=/etc/sudoers.d/bruce-cardputerzero
+
+case "$1" in
+    configure)
+        # The GUI runs as the console login user (uid 1000 on these images);
+        # grant that user plus the admin group, scoped to EXACTLY this binary.
+        primary_user="$(getent passwd 1000 2>/dev/null | cut -d: -f1)"
+        tmp="$(mktemp)"
+        {
+            echo "# Installed by the BruceCardputerZero package (postinst)."
+            echo "# Removed when the package is removed. Scoped to one binary; the"
+            echo "# app wraps every root tool as 'sudo -n $BIN ...'."
+            echo "%sudo ALL=(root) NOPASSWD: $BIN"
+            [ -n "$primary_user" ] && echo "$primary_user ALL=(root) NOPASSWD: $BIN"
+        } > "$tmp"
+        # Never install a rule that would wedge sudo - validate first.
+        if visudo -cf "$tmp" >/dev/null 2>&1; then
+            install -m 0440 -o root -g root "$tmp" "$RULE"
+            echo "bruce-cardputerzero: passwordless sudo rule installed ($RULE)"
+        else
+            echo "bruce-cardputerzero: sudoers rule failed validation; not installed" >&2
+        fi
+        rm -f "$tmp"
+        ;;
+esac
+
+exit 0

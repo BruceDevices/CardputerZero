@@ -84,6 +84,13 @@ void BaseViewModel::show_tool_run(int category_index, int item_index) {
     publish_all();
 }
 
+void BaseViewModel::show_clock(int category_index, int item_index) {
+    model_.set_current_page(model::AppPage::Clock);
+    model_.set_active_category(category_index);
+    model_.set_active_item(item_index);
+    publish_all();
+}
+
 void BaseViewModel::show_about() {
     model_.set_current_page(model::AppPage::About);
     publish_all();
@@ -92,6 +99,7 @@ void BaseViewModel::show_about() {
 void BaseViewModel::go_back() {
     switch (model_.current_page()) {
         case model::AppPage::ToolRun:
+        case model::AppPage::Clock:
             show_menu(model_.active_category());
             break;
         case model::AppPage::About:

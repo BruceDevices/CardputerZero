@@ -7,6 +7,7 @@
 #pragma once
 
 #include <fmt/core.h>
+#include <fmt/format.h> // fmt::format lives here since fmt 11/12 (Debian 13 ships 12)
 #include <string>
 #include <utility>
 

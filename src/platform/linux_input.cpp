@@ -25,6 +25,10 @@ std::array<lv_obj_t*, kNavKeyCount> nav_buttons{};
 uint32_t last_key = 0;
 bool last_key_pressed = false;
 
+// True while a text-entry dialog (sudo password) owns the keyboard: the nav
+// router then only dispatches ESC/Enter and letters flow into the lv_group.
+bool g_text_input_mode = false;
+
 // Debounce for the Cardputer's matrix keyboard: one physical tap can bounce
 // into several press/release pairs, each firing a nav action. Ignore repeats of
 // the same action inside this window. ponytail: tune this one number up if the
@@ -78,6 +82,14 @@ void dispatch_nav_key(uint32_t key) {
         return;
     }
 
+    // Text-entry mode (sudo password dialog): letters, arrows and theme keys
+    // must reach the focused textarea via the indev's lv_group instead. Only
+    // ESC (cancel, slot 0) and Enter (submit, slot 2) keep their nav meaning -
+    // the dialog re-pointed those slots to its own callbacks.
+    if (g_text_input_mode && index != 0 && index != 2) {
+        return;
+    }
+
     // Swallow bounces / key-repeat of the same action within the debounce window.
     const uint32_t now = lv_tick_get();
     if (index == last_dispatch_index && (now - last_dispatch_tick) < kKeyDebounceMs) {
@@ -118,6 +130,7 @@ struct EvdevKeypad {
     int fd{-1};
     lv_indev_state_t state{LV_INDEV_STATE_RELEASED};
     uint32_t key{0};
+    bool shift{false}; // left/right shift held while typing (text mode)
 };
 
 uint32_t map_evdev_key(uint16_t code) {
@@ -126,8 +139,10 @@ uint32_t map_evdev_key(uint16_t code) {
         // the keymap; Backspace is an intuitive fallback. All route to "back".
         case KEY_ESC:
         case KEY_GRAVE:
-        case KEY_BACKSPACE:
             return LV_KEY_ESC;
+        case KEY_BACKSPACE:
+            // "Back" in nav mode; delete-a-character while typing (text mode).
+            return g_text_input_mode ? LV_KEY_DEL : LV_KEY_ESC;
         case KEY_F:
             return 'f';
         case KEY_Z:
@@ -141,8 +156,67 @@ uint32_t map_evdev_key(uint16_t code) {
         case KEY_ENTER:
         case KEY_KPENTER:
             return LV_KEY_ENTER;
+        case KEY_SPACE:
+            return ' ';
+        case KEY_MINUS:
+            return '-';
+        case KEY_EQUAL:
+            return '=';
+        case KEY_COMMA:
+            return ',';
+        case KEY_DOT:
+            return '.';
+        case KEY_SLASH:
+            return '/';
+        case KEY_SEMICOLON:
+            return ';';
+        case KEY_APOSTROPHE:
+            return '\'';
         default:
-            return 0;
+            break;
+    }
+    // Full keyboard for text entry (sudo password): letters and the number row.
+    // KEY_1..KEY_9 are contiguous, KEY_0 trails them.
+    if (code >= KEY_A && code <= KEY_Z) {
+        return static_cast<uint32_t>('a' + (code - KEY_A));
+    }
+    if (code >= KEY_1 && code <= KEY_9) {
+        return static_cast<uint32_t>('1' + (code - KEY_1));
+    }
+    if (code == KEY_0) {
+        return '0';
+    }
+    return 0;
+}
+
+// Shift variant of a mapped character: uppercase letters, the shifted number
+// row and common punctuation. Non-characters (ESC/Enter/LV_KEY_*) pass through.
+uint32_t shifted_key(uint32_t key, bool shift) {
+    if (!shift) {
+        return key;
+    }
+    if (key >= 'a' && key <= 'z') {
+        return key - 'a' + 'A';
+    }
+    switch (key) {
+        case '1': return '!';
+        case '2': return '@';
+        case '3': return '#';
+        case '4': return '$';
+        case '5': return '%';
+        case '6': return '^';
+        case '7': return '&';
+        case '8': return '*';
+        case '9': return '(';
+        case '0': return ')';
+        case '-': return '_';
+        case '=': return '+';
+        case ',': return '<';
+        case '.': return '>';
+        case '/': return '?';
+        case ';': return ':';
+        case '\'': return '"';
+        default: return key;
     }
 }
 
@@ -173,13 +247,17 @@ void evdev_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
         if (input.type != EV_KEY) {
             continue;
         }
+        if (input.code == KEY_LEFTSHIFT || input.code == KEY_RIGHTSHIFT) {
+            keypad->shift = input.value != 0;
+            continue;
+        }
 
         const auto key = map_evdev_key(input.code);
         if (!key || input.value == 2) {
             continue;
         }
 
-        keypad->key = key;
+        keypad->key = shifted_key(key, keypad->shift);
         keypad->state = input.value ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
         data->continue_reading = true;
         break;
@@ -308,6 +386,14 @@ void unregister_nav_button(size_t index, lv_obj_t* button) {
     if (!button || nav_buttons[index] == button) {
         nav_buttons[index] = nullptr;
     }
+}
+
+void set_text_input_mode(bool enabled) {
+    g_text_input_mode = enabled;
+}
+
+bool text_input_mode() {
+    return g_text_input_mode;
 }
 
 } // namespace platform

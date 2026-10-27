@@ -97,15 +97,23 @@ sudo apt install ./BruceCardputerZero_0.1.0_bruce1_arm64.deb
 > Only the shared libraries are hard dependencies, so the package **always
 > installs cleanly** — a missing CLI tool never blocks it. The tools the menu
 > drives (curl, netcat-openbsd, smbclient, iw, wireless-tools, bluez, rfkill,
-> iproute2, nmap, i2c-tools, gpiod, flashrom) are **Recommends**: `apt install`
-> pulls them in automatically (use `--no-install-recommends` to skip them, or
-> `dpkg -i` — either still installs the app). Heavier attack tooling
-> (aircrack-ng, mdk4, hostapd, arp-scan, dnsmasq, rtl-433) and `responder` are
-> **Suggests** — install per feature, e.g. `sudo apt install aircrack-ng mdk4`.
-> The RFID menu's **PN532** entries use libnfc: `sudo apt install libnfc-bin
-> libnfc-examples`, then point it at your reader in `/etc/nfc/libnfc.conf`
-> (e.g. `device.connstring = "pn532_i2c:/dev/i2c-1"`). The ST25R3916 entries use
-> the M5 CAP directly and need no extra packages.
+> iproute2, nmap, i2c-tools, gpiod, flashrom, **rtl-sdr, rtl-433** for Sub-GHz,
+> **libnfc-bin/libnfc-examples** for PN532, **gpsd/gpsd-clients** for wardrive,
+> qrencode) are **Recommends**: `apt install ./pkg.deb` pulls them in
+> automatically, so every menu feature works with zero manual `apt` (use
+> `--no-install-recommends` to skip them; note `dpkg -i` installs the app but
+> does **not** pull Recommends — always use `apt install ./…`). Heavier /
+> offensive tooling (aircrack-ng, mdk4, hostapd, arp-scan, dnsmasq) and
+> `responder` are **Suggests** — install per feature, e.g.
+> `sudo apt install aircrack-ng mdk4`.
+> The RFID menu's **PN532** entries use libnfc (auto-installed above); point it
+> at your reader in `/etc/nfc/libnfc.conf`
+> (e.g. `device.connstring = "pn532_i2c:/dev/i2c-1"`). The ST25R3916 / CC1101
+> entries use the M5 CAP directly and need no extra packages, but the **SPI
+> interface must be enabled once**: `sudo raspi-config nonint do_spi 0`, then
+> reboot. The app powers the cap up itself (M5IOE1 HAT rail + `POWER_EN`) and
+> drives the cap's chip-select lines; if detection still fails, the tool log
+> lists exactly which power/SPI step is missing.
 
 ---
 
@@ -140,12 +148,18 @@ Bruce opens on the **Main Menu**. Navigation uses the keyboard:
 | `4` or `ESC` | **Back** (or **Quit** on the main menu) |
 | `8` | Toggle **Light / Dark** theme |
 
-Inside a tool screen: `6` = **Run/Stop**, `7` = **Clear** log, `4` = **Back**.
+Inside a tool screen: `5` / `7` = scroll the log **up / down** (scrolling up
+pauses tail-follow; scrolling back to the bottom resumes it), `6` =
+**Run/Stop**, `8` = **Clear** log, `4` or `ESC` = **Back**.
 The tool's live output streams into the log area.
 
-Menu contents: **Wi-Fi**, **Bluetooth LE**, **Sub-GHz/RF**, **Network Tools**,
-**SMB Client**, **Responder**, **About**. Add or edit tools by editing one
-file — `src/model/tool_catalog.cpp` — then rebuild.
+Menu contents: **Wi-Fi** (including **Evil Portal** — AP + DNS-hijacked captive
+portal capturing credentials to `~/.bruce/BruceEvilCreds/`, a Linux port of the
+ESP32 Bruce feature; needs root and `sudo apt install hostapd dnsmasq`), plus
+**Bluetooth LE**, **RFID**, **Sub-GHz/RF**, **Network Tools**, **Nmap**,
+**SMB Client**, **Responder**, hardware buses, **Scripts**, **Theme** and
+**About**. Add or edit tools by editing one file — `src/model/tool_catalog.cpp`
+— then rebuild.
 
 ---
 
@@ -166,8 +180,36 @@ If your CardputerZero uses different key codes, adjust the mapping in
 **A tool prints "exec failed: … No such file"** — that tool's binary isn't
 installed on the device. Install it with `apt` (e.g. `sudo apt install iw`).
 
-**A tool needs root** (Responder, raw sockets, rfkill) — run the app from a
-root shell or configure the appropriate capabilities/sudoers on the device.
+**A tool needs root** (evil portal, RFID/CC1101/NFC, BLE, wardrive, Responder,
+raw sockets, the Wi-Fi scans) — the APPLaunch launcher starts the app
+**non-root**, so every root-needing tool self-escalates with `sudo -n`: native
+re-execs run the binary directly, shell-based rows go through its internal
+`--root-sh` passthrough. One `/etc/sudoers.d` rule scoped to exactly this
+binary covers both — and the app's own **"Install optional tools (apt)"** entry
+rides the same path, so it installs packages with no password prompt.
+
+**This is now automatic.** The package's `postinst` writes the scoped
+`/etc/sudoers.d/bruce-cardputerzero` rule (validated with `visudo`) during
+`apt install ./pkg.deb`, and `postrm` removes it on uninstall — no manual step.
+Build with `-DAPP_INSTALL_SUDOERS=OFF` to omit it (e.g. a strict APPLaunch store
+submission that forbids maintainer scripts); `./deploy.sh` still installs the
+rule over SSH, or add it by hand:
+
+```bash
+sudo install -m 0440 -o root -g root \
+  config/bruce-cardputerzero.sudoers /etc/sudoers.d/bruce-cardputerzero
+sudo visudo -cf /etc/sudoers.d/bruce-cardputerzero   # verify
+```
+
+Without the rule, those tools no longer fail silently: the app asks for the
+sudo password on-device (a masked input on the Cardputer keyboard — the image
+default is often `pi`) and runs the tool via `sudo -S`, one attempt per run.
+The rule is still the zero-friction path: with it, root tools start without
+any prompt. Alternatively, launch the whole app from a root shell
+(`sudo bruce_cardputerzero`).
+(The rule must match the binary's installed path, so it only works for the
+packaged `/usr/share/APPLaunch/bin/bruce_cardputerzero`; a dev build run from
+the build tree always takes the password-prompt path.)
 
 ---
 

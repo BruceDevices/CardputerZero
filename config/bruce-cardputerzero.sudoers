@@ -1,0 +1,15 @@
+# Installed on the device by deploy.sh - deliberately NOT bundled in the
+# APPLaunch .deb (the store requires every packaged file under
+# /usr/share/APPLaunch/, and a sudoers rule cannot live there).
+#
+# Bruce's native tools (evil portal, RFID/CC1101/NFC, BLE spam, wardrive) need
+# root for GPIO/SPI/HCI/hostapd/dnsmasq/port 80. The app launches non-root from
+# the GUI (APPLaunch rule), so those tools self-escalate with `sudo -n`. This
+# rule makes that passwordless and is scoped to EXACTLY this one binary.
+# Root-needing shell rows (iw scans, monitor mode, rogue AP, responder) route
+# through the same binary's internal `--root-sh` passthrough, so the rule never
+# has to cover /bin/sh or any other command.
+#
+# Install target: /etc/sudoers.d/bruce-cardputerzero  (mode 0440, root:root)
+pi      ALL=(root) NOPASSWD: /usr/share/APPLaunch/bin/bruce_cardputerzero
+%sudo   ALL=(root) NOPASSWD: /usr/share/APPLaunch/bin/bruce_cardputerzero

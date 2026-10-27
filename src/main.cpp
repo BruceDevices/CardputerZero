@@ -7,6 +7,8 @@
 #include "app.h"
 #include "ble_spam.h"
 #include "cc1101.h"
+#include "evil_portal.h"
+#include "root_sh.h"
 #include "rfid_st25r.h"
 #include "wardrive.h"
 
@@ -45,6 +47,17 @@ int main(int argc, char** argv) {
     // Wi-Fi wardriving: scan + gpsd fix -> WiGLE CSV for wigle.net upload.
     if (argc >= 2 && std::strcmp(argv[1], "--wardrive") == 0) {
         return platform::wardrive_main(argc - 2, argv + 2);
+    }
+    // Evil Portal: AP + DNS-hijacked captive portal capturing credentials
+    // (Linux port of the ESP32 Bruce feature; see platform/evil_portal.h).
+    if (argc >= 2 && std::strcmp(argv[1], "--evil-portal") == 0) {
+        return platform::evil_portal_main(argc - 2, argv + 2);
+    }
+    // Internal passthrough for root-needing catalog rows that are not native
+    // re-execs (shell scripts, responder): `sudo -n <self> --root-sh <script>`.
+    // See model::launch_argv and platform/root_sh.h.
+    if (argc >= 2 && std::strcmp(argv[1], "--root-sh") == 0) {
+        return platform::root_sh_main(argc - 2, argv + 2);
     }
 
     app::Application application;

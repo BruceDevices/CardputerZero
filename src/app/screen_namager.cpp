@@ -7,6 +7,7 @@
 #include "screen_manager.h"
 
 #include "about_screen.h"
+#include "clock_screen.h"
 #include "menu_screen.h"
 #include "tool_run_screen.h"
 
@@ -72,6 +73,9 @@ void ScreenManager::flush_requested_refresh() {
             break;
         case model::AppPage::About:
             load_screen(std::make_unique<screen::AboutScreen>(view_model_, assets_));
+            break;
+        case model::AppPage::Clock:
+            load_screen(std::make_unique<screen::ClockScreen>(view_model_, assets_));
             break;
         case model::AppPage::Menu:
         default:

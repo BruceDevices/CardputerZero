@@ -42,6 +42,7 @@ public:
     // Root menu (categories) when index == -1, otherwise the category's tool list.
     void show_menu(int category_index);
     void show_tool_run(int category_index, int item_index);
+    void show_clock(int category_index, int item_index);
     void show_about();
     void go_back();
     void request_quit();

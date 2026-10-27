@@ -12,6 +12,7 @@ enum class AppPage {
     Menu    = 0,
     ToolRun = 1,
     About   = 2,
+    Clock   = 3,
 };
 
 class BaseModel {

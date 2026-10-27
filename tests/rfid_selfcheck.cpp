@@ -7,7 +7,8 @@
  * CMake build. Run manually:
  *
  *   g++ -std=c++17 -Isrc/platform tests/rfid_selfcheck.cpp \
- *       src/platform/rfid_st25r.cpp -o /tmp/rfid_check && /tmp/rfid_check
+ *       src/platform/rfid_st25r.cpp src/platform/cap_bringup.cpp \
+ *       -o /tmp/rfid_check && /tmp/rfid_check
  *
  * CRC_A is the part that silently breaks every write/select if wrong, so it is
  * checked against an independent bit-by-bit reference over random inputs rather
@@ -15,6 +16,7 @@
  */
 
 #include "rfid_st25r.h"
+#include "cap_bringup.h"
 
 #include <cassert>
 #include <cstdint>
@@ -73,6 +75,16 @@ int main() {
         assert(!parse_hex("ZZ", v));    // non-hex
         assert(!parse_hex("", v));      // empty
     }
+
+    // --- M5IOE1 register-bank math (cap bring-up) ---
+    // P1 (PYG1_HAT_SW) -> L bank bit 0; P13 (PYG13_HAT_EN) -> H bank bit 4.
+    assert(!cap_ioe_high_bank(1) && cap_ioe_bit(1) == 0x01);
+    assert(!cap_ioe_high_bank(8) && cap_ioe_bit(8) == 0x80);
+    assert(cap_ioe_high_bank(9) && cap_ioe_bit(9) == 0x01);
+    assert(cap_ioe_high_bank(13) && cap_ioe_bit(13) == 0x10);
+    assert(cap_ioe_high_bank(14) && cap_ioe_bit(14) == 0x20);
+    assert(cap_ioe_bit(0) == 0 && cap_ioe_bit(15) == 0);
+    assert(!cap_ioe_high_bank(0) && !cap_ioe_high_bank(15));
 
     std::puts("rfid self-check OK");
     return 0;

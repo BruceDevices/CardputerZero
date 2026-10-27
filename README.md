@@ -42,8 +42,9 @@ That keeps the port tiny and every tool behaves exactly like its CLI.
 - **View model**: `BaseViewModel` exposes state as LVGL observer subjects and
   provides navigation actions (open menu, run tool, back, quit, toggle theme).
 - **Reactive/data binding**: `src/reactive` wraps LVGL observer subjects.
-- **Platform layer**: Linux input + the process runner. The nav bar maps
-  hardware/keyboard keys `4`–`8`, plus `ESC` for back/quit.
+- **Platform layer**: Linux input + the process runner, plus native subcommands
+  the app re-execs itself for (`--ble-spam`, `--wardrive`, `--evil-portal`, …).
+  The nav bar maps hardware/keyboard keys `4`–`8`, plus `ESC` for back/quit.
 
 ## Repository Layout
 

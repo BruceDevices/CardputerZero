@@ -45,6 +45,21 @@ if [[ "${REMOTE_INSTALL:-1}" == "1" ]]; then
   log "Install: apt install ${remote_package} on ${REMOTE_HOST}"
   ssh -t "${REMOTE_USER}@${REMOTE_HOST}" \
     "sudo apt install -y '${remote_package}'"
+
+  # Install the sudoers rule so the GUI-launched (non-root) app can self-escalate
+  # its native tools via `sudo -n`. Kept out of the .deb for store compliance;
+  # validated with `visudo -c` before it goes live. Set REMOTE_SUDOERS=0 to skip.
+  if [[ "${REMOTE_SUDOERS:-1}" == "1" ]]; then
+    log "Install sudoers rule on ${REMOTE_HOST}"
+    scp config/bruce-cardputerzero.sudoers \
+      "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR%/}/bruce-cardputerzero.sudoers"
+    ssh "${REMOTE_USER}@${REMOTE_HOST}" "
+      sudo install -m 0440 -o root -g root \
+        '${REMOTE_DIR%/}/bruce-cardputerzero.sudoers' \
+        /etc/sudoers.d/bruce-cardputerzero &&
+      sudo visudo -cf /etc/sudoers.d/bruce-cardputerzero &&
+      rm -f '${REMOTE_DIR%/}/bruce-cardputerzero.sudoers'"
+  fi
   log "Done: installed on ${REMOTE_HOST}"
 else
   log "Copied ${remote_package} (skipped install; REMOTE_INSTALL=0)"

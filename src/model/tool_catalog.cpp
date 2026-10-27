@@ -11,10 +11,13 @@
 #include <cstdlib>
 #include <deque>
 #include <dirent.h>
+#include <fcntl.h>
 #include <fstream>
 #include <string>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#include <utility>
 
 namespace model {
 namespace {
@@ -31,6 +34,20 @@ std::string self_exe_path() {
     }
     buf[n] = '\0';
     return std::string(buf);
+}
+
+// Single-quote a word for /bin/sh. Only ever applied to fixed catalog argv
+// (e.g. {"responder", "-I", "wlan0"}), never to user or scan-derived text.
+std::string sh_quote(const std::string& word) {
+    std::string out = "'";
+    for (const char c : word) {
+        if (c == '\'') {
+            out += "'\\''";
+        } else {
+            out += c;
+        }
+    }
+    return out + "'";
 }
 
 // Where user scripts live: $BRUCE_SCRIPTS_DIR, else ~/.bruce/scripts.
@@ -108,6 +125,19 @@ std::vector<ToolAction> scan_scripts() {
 // menu treats them as navigation (on_navigation_action) rather than tools.
 
 std::string nmap_dir() { return "/tmp/bruce-nmap"; }
+
+// Evil Portal clone-AP drill-down state: `targets` holds one "channel\tssid"
+// line per scanned AP, `selected` the picked line (same pattern as bruce-nmap).
+std::string portal_dir() { return "/tmp/bruce-portal"; }
+
+// "channel\tssid" -> {channel, ssid}.
+std::pair<std::string, std::string> split_target(const std::string& line) {
+    const size_t tab = line.find('\t');
+    if (tab == std::string::npos) {
+        return {"1", line};
+    }
+    return {line.substr(0, tab), line.substr(tab + 1)};
+}
 
 std::string read_first_line(const std::string& path) {
     std::ifstream in(path);
@@ -213,6 +243,190 @@ std::vector<ToolAction> build_theme_actions() {
     return acts;
 }
 
+// --- Wi-Fi category ---------------------------------------------------------
+//
+// A fixed prefix (recon, monitor mode, attacks, radio toggles) plus the Evil
+// Portal block (native --evil-portal subcommand) and the clone-AP drill-down,
+// rebuilt on every menu entry like Nmap's host list.
+
+std::vector<ToolAction> build_wifi_static_actions() {
+    return {
+        // --- recon ---
+        // needs_root rows are escalated by model::launch_argv (sudo -n <self>
+        // --root-sh <script>); no in-script `id -u` guard needed.
+        {"Scan nearby networks", "iw dev wlan0 scan (needs root)",
+         {"sh", "-c", "ip link set wlan0 up 2>/dev/null; iw dev wlan0 scan"},
+         true},
+        {"List SSIDs + signal", "iw scan | ssid/signal/freq",
+         {"sh", "-c",
+          "iw dev wlan0 scan 2>/dev/null | grep -E 'SSID:|signal:|freq:' || "
+          "echo 'scan failed (is wlan0 up?)'"},
+         true},
+        {"Channel usage (APs/chan)", "scan grouped by channel",
+         {"sh", "-c",
+          "iw dev wlan0 scan 2>/dev/null | awk '/freq:/{print $2}' | sort -n | uniq -c | "
+          "awk '{printf \"  %s MHz: %s APs\\n\", $2, $1}' || echo 'scan failed'"},
+         true},
+        {"Show Wi-Fi status", "ip addr show wlan0", {"ip", "addr", "show", "wlan0"}},
+        {"Scan LAN hosts (arp-scan)", "arp-scan --localnet",
+         {"sh", "-c", "arp-scan --localnet 2>&1 || echo 'needs arp-scan (apt install arp-scan)'"},
+         true},
+        {"Scan LAN hosts (nmap)", "nmap -sn <subnet>",
+         {"sh", "-c",
+          "nmap -sn \"$(ip -o -f inet addr show wlan0 | awk '{print $4}')\" 2>&1 || "
+          "echo 'needs nmap; is wlan0 connected?'"}},
+
+        // --- monitor mode (prerequisite for the attacks below) ---
+        // airmon-ng frequently produces no wlan0mon on this Wi-Fi chip, so fall
+        // back to a manual monitor VIF (mon0) and report what to attack with.
+        {"Monitor mode ON (airmon-ng)", "airmon-ng; fallback: manual mon0 VIF",
+         {"sh", "-c",
+          "airmon-ng check kill 2>&1; airmon-ng start wlan0 2>&1; "
+          "if ! ip link show wlan0mon >/dev/null 2>&1; then "
+          "echo; echo 'airmon-ng produced no wlan0mon (common on this chip) - creating mon0:'; "
+          "iw dev wlan0 interface add mon0 type monitor 2>&1 && ip link set mon0 up; fi; "
+          "echo; mon=; for d in wlan0mon mon0; do ip link show $d >/dev/null 2>&1 && mon=$d && break; done; "
+          "[ -n \"$mon\" ] && echo \"monitor interface: $mon (airodump/mdk4 find it automatically)\" || "
+          "echo 'no monitor interface - this radio does not support monitor mode'"},
+         true},
+        {"Monitor mode OFF", "remove monitor ifaces; restart NetworkManager",
+         {"sh", "-c",
+          "for d in wlan0mon mon0; do ip link del $d 2>/dev/null && echo \"removed $d\"; done; "
+          "airmon-ng stop wlan0mon 2>/dev/null; rfkill unblock wifi; "
+          "systemctl restart NetworkManager 2>/dev/null; echo done"},
+         true},
+        // Consumers pick whichever monitor VIF exists (wlan0mon from airmon-ng
+        // or mon0 from the manual fallback) instead of hardcoding wlan0mon.
+        {"Airodump scan (APs+clients)", "airodump-ng <monitor if>",
+         {"sh", "-c",
+          "mon=; for d in wlan0mon mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
+          "[ -n \"$mon\" ] || { echo 'enable Monitor mode first'; exit 1; }; airodump-ng \"$mon\" 2>&1"}},
+        {"Capture handshakes -> /tmp", "airodump-ng -w /tmp/bruce-wifi <mon>",
+         {"sh", "-c",
+          "mon=; for d in wlan0mon mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
+          "[ -n \"$mon\" ] || { echo 'enable Monitor mode first'; exit 1; }; "
+          "airodump-ng -w /tmp/bruce-wifi \"$mon\" 2>&1"}},
+
+        // --- attacks (authorized testing only) ---
+        {"Deauth flood (mdk4)", "mdk4 <monitor if> d",
+         {"sh", "-c",
+          "mon=; for d in wlan0mon mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
+          "[ -n \"$mon\" ] || { echo 'needs Monitor mode + mdk4'; exit 1; }; "
+          "mdk4 \"$mon\" d 2>&1 || echo 'needs mdk4'"}},
+        {"Beacon spam (mdk4)", "mdk4 <monitor if> b -s 100",
+         {"sh", "-c",
+          "mon=; for d in wlan0mon mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
+          "[ -n \"$mon\" ] || { echo 'needs Monitor mode + mdk4'; exit 1; }; "
+          "mdk4 \"$mon\" b -s 100 2>&1 || echo 'needs mdk4'"}},
+        // hostapd needs driver=nl80211 (it refuses to start without it) and
+        // clients need DHCP+DNS to land anywhere: dnsmasq answers every name
+        // with the AP. Both run in this script's process group, so the tool
+        // Stop button kills them together.
+        {"Rogue open AP (hostapd)", "open AP 'Free WiFi' + DHCP/DNS captive on wlan0",
+         {"sh", "-c",
+          "command -v hostapd >/dev/null 2>&1 || "
+          "{ echo 'needs hostapd + dnsmasq (apt install hostapd dnsmasq)'; exit 1; }; "
+          "cfg=$(mktemp); printf 'driver=nl80211\\ninterface=wlan0\\nssid=Free WiFi\\nchannel=6\\n"
+          "hw_mode=g\\nauth_algs=1\\n' > \"$cfg\"; "
+          "ip addr replace 192.168.4.1/24 dev wlan0 2>/dev/null; ip link set wlan0 up; "
+          "dns=$(mktemp); printf 'interface=wlan0\\nbind-interfaces\\nexcept-interface=lo\\nno-resolv\\n"
+          "dhcp-authoritative\\ndhcp-range=192.168.4.10,192.168.4.50,255.255.255.0,12h\\n"
+          "dhcp-option=3,192.168.4.1\\ndhcp-option=6,192.168.4.1\\naddress=/#/192.168.4.1\\n' > \"$dns\"; "
+          "echo 'open AP \"Free WiFi\" @ 192.168.4.1 (captive: every name resolves here)'; "
+          "hostapd \"$cfg\" & dnsmasq -C \"$dns\" -d & wait"},
+         true},
+
+        // --- evil portal (Linux port of the ESP32 Bruce feature) ---
+        {"Evil Portal: Default (Google)",
+         "Open AP + DNS-hijacked captive portal capturing credentials to "
+         "~/.bruce/BruceEvilCreds (Bruce default page). Needs root + hostapd/dnsmasq.",
+         {self_exe_path(), "--evil-portal", "default"}},
+        {"Evil Portal: Router Update (verify pwd)",
+         "'Router firmware update' portal; verifies each stolen password against "
+         "the real network (AP pauses seconds per check). Needs root + hostapd/dnsmasq.",
+         {self_exe_path(), "--evil-portal", "verify"}},
+        {"Evil Portal: Custom HTML",
+         "Serves ~/.bruce/evil_portal/index.html; a first line <!-- AP=\"Name\" --> "
+         "names the AP, captures go to <name>_creds.csv (Bruce Custom Html).",
+         {self_exe_path(), "--evil-portal", "custom", "~/.bruce/evil_portal/index.html"}},
+
+        // --- radio toggles ---
+        {"Enable Wi-Fi radio", "rfkill unblock wifi", {"rfkill", "unblock", "wifi"}},
+        {"Disable Wi-Fi radio", "rfkill block wifi", {"rfkill", "block", "wifi"}},
+    };
+}
+
+// Evil Portal clone-AP drill-down (Bruce's "Clone Portal"): scan -> pick an AP
+// -> the portal clones its SSID and channel. Rows carry an empty argv so the
+// menu treats them as navigation (see on_navigation_action).
+std::vector<ToolAction> build_portal_rows() {
+    // Owns the dynamically built label strings (ToolAction::label is const
+    // char*). Cleared each rebuild; no rebuild happens while a ToolRunScreen
+    // is live (see menu_screen.cpp).
+    static std::deque<std::string> pool;
+    pool.clear();
+    auto own = [](std::string s) -> const char* {
+        pool.push_back(std::move(s));
+        return pool.back().c_str();
+    };
+
+    const std::string dir = portal_dir();
+    const std::string selected = read_first_line(dir + "/selected");
+    std::vector<ToolAction> acts;
+
+    if (selected.empty()) {
+        acts.push_back(ToolAction{
+            "Evil Portal: Clone an AP  (1. scan first)",
+            "Scan nearby APs, then go Back and pick one to clone. Needs root.",
+            {"sh", "-c",
+             "mkdir -p " + dir + "; rm -f " + dir + "/selected; "
+             "ip link set wlan0 up 2>/dev/null; "
+             "iw dev wlan0 scan 2>/dev/null | awk "
+             "'function flush(){ if (ss!=\"\") printf \"%d\\t%s\\n\", ch, ss } "
+             "/^BSS /{flush(); ss=\"\"; ch=1; next} "
+             "$1==\"freq:\"{ch=($2>=5000)?int(($2-5000)/5):int(($2-2407)/5); if(ch<1)ch=1; next} "
+             "$1==\"SSID:\"{ss=substr($0,index($0,\":\")+1); sub(/^ +/,\"\",ss); next} "
+             "END{flush()}' | sort -u | tee " + dir + "/targets; "
+             "echo; echo 'Done. Go Back and pick an AP to clone.'"},
+            true});
+
+        const auto targets = read_lines(dir + "/targets");
+        if (targets.empty()) {
+            acts.push_back(ToolAction{
+                "(no APs yet - run the scan above)",
+                "Run the scan on the row above; discovered APs appear here.",
+                {"sh", "-c", "echo 'Run the scan first.'"}});
+        } else {
+            for (const auto& t : targets) {
+                const auto [chan, ssid] = split_target(t);
+                acts.push_back(ToolAction{
+                    own("Clone \"" + ssid + "\"  (ch " + chan + ")  >"),
+                    "Pick this AP: the Evil Portal clones its SSID and channel.",
+                    {}}); // empty argv => navigation row
+            }
+        }
+    } else {
+        const auto [chan, ssid] = split_target(selected);
+        acts.push_back(ToolAction{
+            "< Back to AP list",
+            "Clear the picked AP and clone another.",
+            {}}); // navigation row
+        acts.push_back(ToolAction{
+            own("Evil Portal: Clone \"" + ssid + "\"  (ch " + chan + ")"),
+            "Starts the cloned AP + captive portal; captures land in "
+            "~/.bruce/BruceEvilCreds/default_creds.csv.",
+            {self_exe_path(), "--evil-portal", "clone", ssid, chan}});
+    }
+    return acts;
+}
+
+std::vector<ToolAction> build_wifi_actions() {
+    std::vector<ToolAction> acts = build_wifi_static_actions();
+    const std::vector<ToolAction> portal = build_portal_rows();
+    acts.insert(acts.end(), portal.begin(), portal.end());
+    return acts;
+}
+
 } // namespace
 
 const std::vector<AccentPreset>& accent_presets() {
@@ -265,56 +479,10 @@ std::vector<ToolCategory>& mutable_catalog() {
     static std::vector<ToolCategory> catalog = {
         {
             "Wi-Fi",
-            "Scan, recon and 802.11 attacks (wlan0; monitor mode = wlan0mon)",
+            "Scan, recon, 802.11 attacks and Evil Portal (wlan0; root needed)",
             icon::kWifi,
             false,
-            {
-                // --- recon ---
-                {"Scan nearby networks", "iw dev wlan0 scan", {"iw", "dev", "wlan0", "scan"}},
-                {"List SSIDs + signal", "iw scan | ssid/signal/freq",
-                 {"sh", "-c",
-                  "iw dev wlan0 scan 2>/dev/null | grep -E 'SSID:|signal:|freq:' || "
-                  "echo 'scan failed (is wlan0 up? try Enable Wi-Fi radio)'"}},
-                {"Channel usage (APs/chan)", "scan grouped by channel",
-                 {"sh", "-c",
-                  "iw dev wlan0 scan 2>/dev/null | awk '/freq:/{print $2}' | sort -n | uniq -c | "
-                  "awk '{printf \"  %s MHz: %s APs\\n\", $2, $1}' || echo 'scan failed'"}},
-                {"Show Wi-Fi status", "ip addr show wlan0", {"ip", "addr", "show", "wlan0"}},
-                {"Scan LAN hosts (arp-scan)", "arp-scan --localnet",
-                 {"sh", "-c", "arp-scan --localnet 2>&1 || echo 'needs arp-scan + root'"}},
-                {"Scan LAN hosts (nmap)", "nmap -sn <subnet>",
-                 {"sh", "-c",
-                  "nmap -sn \"$(ip -o -f inet addr show wlan0 | awk '{print $4}')\" 2>&1 || "
-                  "echo 'needs nmap; is wlan0 connected?'"}},
-
-                // --- monitor mode (prerequisite for the attacks below) ---
-                {"Monitor mode ON (airmon-ng)", "airmon-ng check kill; start wlan0",
-                 {"sh", "-c", "airmon-ng check kill 2>&1; airmon-ng start wlan0 2>&1 || "
-                  "echo 'needs aircrack-ng + root'"}},
-                {"Monitor mode OFF", "airmon-ng stop wlan0mon; restart NM",
-                 {"sh", "-c", "airmon-ng stop wlan0mon 2>&1; systemctl restart NetworkManager 2>/dev/null; "
-                  "echo done"}},
-                {"Airodump scan (APs+clients)", "airodump-ng wlan0mon",
-                 {"sh", "-c", "airodump-ng wlan0mon 2>&1 || echo 'enable Monitor mode first'"}},
-                {"Capture handshakes -> /tmp", "airodump-ng -w /tmp/bruce-wifi wlan0mon",
-                 {"sh", "-c", "airodump-ng -w /tmp/bruce-wifi wlan0mon 2>&1 || "
-                  "echo 'enable Monitor mode first'"}},
-
-                // --- attacks (authorized testing only) ---
-                {"Deauth flood (mdk4)", "mdk4 wlan0mon d",
-                 {"sh", "-c", "mdk4 wlan0mon d 2>&1 || echo 'needs mdk4 + Monitor mode'"}},
-                {"Beacon spam (mdk4)", "mdk4 wlan0mon b -s 100",
-                 {"sh", "-c", "mdk4 wlan0mon b -s 100 2>&1 || echo 'needs mdk4 + Monitor mode'"}},
-                {"Rogue open AP (hostapd)", "open AP 'Free WiFi' on wlan0",
-                 {"sh", "-c",
-                  "cfg=$(mktemp); printf 'interface=wlan0\\nssid=Free WiFi\\nchannel=6\\n"
-                  "hw_mode=g\\n' > \"$cfg\"; echo \"starting open AP (Ctrl-C/back to stop)\"; "
-                  "hostapd \"$cfg\" 2>&1 || echo 'needs hostapd + root; disable Monitor mode first'"}},
-
-                // --- radio toggles ---
-                {"Enable Wi-Fi radio", "rfkill unblock wifi", {"rfkill", "unblock", "wifi"}},
-                {"Disable Wi-Fi radio", "rfkill block wifi", {"rfkill", "block", "wifi"}},
-            },
+            build_wifi_actions(),
         },
         {
             "Bluetooth LE",
@@ -347,7 +515,10 @@ std::vector<ToolCategory>& mutable_catalog() {
             icon::kNfc,
             false,
             {
-                // --- M5 RF+NFC CAP: ST25R3916 over spidev (native driver) ---
+                // --- M5 RF+NFC CAP: ST25R3916 over HAT SPI (native driver) ---
+                // The app powers the cap chain first (M5IOE1 PYG13 HAT rail +
+                // GPIO26 POWER_EN) and bit-bangs NFC_CS on GPIO22; spidev must
+                // exist (sudo raspi-config nonint do_spi 0, once).
                 {"ST25R: Read tag (UID/ATQA/SAK)",
                  "Power the field and read a 13.56MHz ISO14443A tag's UID, ATQA and SAK.",
                  {self_exe_path(), "--rfid-read"}},
@@ -358,7 +529,7 @@ std::vector<ToolCategory>& mutable_catalog() {
                  "Read a tag's UID, then emulate it as an NFC-A target until you go back.",
                  {self_exe_path(), "--rfid-clone"}},
                 {"ST25R: Detect chip",
-                 "Probe the ST25R3916 over spidev (reads IC_IDENTITY); verifies CAP seating.",
+                 "Probe the ST25R3916: powers the cap up, then reads IC_IDENTITY.",
                  {self_exe_path(), "--st25r-detect"}},
 
                 // --- PN532 reader over I2C/SPI/UART (via libnfc) ---
@@ -416,15 +587,25 @@ std::vector<ToolCategory>& mutable_catalog() {
             false,
             {
                 {"Use CC1101 CAP (detect)",
-                 "Select the M5 CAP CC1101: probe it over spidev and confirm the "
-                 "chip responds before using RF tools.",
+                 "Select the M5 CAP CC1101: powers the cap up, probes it over "
+                 "SPI (CS1/G7) and confirms the chip responds.",
                  {self_exe_path(), "--cc1101-detect"}},
-                {"Capture 433MHz (30s)", "timeout 30 rtl_433", {"timeout", "30", "rtl_433"}},
-                {"List SDR devices", "rtl_test -t", {"rtl_test", "-t"}},
+                {"Capture 433MHz (30s, RTL-SDR dongle)", "timeout 30 rtl_433",
+                 {"sh", "-c",
+                  "command -v rtl_433 >/dev/null 2>&1 || "
+                  "{ echo 'rtl_433 is not installed (and it needs an RTL-SDR USB dongle).'; "
+                  "echo 'Run: sudo apt install rtl-433'; exit 127; }; timeout 30 rtl_433 2>&1"}},
+                {"List SDR devices (RTL-SDR dongle)", "rtl_test -t",
+                 {"sh", "-c",
+                  "command -v rtl_test >/dev/null 2>&1 || "
+                  "{ echo 'rtl_test is not installed (and it needs an RTL-SDR USB dongle).'; "
+                  "echo 'Run: sudo apt install rtl-sdr'; exit 127; }; rtl_test -t 2>&1"}},
                 {"FM radio RX 100.0MHz (RTL-SDR)", "rtl_fm | aplay",
                  {"sh", "-c",
+                  "command -v rtl_fm >/dev/null 2>&1 || "
+                  "{ echo 'rtl_fm is not installed. Run: sudo apt install rtl-sdr'; exit 127; }; "
                   "rtl_fm -f 100M -M wbfm -s 200k -r 48k 2>/dev/null | aplay -r 48k -f S16_LE 2>&1 || "
-                  "echo 'needs an RTL-SDR dongle + alsa-utils (aplay)'"}},
+                  "echo 'playback failed - needs an RTL-SDR dongle + alsa-utils (aplay)'"}},
             },
         },
         {
@@ -468,8 +649,10 @@ std::vector<ToolCategory>& mutable_catalog() {
             icon::kShield,
             false,
             {
-                {"Start Responder on wlan0", "responder -I wlan0", {"responder", "-I", "wlan0"}},
-                {"Start Responder on eth0", "responder -I eth0", {"responder", "-I", "eth0"}},
+                {"Start Responder on wlan0", "responder -I wlan0",
+                 {"responder", "-I", "wlan0"}, true},
+                {"Start Responder on eth0", "responder -I eth0",
+                 {"responder", "-I", "eth0"}, true},
             },
         },
         {
@@ -630,12 +813,25 @@ std::vector<ToolCategory>& mutable_catalog() {
             icon::kClock,
             false,
             {
-                {"Clock (live)", "date every second",
-                 {"sh", "-c", "while true; do printf '\\r%s' \"$(date '+%Y-%m-%d %H:%M:%S')\"; sleep 1; done"}},
+                {"Clock", "A full-screen themed clock \xe2\x80\x94 just the time and date",
+                 {"sh", "-c", "while true; do printf '\\r%s' \"$(date '+%Y-%m-%d %H:%M:%S')\"; sleep 1; done"},
+                 false, /*clock_view=*/true},
                 {"Countdown timer (60s)", "sleep 60; beep",
                  {"sh", "-c", "for i in $(seq 60 -1 1); do printf '\\r%2ds remaining ' \"$i\"; sleep 1; done; "
                   "echo; echo 'Time up!'"}},
                 {"Uptime + load", "uptime", {"uptime"}},
+                // Installs the optional/offensive tooling (Suggests set) with no
+                // password prompt: needs_root routes this through sudo -n <self>
+                // --root-sh, and the package's sudoers rule makes that passwordless.
+                {"Install optional tools (apt)",
+                 "apt-get install the Suggests set (aircrack-ng, mdk4, hostapd, "
+                 "arp-scan, dnsmasq, ...). Passwordless via the installed sudoers rule.",
+                 {"sh", "-c",
+                  "export DEBIAN_FRONTEND=noninteractive; "
+                  "apt-get update 2>&1; "
+                  "apt-get install -y aircrack-ng mdk4 hostapd arp-scan dnsmasq "
+                  "v4l-utils lirc alsa-utils dsniff 2>&1; echo; echo 'done.'"},
+                 true},
                 {"QR code (this device URL)", "qrencode -t UTF8",
                  {"sh", "-c", "ip=$(hostname -I 2>/dev/null | awk '{print $1}'); "
                   "qrencode -t UTF8 \"http://$ip:8080\" 2>&1 || echo 'needs qrencode'"}},
@@ -679,8 +875,11 @@ const std::vector<ToolCategory>& tool_catalog() {
 
 void refresh_dynamic_categories() {
     for (auto& category : mutable_catalog()) {
-        if (std::string(category.label) == "Nmap") {
+        const std::string label = category.label;
+        if (label == "Nmap") {
             category.actions = build_nmap_actions();
+        } else if (label == "Wi-Fi") {
+            category.actions = build_wifi_actions();
         }
     }
 }
@@ -690,25 +889,140 @@ void on_navigation_action(int category_index, int item_index) {
         return;
     }
     const auto& catalog = mutable_catalog();
-    if (category_index >= static_cast<int>(catalog.size()) ||
-        std::string(catalog[static_cast<size_t>(category_index)].label) != "Nmap") {
+    if (category_index >= static_cast<int>(catalog.size())) {
+        return;
+    }
+    const std::string label = catalog[static_cast<size_t>(category_index)].label;
+
+    if (label == "Nmap") {
+        // Mirror build_nmap_actions()'s row layout to map the tapped row to an action.
+        const std::string dir = nmap_dir();
+        const std::string selected = read_first_line(dir + "/selected");
+        if (selected.empty()) {
+            // Row 0 is "Scan" (runnable); rows >= 1 are discovered hosts.
+            const auto hosts = read_lines(dir + "/hosts");
+            const int host = item_index - 1;
+            if (host >= 0 && host < static_cast<int>(hosts.size())) {
+                write_file(dir + "/selected", hosts[static_cast<size_t>(host)]);
+            }
+        } else if (item_index == 0) {
+            // Row 0 is "Back to host list".
+            std::remove((dir + "/selected").c_str());
+        }
         return;
     }
 
-    // Mirror build_nmap_actions()'s row layout to map the tapped row to an action.
-    const std::string dir = nmap_dir();
-    const std::string selected = read_first_line(dir + "/selected");
-    if (selected.empty()) {
-        // Row 0 is "Scan" (runnable); rows >= 1 are discovered hosts.
-        const auto hosts = read_lines(dir + "/hosts");
-        const int host = item_index - 1;
-        if (host >= 0 && host < static_cast<int>(hosts.size())) {
-            write_file(dir + "/selected", hosts[static_cast<size_t>(host)]);
+    if (label == "Wi-Fi") {
+        // Evil Portal clone rows sit after the fixed prefix; row layout mirrors
+        // build_portal_rows(): [scan][no-APs] / [scan][AP...] / [back][clone].
+        const int static_count = static_cast<int>(build_wifi_static_actions().size());
+        if (item_index < static_count) {
+            return;
         }
-    } else if (item_index == 0) {
-        // Row 0 is "Back to host list".
-        std::remove((dir + "/selected").c_str());
+        const std::string dir = portal_dir();
+        const std::string selected = read_first_line(dir + "/selected");
+        if (selected.empty()) {
+            // The block's row 0 is the scan (runnable); rows >= 1 are targets.
+            const auto targets = read_lines(dir + "/targets");
+            const int target = item_index - static_count - 1;
+            if (target >= 0 && target < static_cast<int>(targets.size())) {
+                write_file(dir + "/selected", targets[static_cast<size_t>(target)]);
+            }
+        } else if (item_index == static_count) {
+            // "< Back to AP list".
+            std::remove((dir + "/selected").c_str());
+        }
     }
+}
+
+namespace {
+
+// Shared sudo escalation for a non-root app: `sudo <flags> <command>`, where
+// command is either a native re-exec of this binary (already authorized by the
+// sudoers rule) or, for other root-needing rows, this binary's `--root-sh`
+// passthrough. `flags` selects the authentication mode: `{"-n"}` for the
+// passwordless rule, `{"-k", "-S", "-p", ""}` for the password prompt path.
+std::vector<std::string> escalated_argv(const ToolAction& action,
+                                        const std::vector<const char*>& flags) {
+    std::vector<std::string> out;
+    if (action.argv[0] == self_exe_path()) {
+        out.reserve(action.argv.size() + flags.size() + 1);
+    } else {
+        out.reserve(flags.size() + 4);
+    }
+    out.emplace_back("sudo");
+    for (const char* flag : flags) {
+        out.emplace_back(flag);
+    }
+    // Native re-execs (--evil-portal, --ble-spam, ...): run directly.
+    if (action.argv[0] == self_exe_path()) {
+        out.insert(out.end(), action.argv.begin(), action.argv.end());
+        return out;
+    }
+    // Everything else root-needing (iw scans, monitor mode, rogue AP,
+    // responder): route through the same sudoers-authorized binary via its
+    // --root-sh passthrough, so the rule stays scoped to this one file.
+    std::string script;
+    if (action.argv[0] == "sh" && action.argv.size() >= 3 && action.argv[1] == "-c") {
+        script = action.argv[2];
+    } else {
+        script = "exec";
+        for (const std::string& word : action.argv) {
+            script += " " + sh_quote(word); // exec: the Stop button kills the tool, not sh
+        }
+    }
+    out.push_back(self_exe_path());
+    out.emplace_back("--root-sh");
+    out.push_back(std::move(script));
+    return out;
+}
+
+} // namespace
+
+std::vector<std::string> launch_argv(const ToolAction& action) {
+    // A root app already has the rights; empty argv is a navigation row;
+    // unflagged external rows (nmap, curl, ...) run as-is.
+    if (action.argv.empty() || geteuid() == 0 ||
+        !(action.argv[0] == self_exe_path() || action.needs_root)) {
+        return action.argv;
+    }
+    return escalated_argv(action, {"-n"}); // never prompt: the sudoers.d rule makes it passwordless
+}
+
+bool action_needs_root(const ToolAction& action) {
+    return !action.argv.empty() && geteuid() != 0 &&
+           (action.argv[0] == self_exe_path() || action.needs_root);
+}
+
+bool sudo_passwordless() {
+    if (geteuid() == 0) {
+        return true;
+    }
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        return false;
+    }
+    if (pid == 0) {
+        const int devnull = ::open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            ::dup2(devnull, STDOUT_FILENO);
+            ::dup2(devnull, STDERR_FILENO);
+            ::close(devnull);
+        }
+        ::execlp("sudo", "sudo", "-n", "true", static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    int status = 0;
+    return ::waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+std::vector<std::string> sudo_argv_with_password(const ToolAction& action) {
+    // Same gating as launch_argv: only rows it would wrap belong here.
+    if (action.argv.empty() || geteuid() == 0 ||
+        !(action.argv[0] == self_exe_path() || action.needs_root)) {
+        return action.argv;
+    }
+    return escalated_argv(action, {"-k", "-S", "-p", ""});
 }
 
 } // namespace model

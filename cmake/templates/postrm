@@ -1,0 +1,12 @@
+#!/bin/sh
+# Debian maintainer script: remove the sudoers rule the postinst created, so
+# uninstalling the package also revokes the passwordless-root grant.
+set -e
+
+case "$1" in
+    remove|purge)
+        rm -f /etc/sudoers.d/bruce-cardputerzero
+        ;;
+esac
+
+exit 0

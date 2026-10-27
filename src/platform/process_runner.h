@@ -43,8 +43,11 @@ public:
 
     // Starts argv[0] with the remaining entries as arguments. Must be called
     // from the LVGL thread. Returns false if a process is already running or
-    // fork/pipe setup failed.
-    bool start(const std::vector<std::string>& argv, UpdateCallback on_update, void* owner);
+    // fork/pipe setup failed. When `stdin_payload` is non-empty it is written
+    // to the child's stdin and the pipe is closed right away - that is how the
+    // sudo password reaches `sudo -S` (via pipe, never argv, never logged).
+    bool start(const std::vector<std::string>& argv, UpdateCallback on_update, void* owner,
+               const std::string& stdin_payload = {});
 
     // Sends SIGTERM to the process group and waits for the reader thread to
     // finish. Safe to call when nothing is running. Must be called from the
