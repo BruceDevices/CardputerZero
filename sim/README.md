@@ -40,6 +40,24 @@ sim/.venv/bin/python sim/bruce_sim.py
 | `X` `C` `↓` `→` | 3 | Next | Down | Scroll down |
 | `T` | 4 | Light/Dark | Light/Dark | Clear |
 
+### Terminal screen
+
+The **Terminal** category has two rows — *Terminal (user)* and *Root terminal
+(sudo)* (both open the same screen; root is chosen per command). The terminal
+has an output log above a command input line, with nav slots
+`Back · Log Up · Run/Stop · Log Down · Type (keyboard-focus toggle)`; the log
+tail-follows unless you scrolled up with `Log Up`/`Log Down`.
+
+- **Typing focus:** Enter runs the typed command; `↑`/`↓` recall history;
+  `Esc` leaves typing (nav mode), `Esc` again goes back.
+- **Root is per command:** a command typed with a leading `sudo ` runs as root
+  (the prefix is stripped). Root commands run as `sudo -n <self> --root-sh <cmd>`
+  when a passwordless sudo rule exists, otherwise `sudo -k -S -p '' <self>
+  --root-sh <cmd>` with the password typed into the terminal line when prompted.
+  `--root-sh` is a sudoers-scoped passthrough that re-execs this script under
+  sudo and runs `sh -c <cmd>`; plain commands run as `sh -c <cmd>`.
+- **Default mode** prints a simulated transcript — nothing is executed.
+
 You can also click the five on-screen nav buttons.
 
 ## Interactive results (Bruce `loopOptions`)

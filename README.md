@@ -28,10 +28,24 @@ That keeps the port tiny and every tool behaves exactly like its CLI.
   via `lv_async_call`.
 - **Screens** — one reusable `MenuScreen` drives both the category menu and
   each tool list; `ToolRunScreen` runs a tool and shows its live log;
+  `TerminalScreen` is the interactive shell behind the "Terminal" category;
   `AboutScreen` is static. `ScreenManager` swaps screens from the current-page
   subject.
 - **Theme** — purple/black palette in `src/view/ui_const.h`; light/dark toggle
   in the nav bar.
+- **Terminal** — type a command on the device keyboard, Enter runs it, output
+  streams into a tail-following log (Up/Down recall history while typing, ESC
+  leaves the input). A leading `sudo ` runs the command as root: passwordless
+  through the installed sudoers rule, otherwise the app asks for the sudo
+  password on-device once and caches it for the terminal session. The same
+  screen serves the user and root rows; `Tool catalog` stays the only place
+  tools are defined.
+- **Status bar** — the title bar shows Wi-Fi strength and battery
+  (charge state included) read from `/sys`, refreshed every 5 s
+  (`src/platform/device_status.*`, ported from the official M5Stack template).
+- **Screenshot** — pressing the PrintScreen key dumps the active screen to a
+  PNG (`src/platform/screenshot_service.*`, LVGL snapshot + libpng) and
+  confirms with a toast (`src/view/widgets/toast.*`).
 
 ## Architecture (MVVM around LVGL)
 
@@ -43,7 +57,10 @@ That keeps the port tiny and every tool behaves exactly like its CLI.
   provides navigation actions (open menu, run tool, back, quit, toggle theme).
 - **Reactive/data binding**: `src/reactive` wraps LVGL observer subjects.
 - **Platform layer**: Linux input + the process runner, plus native subcommands
-  the app re-execs itself for (`--ble-spam`, `--wardrive`, `--evil-portal`, …).
+  the app re-execs itself for (`--ble-spam`, `--wardrive`, `--evil-portal`, …)
+  and the `--root-sh` passthrough that lets the sudoers rule carry root shell
+  rows (catalog scripts and terminal commands alike) without ever authorizing
+  `/bin/sh` itself.
   The nav bar maps hardware/keyboard keys `4`–`8`, plus `ESC` for back/quit.
 
 ## Repository Layout
@@ -400,6 +417,12 @@ The bottom nav bar maps hardware/keyboard keys from left to right:
 | `7` | Fourth icon button |
 | `8` | Fifth icon button |
 | `ESC` | First icon button / quit |
+
+Per-screen slot meanings: on `ToolRunScreen` the slots are Back / Up / Run-Stop
+/ Down / Clear; on `TerminalScreen` they are Back / Up / Run-Stop / Down / Type
+(slot 4 focuses the command input — while typing, every key feeds the input,
+Enter runs the command, Up/Down recall history and `ESC` returns to nav mode;
+a leading `sudo ` in a command runs it as root).
 
 ### Adding a Screen
 

@@ -845,6 +845,22 @@ std::vector<ToolCategory>& mutable_catalog() {
             },
         },
         {
+            "Terminal",
+            "Interactive shell - run commands as the user or as root (sudo)",
+            icon::kUart,
+            false,
+            {
+                {"Terminal (user)", "Interactive shell as the logged-in user",
+                 {"sh", "-c", "echo 'terminal view unavailable'"},
+                 false, false, true},
+                {"Root terminal (sudo)",
+                 "Interactive shell; commands run as root through the "
+                 "sudoers-scoped --root-sh passthrough",
+                 {"sh", "-c", "echo 'terminal view unavailable'"},
+                 false, false, true},
+            },
+        },
+        {
             "Scripts",
             "Run your own executable scripts from ~/.bruce/scripts (GPIO, RF, net...)",
             icon::kUart,
@@ -1023,6 +1039,40 @@ std::vector<std::string> sudo_argv_with_password(const ToolAction& action) {
         return action.argv;
     }
     return escalated_argv(action, {"-k", "-S", "-p", ""});
+}
+
+TerminalAuth terminal_auth_mode() {
+    if (geteuid() == 0) {
+        return TerminalAuth::NotNeeded;
+    }
+    return sudo_passwordless() ? TerminalAuth::Passwordless : TerminalAuth::Password;
+}
+
+std::vector<std::string> terminal_command_argv(const std::string& command, bool as_root) {
+    // User commands - and root commands when the app itself is root - run in a
+    // plain shell. ProcessRunner::stop() signals the process group, so Stop
+    // kills both sh and the command it spawned.
+    if (!as_root || geteuid() == 0) {
+        return {"sh", "-c", command};
+    }
+    // Root commands ride the same sudoers-scoped `--root-sh` passthrough as
+    // every root catalog row (see escalated_argv): the rule authorizes exactly
+    // this binary, with any argv, so a user-typed command adds no new access.
+    std::vector<std::string> out;
+    out.reserve(7);
+    out.emplace_back("sudo");
+    if (terminal_auth_mode() == TerminalAuth::Passwordless) {
+        out.emplace_back("-n");
+    } else {
+        out.emplace_back("-k");
+        out.emplace_back("-S");
+        out.emplace_back("-p");
+        out.emplace_back("");
+    }
+    out.push_back(self_exe_path());
+    out.emplace_back("--root-sh");
+    out.push_back(command);
+    return out;
 }
 
 } // namespace model

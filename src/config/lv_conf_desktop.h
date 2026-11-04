@@ -127,6 +127,13 @@
 #define LV_IMAGE_HEADER_CACHE_DEF_CNT      64
 
 /*====================
+   SNAPSHOT
+ *====================*/
+
+// lv_snapshot_take backs the PrintScreen screenshot feature.
+#define LV_USE_SNAPSHOT                    1
+
+/*====================
    FILESYSTEM
  *====================*/
 

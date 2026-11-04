@@ -9,10 +9,11 @@
 namespace model {
 
 enum class AppPage {
-    Menu    = 0,
-    ToolRun = 1,
-    About   = 2,
-    Clock   = 3,
+    Menu     = 0,
+    ToolRun  = 1,
+    About    = 2,
+    Clock    = 3,
+    Terminal = 4,
 };
 
 class BaseModel {

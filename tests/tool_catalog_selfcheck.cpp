@@ -53,6 +53,55 @@ int main() {
     // Exactly one info-only category (About) is expected today.
     assert(info_only_count == 1);
 
+    // Terminal category: exactly two view rows, both opening TerminalScreen,
+    // neither a launcher nor a root-flagged catalog row (root is chosen per
+    // typed command via the leading "sudo " prefix inside TerminalScreen).
+    const model::ToolCategory* terminal = nullptr;
+    for (const auto& category : catalog) {
+        if (std::string(category.label) == "Terminal") {
+            terminal = &category;
+        }
+    }
+    assert(terminal && terminal->actions.size() == 2);
+    for (const auto& action : terminal->actions) {
+        assert(action.terminal_view);
+        assert(!action.needs_root);
+        assert(!action.argv.empty()); // harmless fallback print, never launched by MenuScreen
+    }
+
+    // Terminal command routing (what TerminalScreen spawns). User commands -
+    // and root commands when the app itself is root - run as plain `sh -c`.
+    // Root commands for a non-root app ride the sudoers-authorized binary's
+    // `--root-sh` passthrough; the flag set follows terminal_auth_mode().
+    {
+        const std::vector<std::string> user = model::terminal_command_argv("df -h", false);
+        assert(user.size() == 3 && user[0] == "sh" && user[1] == "-c" && user[2] == "df -h");
+
+        if (::geteuid() == 0) {
+            const std::vector<std::string> root = model::terminal_command_argv("id -u", true);
+            assert(root.size() == 3 && root[0] == "sh" && root[1] == "-c" && root[2] == "id -u");
+            assert(model::terminal_auth_mode() == model::TerminalAuth::NotNeeded);
+        } else {
+            char exe[4096];
+            const ssize_t n = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+            assert(n > 0);
+            exe[n] = '\0';
+            const std::string self(exe);
+            const std::vector<std::string> root = model::terminal_command_argv("id -u", true);
+            assert(root[0] == "sudo" && root.back() == "id -u");
+            const bool passwordless = model::terminal_auth_mode() == model::TerminalAuth::Passwordless;
+            if (passwordless) {
+                assert(root.size() == 5 && root[1] == "-n" && root[2] == self &&
+                       root[3] == "--root-sh" && root[4] == "id -u");
+            } else {
+                assert(model::terminal_auth_mode() == model::TerminalAuth::Password);
+                assert(root.size() == 8 && root[1] == "-k" && root[2] == "-S" &&
+                       root[3] == "-p" && root[4] == "" &&
+                       root[5] == self && root[6] == "--root-sh" && root[7] == "id -u");
+            }
+        }
+    }
+
     // Launch routing (what ToolRunScreen actually spawns). As root the wrap is
     // skipped, so only check the escalation shapes for a non-root app - the
     // APPLaunch normal case:

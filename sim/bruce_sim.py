@@ -23,6 +23,13 @@ import os
 import sys
 import time
 
+# sudoers-scoped root passthrough (native --root-sh): the runner re-invokes
+# this script under sudo as `<self> --root-sh <cmd>`; exec the command and exit
+# before any UI is set up.
+if "--root-sh" in sys.argv:
+    _i = sys.argv.index("--root-sh")
+    os.execvp("sh", ["sh", "-c", sys.argv[_i + 1]])
+
 try:
     import pygame
 except ModuleNotFoundError:
@@ -74,6 +81,15 @@ class App:
         self.opt_stack = []     # interactive options menu: [[title, items, idx], ...]
         self.detail = None      # (title, lines) for the detail screen
 
+        # Terminal screen state
+        self.term_title = "Terminal (user)"
+        self.term_log = []      # output lines
+        self.term_input = ""    # current command line
+        self.term_typing = True # keyboard focus on the input line
+        self.term_scroll = None # log scroll offset; None = tail-follow
+        self.term_hist = []     # recalled with Up/Down while typing
+        self.term_hist_idx = None
+
     # ── navbar: each screen declares its 5 slots (label, handler|None) ──────
     def nav_slots(self):
         tog = ("Dark" if not self.theme.dark else "Light", self.toggle_theme)
@@ -95,6 +111,11 @@ class App:
                     ("Down", self.scroll_down), ("Clear", self.clear_log)]
         if self.screen == "clock":
             return [("Back", self.back), ("", None), ("", None), ("", None), tog]
+        if self.screen == "terminal":
+            run = ("Stop", self.term_stop) if self.runner.running() else ("Run", self.term_run)
+            return [("Back", self.back), ("Up", self.term_scroll_up), run,
+                    ("Down", self.term_scroll_down),
+                    ("Esc" if self.term_typing else "Type", self.toggle_term_typing)]
         if self.screen == "about":
             return [("Back", self.back), ("", None), ("", None), ("", None), tog]
         return [("", None)] * 5
@@ -146,6 +167,13 @@ class App:
             if action.view == "clock":               # full-screen clock widget
                 self.screen = "clock"
                 return
+            if action.view == "terminal":            # interactive terminal screen
+                self.term_title = action.label
+                self.term_log, self.term_input = [], ""
+                self.term_typing, self.term_hist, self.term_hist_idx = True, [], None
+                self.term_scroll = None
+                self.screen = "terminal"
+                return
             if action.items:                         # interactive drill-down
                 self.opt_stack = [[action.label, action.items, 0]]
                 self.screen = "options"
@@ -182,6 +210,69 @@ class App:
         self.log = []
         self.scroll = 0
 
+    # ── terminal screen ─────────────────────────────────────────────────────
+    def toggle_term_typing(self):
+        self.term_typing = not self.term_typing
+        if self.term_typing:
+            self.term_scroll = None               # resume tail-follow
+
+    def term_scroll_up(self):
+        log = len(self.term_log) + (1 if self.runner.password_pending() else 0)
+        if self.term_scroll is None:
+            self.term_scroll = max(0, log - 1)
+        else:
+            self.term_scroll = max(0, self.term_scroll - 1)
+
+    def term_scroll_down(self):
+        if self.term_scroll is not None:
+            self.term_scroll += 1                 # clamped on draw; past the end = follow
+
+    def term_stop(self):
+        self.runner.stop()
+
+    def term_run(self):
+        # While sudo is asking for a password, the next typed line IS it.
+        if self.runner.password_pending():
+            self.runner.provide_password(self.term_input)
+            self.term_input = ""
+            return
+        typed = self.term_input.strip()
+        if not typed or self.runner.running():
+            return
+        root = typed.startswith("sudo ")          # per-command root selection
+        cmd = typed[5:] if root else typed
+        self.term_log.append("user$ " + typed)
+        self.term_hist.append(typed)
+        self.term_hist_idx = None
+        self.term_input = ""
+        self.term_scroll = None                   # tail-follow the new run
+        self.runner.start_command(cmd, root)
+
+    def term_recall(self, up):
+        if not self.term_hist:
+            return
+        if self.term_hist_idx is None:
+            self.term_hist_idx = len(self.term_hist) if up else 0
+        else:
+            self.term_hist_idx += 1 if up else -1
+        self.term_hist_idx = max(0, min(self.term_hist_idx, len(self.term_hist) - 1))
+        self.term_input = self.term_hist[self.term_hist_idx]
+
+    def term_key(self, e):
+        """Keyboard events while the input line has focus."""
+        if e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            self.term_run()
+        elif e.key == pygame.K_ESCAPE:
+            self.term_typing = False              # leave typing -> nav mode
+        elif e.key == pygame.K_BACKSPACE:
+            self.term_input = self.term_input[:-1]
+        elif e.key == pygame.K_UP:
+            self.term_recall(up=True)
+        elif e.key == pygame.K_DOWN:
+            self.term_recall(up=False)
+        elif e.unicode and e.unicode.isprintable():
+            self.term_input += e.unicode
+
     def scroll_up(self):
         self.scroll = max(0, self.scroll - 1)
 
@@ -199,6 +290,8 @@ class App:
     def handle_key(self, key):
         if self.screen == "boot":
             return
+        if self.screen == "terminal" and self.term_typing:
+            return          # raw text events go to term_key() in the main loop
         slot = self.KEYMAP.get(key)
         if slot is None:
             return
@@ -246,7 +339,8 @@ class App:
             self.draw_titlebar(s, c)
             {"menu": self.draw_menu, "tools": self.draw_tools,
              "run": self.draw_run, "about": self.draw_about, "clock": self.draw_clock,
-             "options": self.draw_options, "detail": self.draw_detail}[self.screen](s, c)
+             "options": self.draw_options, "detail": self.draw_detail,
+             "terminal": self.draw_terminal}[self.screen](s, c)
             self.draw_navbar(s, c)
         pygame.transform.scale(s, self.window.get_size(), self.window)
         pygame.display.flip()
@@ -285,7 +379,7 @@ class App:
 
         titles = {"menu": "Bruce", "tools": C.CATALOG[self.cat].label,
                   "run": self.action.label if self.action else "", "about": "About",
-                  "clock": "Clock",
+                  "clock": "Clock", "terminal": self.term_title,
                   "options": self.opt_stack[-1][0] if self.opt_stack else "",
                   "detail": self.detail[0] if self.detail else ""}
         self._fit_center(s, titles.get(self.screen, ""), self.f_title, w,
@@ -425,6 +519,34 @@ class App:
         self._text(s, time.strftime("%d %B %Y", now), self.f_small, c["text"],
                    (cx, br.bottom + 16), center=True)
 
+    def draw_terminal(self, s, c):
+        # Output log above a single command input line; tail-follows unless the
+        # user scrolled up with the nav slots.
+        top, row_h = T.TITLEBAR_H + 3, 11
+        input_y = T.SCREEN_H - T.NAVBAR_H - 14
+        rows = (input_y - top - 4) // row_h
+        log = list(self.term_log)
+        if self.runner.password_pending():
+            log.append("[sudo] password: *** (type it, then Enter)")
+        if self.term_scroll is None or self.term_scroll >= len(log):
+            self.term_scroll = None               # follow the tail
+            view = log[max(0, len(log) - rows):]
+        else:
+            view = log[self.term_scroll:self.term_scroll + rows]
+        for i, line in enumerate(view):
+            col = (c["info"] if line.startswith("[sim]")
+                   else c["primary"] if line.startswith("[sudo]")
+                   else c["text"])
+            self._text(s, line[:60], self.f_small, col, (8, top + i * row_h))
+        # command line
+        pygame.draw.line(s, c["border"], (4, input_y - 3), (T.SCREEN_W - 4, input_y - 3))
+        cur = "_" if self.term_typing else " "
+        self._text(s, ("user$ " + self.term_input + cur)[:60], self.f_body,
+                   c["text"], (8, input_y))
+        if self.runner.running():
+            self._text(s, "● running", self.f_small, c["primary"],
+                       (T.SCREEN_W - 8, input_y), right=True)
+
     def draw_about(self, s, c):
         y = T.TITLEBAR_H + 8
         for para in C.ABOUT.text.split("\n"):
@@ -463,12 +585,18 @@ class App:
                 if e.type == pygame.QUIT:
                     self.quit = True
                 elif e.type == pygame.KEYDOWN:
-                    self.handle_key(e.key)
+                    if self.screen == "terminal" and self.term_typing:
+                        self.term_key(e)
+                    else:
+                        self.handle_key(e.key)
                 elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                     self.handle_click(e.pos)
-            if self.screen == "run":
+            if self.screen in ("run", "terminal"):
                 lines, _ = self.runner.drain()
-                self.log += lines
+                if self.screen == "terminal":
+                    self.term_log += lines
+                else:
+                    self.log += lines
             self.draw()
             self.clock.tick(60)
         self.runner.stop()

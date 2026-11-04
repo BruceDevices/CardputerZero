@@ -214,6 +214,11 @@ void MenuScreen::open_selected() {
         return;
     }
 
+    if (category.actions[selected_index_].terminal_view) {
+        view_model().show_terminal(category_index_, static_cast<int>(selected_index_));
+        return;
+    }
+
     view_model().show_tool_run(category_index_, static_cast<int>(selected_index_));
 }
 

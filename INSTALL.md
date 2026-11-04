@@ -157,9 +157,18 @@ Menu contents: **Wi-Fi** (including **Evil Portal** — AP + DNS-hijacked captiv
 portal capturing credentials to `~/.bruce/BruceEvilCreds/`, a Linux port of the
 ESP32 Bruce feature; needs root and `sudo apt install hostapd dnsmasq`), plus
 **Bluetooth LE**, **RFID**, **Sub-GHz/RF**, **Network Tools**, **Nmap**,
-**SMB Client**, **Responder**, hardware buses, **Scripts**, **Theme** and
-**About**. Add or edit tools by editing one file — `src/model/tool_catalog.cpp`
-— then rebuild.
+**SMB Client**, **Responder**, hardware buses, **Terminal**, **Scripts**,
+**Theme** and **About**. Add or edit tools by editing one file —
+`src/model/tool_catalog.cpp` — then rebuild.
+
+**Terminal** (the "execute root commands" entry point): pick **Terminal (user)**
+or **Root terminal (sudo)**, press `8` (Type), and type a command — Enter runs
+it, Up/Down recall history, ESC leaves the input, `4`/ESC goes back. Every
+command runs in a fresh shell (`sh -c`), so `cd` does not persist between runs.
+A leading `sudo` runs it as root: with the sudoers rule installed that is
+passwordless; without it the app asks for the sudo password on-device once and
+caches it for the terminal session (a rejected password is dropped and asked
+again next time). Example: `sudo iw dev wlan0 scan | grep SSID`.
 
 ---
 

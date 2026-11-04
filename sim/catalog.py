@@ -440,6 +440,16 @@ CATALOG = [
                _ok("iButton/1-Wire: 01-000075c1e2a3")),
     ]),
 
+    # ── Terminal ──────────────────────────────────────────────────────────────
+    Category("Terminal", "Interactive shell - run commands as the user or as root (sudo)",
+             IC["uart"], [
+        Action("Terminal (user)", "Interactive shell as the logged-in user",
+               ["self", "--terminal"], [], view="terminal"),
+        Action("Root terminal (sudo)",
+               "Interactive shell; commands run as root through the sudoers-scoped --root-sh passthrough",
+               ["self", "--root-sh"], [], view="terminal"),
+    ]),
+
     # ── Scripts ───────────────────────────────────────────────────────────────
     Category("Scripts", "Run your own executable scripts from ~/.bruce/scripts", IC["uart"], [
         Action("No scripts yet", "Add an executable script (shebang + chmod +x) to ~/.bruce/scripts",
@@ -560,7 +570,7 @@ THEME_INDEX = CATALOG.index(THEME_CATEGORY)
 
 if __name__ == "__main__":
     # ponytail self-check: catalog well-formed, icons present, sims terminate.
-    assert len(CATALOG) == 21, len(CATALOG)
+    assert len(CATALOG) == 22, len(CATALOG)
     for cat in CATALOG:
         assert cat.label and cat.desc and cat.icon
         if cat.info_only:
@@ -569,7 +579,7 @@ if __name__ == "__main__":
         assert cat.actions, cat.label
         for a in cat.actions:
             assert a.label and a.desc
-            assert a.nav or a.sim, a.label          # runnable rows have sim output
+            assert a.nav or a.sim or a.view == "terminal", a.label  # runnable rows have output
             if a.sim:
                 assert a.sim[-1] == "[process exited 0]", a.label  # every sim terminates
             for it in a.items:                      # interactive rows: each leaf has content

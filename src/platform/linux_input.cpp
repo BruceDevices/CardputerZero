@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <cstring>
 
-#if !USE_DESKTOP
+#if USE_DESKTOP
+#include <SDL.h>
+#else
 #include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
@@ -28,6 +30,13 @@ bool last_key_pressed = false;
 // True while a text-entry dialog (sudo password) owns the keyboard: the nav
 // router then only dispatches ESC/Enter and letters flow into the lv_group.
 bool g_text_input_mode = false;
+
+// Global shortcut sink (screenshot): sees every key press before nav/text
+// routing, so shortcuts fire regardless of who holds the keyboard focus.
+GlobalKeyListener global_key_listener = nullptr;
+void* global_key_listener_user_data = nullptr;
+uint32_t last_global_key = 0;
+uint32_t last_global_tick = 0;
 
 // Debounce for the Cardputer's matrix keyboard: one physical tap can bounce
 // into several press/release pairs, each firing a nav action. Ignore repeats of
@@ -106,6 +115,35 @@ void dispatch_nav_key(uint32_t key) {
     lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr);
 }
 
+bool emit_global_key(uint32_t key) {
+    return global_key_listener &&
+           global_key_listener(key, global_key_listener_user_data);
+}
+
+// Single key state machine for both input paths (LVGL indev events on device,
+// SDL event watch on desktop). Shortcuts get first refusal; unconsumed keys
+// keep flowing to the nav router.
+void route_key_state(uint32_t key, bool pressed) {
+    if (pressed && (!last_key_pressed || last_key != key)) {
+        // Same bounce window as the nav router: one physical tap must not
+        // capture several screenshots.
+        const uint32_t now = lv_tick_get();
+        if (key != last_global_key || (now - last_global_tick) >= kKeyDebounceMs) {
+            last_global_key = key;
+            last_global_tick = now;
+            if (emit_global_key(key)) {
+                last_key = key;
+                last_key_pressed = true;
+                return;
+            }
+        }
+        dispatch_nav_key(key);
+    }
+
+    last_key = key;
+    last_key_pressed = pressed;
+}
+
 void key_event_cb(lv_event_t* event) {
     LV_UNUSED(event);
 
@@ -117,12 +155,7 @@ void key_event_cb(lv_event_t* event) {
     const auto key = lv_indev_get_key(indev);
     const bool pressed = lv_indev_get_state(indev) == LV_INDEV_STATE_PRESSED;
 
-    if (pressed && (!last_key_pressed || last_key != key)) {
-        dispatch_nav_key(key);
-    }
-
-    last_key = key;
-    last_key_pressed = pressed;
+    route_key_state(key, pressed);
 }
 
 #if !USE_DESKTOP
@@ -172,6 +205,8 @@ uint32_t map_evdev_key(uint16_t code) {
             return ';';
         case KEY_APOSTROPHE:
             return '\'';
+        case KEY_SYSRQ:
+            return kKeyPrintScreen;
         default:
             break;
     }
@@ -232,7 +267,7 @@ bool has_nav_keys(int fd) {
     };
 
     return has_key(KEY_F) || has_key(KEY_Z) || has_key(KEY_X) || has_key(KEY_C) ||
-           has_key(KEY_T) || has_key(KEY_ENTER);
+           has_key(KEY_T) || has_key(KEY_ENTER) || has_key(KEY_SYSRQ);
 }
 
 void evdev_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
@@ -352,6 +387,24 @@ void discover_keypads(lv_display_t* display) {
 }
 #endif
 
+#if USE_DESKTOP
+// LVGL's stock SDL keyboard maps only control/text keys, so PrintScreen never
+// reaches the key router through it. Watch SDL events directly; the watch runs
+// on the main thread during lv_timer_handler's SDL poll, before LVGL sees the
+// event, and the key never re-enters the indev pipeline (no double dispatch).
+int sdl_key_watch(void* user_data, SDL_Event* event) {
+    LV_UNUSED(user_data);
+    if (!event || (event->type != SDL_KEYDOWN && event->type != SDL_KEYUP)) {
+        return 0;
+    }
+    if (event->key.keysym.sym != SDLK_PRINTSCREEN) {
+        return 0;
+    }
+    route_key_state(kKeyPrintScreen, event->type == SDL_KEYDOWN);
+    return 0;
+}
+#endif
+
 } // namespace
 
 void init_key_input(lv_display_t* display) {
@@ -359,6 +412,7 @@ void init_key_input(lv_display_t* display) {
     discover_keypads(display);
 #else
     LV_UNUSED(display);
+    SDL_AddEventWatch(sdl_key_watch, nullptr);
 #endif
 }
 
@@ -394,6 +448,18 @@ void set_text_input_mode(bool enabled) {
 
 bool text_input_mode() {
     return g_text_input_mode;
+}
+
+void set_global_key_listener(GlobalKeyListener listener, void* user_data) {
+    global_key_listener = listener;
+    global_key_listener_user_data = user_data;
+}
+
+void clear_global_key_listener(GlobalKeyListener listener, void* user_data) {
+    if (global_key_listener == listener && global_key_listener_user_data == user_data) {
+        global_key_listener = nullptr;
+        global_key_listener_user_data = nullptr;
+    }
 }
 
 } // namespace platform

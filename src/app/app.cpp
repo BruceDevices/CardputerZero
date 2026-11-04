@@ -13,6 +13,10 @@
 #include "screen_manager.h"
 #include "base_viewmodel.h"
 #include "theme.h"
+#include "screenshot_service.h"
+#include "toast.h"
+
+#include <memory>
 
 #if !USE_DESKTOP
 #if APP_USE_DRM
@@ -61,6 +65,54 @@ struct ThemeContext {
     viewmodel::BaseViewModel* view_model;
 };
 
+// PrintScreen captures the active screen to a PNG, with toast feedback on
+// lv_layer_top() so it survives screen switches. Ported from Template's
+// ShortcutController without the help popup and exit-hold logic.
+class ScreenshotController {
+public:
+    explicit ScreenshotController(viewmodel::BaseViewModel& view_model)
+        : toast_(std::make_unique<view::widgets::Toast>(lv_layer_top(), view_model)) {
+        toast_->build();
+        platform::set_global_key_listener(global_key_listener, this);
+    }
+
+    ~ScreenshotController() {
+        platform::clear_global_key_listener(global_key_listener, this);
+    }
+
+private:
+    bool handle_key(uint32_t key) {
+        if (key != platform::kKeyPrintScreen) {
+            return false;
+        }
+
+        const auto result = platform::screenshot::capture_active_screen();
+        if (result.success) {
+            LOG_INFO("screenshot saved: {}", result.path);
+            toast_->show_highlighted("Saved to ",
+                                     result.path,
+                                     "",
+                                     view::widgets::ToastTone::Success,
+                                     5200,
+                                     true);
+        }
+        else {
+            LOG_WARN("screenshot failed: {}", result.error);
+            toast_->show("Screenshot failed: " + result.error,
+                         view::widgets::ToastTone::Error,
+                         3200);
+        }
+        return true;
+    }
+
+    static bool global_key_listener(uint32_t key, void* user_data) {
+        auto* controller = static_cast<ScreenshotController*>(user_data);
+        return controller && controller->handle_key(key);
+    }
+
+    std::unique_ptr<view::widgets::Toast> toast_;
+};
+
 // Re-apply the LVGL theme when the theme epoch bumps (e.g. accent color change).
 void theme_epoch_observer(lv_observer_t* observer, lv_subject_t* subject) {
     LV_UNUSED(subject);
@@ -83,6 +135,7 @@ lv_display_t* init_display() {
     lv_sdl_mousewheel_create();
     auto* keyboard = lv_sdl_keyboard_create();
     platform::attach_key_router(keyboard);
+    platform::init_key_input(display); // registers the SDL PrintScreen watch
     return display;
 #elif APP_USE_DRM
     auto* display = lv_linux_drm_create();
@@ -138,6 +191,10 @@ int Application::run() {
 
     ScreenManager screen_manager(view_model, assets);
     screen_manager.start();
+
+    // Global PrintScreen shortcut: owns the toast on lv_layer_top() for the
+    // app's lifetime and unregisters its listener when the loop exits.
+    ScreenshotController screenshot_shortcuts(view_model);
 
     // Bruce boot animation: the shark lunges toward the screen over the menu,
     // then fades out. Non-blocking; driven by the LVGL timer loop below.

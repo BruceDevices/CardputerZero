@@ -41,6 +41,11 @@ struct ToolAction {
     // one today is the themed clock face (ClockScreen); `argv` is still kept so
     // the row degrades to a normal `date` run if the widget is ever dropped.
     bool clock_view = false;
+    // Open the interactive TerminalScreen instead of the tool-run log. Both
+    // "Terminal" rows open the same screen; root is chosen per typed command
+    // (leading "sudo "), not per row. `argv` is a harmless fallback print used
+    // only if the screen is ever dropped.
+    bool terminal_view = false;
 };
 
 // A menu category shown on the root menu (e.g. "Wi-Fi", "Responder").
@@ -96,5 +101,25 @@ bool sudo_passwordless();
 // fresh authentication so the password line is always consumed predictably,
 // `-p ''` keeps sudo's prompt out of the tool log.
 std::vector<std::string> sudo_argv_with_password(const ToolAction& action);
+
+// --- Terminal ("Terminal" category) ------------------------------------------------
+
+// How a root terminal command must be launched right now. NotNeeded: the app
+// itself is root (euid == 0), so commands run directly. Passwordless: the
+// /etc/sudoers.d rule covers this binary, `sudo -n <self> --root-sh` works.
+// Password: no rule - the command needs `sudo -k -S` plus the user's password
+// on stdin (TerminalScreen caches it for the session, ToolRunScreen asks once
+// per run - same split as the catalog rows).
+enum class TerminalAuth { NotNeeded, Passwordless, Password };
+
+TerminalAuth terminal_auth_mode();
+
+// Wrap a terminal command line for execution. User commands (and root commands
+// when the app is already root) run as `sh -c <command>`; root commands run
+// through the same sudoers-authorized binary and its `--root-sh` passthrough
+// as every root catalog row - one mechanism, no broadened rule. Note the rule
+// authorizes the binary with ANY argv, so user-typed terminal commands ride it
+// without widening the attack surface beyond what the rule already grants.
+std::vector<std::string> terminal_command_argv(const std::string& command, bool as_root);
 
 } // namespace model
