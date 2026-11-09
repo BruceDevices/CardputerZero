@@ -1,0 +1,33 @@
+{
+  "app_name": "Bruce CardputerZero",
+  "package_name": "brucecardputerzero",
+  "version": "0.1.0",
+  "description": "Bruce security toolkit UI for CardputerZero",
+
+  "store": {
+    "summary": "Bruce pentest toolkit UI — Wi-Fi, Bluetooth, RF, network and SMB tools",
+    "description": "Bruce-style security toolkit UI for the CardputerZero: a purple/black LVGL menu that launches Wi-Fi, Bluetooth, RF, network and SMB tooling from the device screen.\n\n- Launches the real Linux binaries already on the device (curl, nc, iw, bluetoothctl, smbclient, responder, rtl_433, …) and streams their output to the screen, so every tool behaves exactly like its CLI.\n- Category carousel, per-category tool lists, live tool-run log, and an interactive terminal (commands run in-session; a leading 'sudo ' runs as root).\n- Add a tool by editing one data file (the tool catalog) — no screen code needed.\n- Status bar with clock, Wi-Fi strength and battery; light/dark toggle and accent theme picker.\n\n⚠️ For authorized security testing, CTF and research only. Several menu entries (Responder, port scans, packet capture) are only legal against systems you own or have written permission to test.",
+    "categories": ["Security", "System Tools"],
+    "screenshots": [
+      "screenshot/01-menu.png",
+      "screenshot/02-wifi-tools.png",
+      "screenshot/03-wifi-scan.png",
+      "screenshot/04-terminal.png",
+      "screenshot/05-theme.png"
+    ],
+    "icon": "assets/images/bruce_icon.png",
+    "license": "AGPL-3.0-only",
+    "source_repo": "https://github.com/BruceDevices/CardputerZero",
+    "author": { "github": "pr3y", "display_name": "pr3y" },
+    "share_code": "BRCE",
+    "permissions": {
+      "camera": false,
+      "microphone": false,
+      "imu": false,
+      "network": true,
+      "additional_hardware": true,
+      "background_service": false,
+      "external_display": false
+    }
+  }
+}

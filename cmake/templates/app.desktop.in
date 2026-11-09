@@ -5,6 +5,6 @@ Comment=@APP_PACKAGE_DESCRIPTION@
 Exec=/usr/share/APPLaunch/bin/@PROJECT_NAME@
 Terminal=false
 Sysplause=true
-Icon=share/images/template.png
+Icon=share/images/bruce_icon.png
 Categories=Utility;
 StartupNotify=false
