@@ -117,6 +117,7 @@ void TerminalScreen::build_content(lv_obj_t* content) {
     lv_obj_set_style_text_font(input_ta_, &lv_font_montserrat_12, 0);
     lv_obj_set_style_border_width(input_ta_, 1, 0);
     lv_obj_add_event_cb(input_ta_, input_ready_cb, LV_EVENT_READY, this);
+    set_input_visible(false);
 
     // configure_common_nav claims slot 4 for the theme toggle, so it must run first.
     configure_common_nav(view::NAV_BACK, back_cb, this);
@@ -165,6 +166,24 @@ void TerminalScreen::start_command(const std::string& command, bool as_root) {
         append_log("[failed to launch]\n");
     }
     update_run_label();
+}
+
+void TerminalScreen::set_input_visible(bool visible) {
+    if (!input_ta_ || !log_ta_) {
+        return;
+    }
+    if (visible) {
+        lv_obj_clear_flag(input_ta_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(input_ta_, LV_OBJ_FLAG_HIDDEN);
+    }
+    const int32_t content_height = view::kScreenHeight - view::kTitleBarHeight - view::kNavBarHeight;
+    lv_obj_set_height(log_ta_, content_height - kHeaderHeight - (visible ? kInputHeight : 0));
+    lv_obj_update_layout(log_ta_);
+    if (follow_tail_) {
+        lv_obj_scroll_to_y(log_ta_, lv_obj_get_scroll_y(log_ta_) + lv_obj_get_scroll_bottom(log_ta_),
+                           LV_ANIM_OFF);
+    }
 }
 
 void TerminalScreen::clear_log() {
@@ -226,6 +245,7 @@ void TerminalScreen::enter_typing_mode() {
         return;
     }
     typing_ = true;
+    set_input_visible(true);
     platform::set_text_input_mode(true);
 
     // While typing every key (digits included) must reach the input line, so
@@ -275,6 +295,7 @@ void TerminalScreen::leave_typing_mode() {
         typing_group_ = nullptr;
     }
     platform::set_text_input_mode(false);
+    set_input_visible(false);
 
     nav_bar().set_icon(0, view::NAV_BACK, back_cb, this);
     nav_bar().set_enabled(1, true);

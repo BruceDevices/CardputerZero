@@ -38,6 +38,7 @@ private:
 
     // Typing mode: full keyboard reaches the input line (letters/digits arrive
     // via the indev group), nav keys yield; ESC re-enters nav mode via slot 0.
+    void set_input_visible(bool visible);
     void enter_typing_mode();
     void leave_typing_mode();
     static void attach_typing_group_async(void* user_data);
