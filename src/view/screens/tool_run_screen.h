@@ -48,7 +48,8 @@ private:
 
     int category_index_{-1};
     int item_index_{-1};
-    lv_obj_t* log_ta_{nullptr};
+    lv_obj_t* log_ta_{nullptr};    // scrollable log container
+    lv_obj_t* log_label_{nullptr}; // log text inside log_ta_
     bool follow_tail_{true}; // auto-scroll to newest output until the user scrolls up
     platform::ProcessRunner runner_;
 

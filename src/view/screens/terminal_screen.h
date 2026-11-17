@@ -40,6 +40,7 @@ private:
     // via the indev group), nav keys yield; ESC re-enters nav mode via slot 0.
     void enter_typing_mode();
     void leave_typing_mode();
+    static void attach_typing_group_async(void* user_data);
 
     // Command history (Up = older, Down = newer while typing).
     void push_history(const std::string& command);
@@ -65,7 +66,8 @@ private:
 
     int category_index_{-1};
     int item_index_{-1};
-    lv_obj_t* log_ta_{nullptr};
+    lv_obj_t* log_ta_{nullptr};    // scrollable log container
+    lv_obj_t* log_label_{nullptr}; // log text inside log_ta_
     lv_obj_t* input_ta_{nullptr};
     bool follow_tail_{true}; // auto-scroll to newest output until the user scrolls up
     platform::ProcessRunner runner_;
