@@ -587,8 +587,9 @@ std::vector<ToolCategory>& mutable_catalog() {
             false,
             {
                 {"Use CC1101 CAP (detect)",
-                 "Select the M5 CAP CC1101: powers the cap up, probes it over "
-                 "SPI (CS1/G7) and confirms the chip responds.",
+                 "Auto-detect the connected CAP, power it up, and confirm the "
+                 "CC1101 responds - pins are read dynamically from the detected "
+                 "profile (CAP CC1101 or Pingequa), not hardcoded.",
                  {self_exe_path(), "--cc1101-detect"}},
                 {"Capture 433MHz (30s, RTL-SDR dongle)", "timeout 30 rtl_433",
                  {"sh", "-c",

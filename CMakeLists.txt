@@ -468,9 +468,40 @@ target_link_libraries(${PROJECT_NAME}_reactive
         lvgl
 )
 
+# ====================================================
+# HAL sources (BruceModule: registro dinâmico de módulos da CAP)
+# ====================================================
+file(GLOB_RECURSE HAL_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/hal/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/hal/*.cpp"
+)
+
+add_library(${PROJECT_NAME}_hal
+    STATIC
+    ${HAL_SOURCES}
+)
+
+target_include_directories(${PROJECT_NAME}_hal
+    PUBLIC
+        ${LVGL_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hal
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/reactive
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/logger
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform
+)
+
+# hal sits ABOVE platform: detect_cap() drives the raw SPI probe primitives.
+target_link_libraries(${PROJECT_NAME}_hal
+    PUBLIC
+        lvgl
+        ${PROJECT_NAME}_reactive
+        ${PROJECT_NAME}_platform
+        logger
+)
+
 file(GLOB_RECURSE UI_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/view/*.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/view/*.cpp"  
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/view/*.cpp"
 )
 
 add_library(${PROJECT_NAME}_view
@@ -595,6 +626,7 @@ target_link_libraries(${PROJECT_NAME}_core
         ${PROJECT_NAME}_view
         ${PROJECT_NAME}_viewmodel
         ${PROJECT_NAME}_platform
+        ${PROJECT_NAME}_hal
 )
 
 # ====================================================
@@ -611,6 +643,7 @@ target_link_libraries(${PROJECT_NAME}
         ${PROJECT_NAME}_model
         ${PROJECT_NAME}_view
         ${PROJECT_NAME}_viewmodel
+        ${PROJECT_NAME}_hal
 )
 
 # Package deb

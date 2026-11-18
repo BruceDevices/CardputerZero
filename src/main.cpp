@@ -6,8 +6,10 @@
 
 #include "app.h"
 #include "ble_spam.h"
+#include "bruce_module.h"
 #include "cc1101.h"
 #include "evil_portal.h"
+#include "gps.h"
 #include "root_sh.h"
 #include "rfid_st25r.h"
 #include "wardrive.h"
@@ -18,11 +20,17 @@ int main(int argc, char** argv) {
     // Hidden subcommand used by the "Use CC1101 CAP" menu entry: the app
     // re-execs itself to probe the CAP over spidev and stream the report.
     if (argc >= 2 && std::strcmp(argv[1], "--cc1101-detect") == 0) {
-        return platform::cc1101_detect_main(argc - 2, argv + 2);
+        // Dynamic path: full CAP auto-detection fills the BruceModule pin
+        // registry, then the CC1101 pins are read from there (zero hardcoding).
+        return hal::cc1101_detect_cli(argc - 2, argv + 2);
     }
     // NFC half of the same CAP: probe the ST25R3916 over its own spidev CS.
     if (argc >= 2 && std::strcmp(argv[1], "--st25r-detect") == 0) {
         return platform::st25r_detect_main(argc - 2, argv + 2);
+    }
+    // GPS (CAP LORA): scan the HAT UART for NMEA across baud rates.
+    if (argc >= 2 && std::strcmp(argv[1], "--gps-detect") == 0) {
+        return platform::gps_detect_main(argc - 2, argv + 2);
     }
     // BLE advertisement spam: re-exec with a target family and optional hci index.
     if (argc >= 2 && std::strcmp(argv[1], "--ble-spam") == 0) {
