@@ -121,7 +121,8 @@ class ProcessRunner:
         try:
             if root and os.geteuid() != 0:
                 passwordless = subprocess.run(
-                    ["sudo", "-n", "true"], capture_output=True).returncode == 0
+                    # Probe the authorized command itself, not `true` (see sudo_passwordless).
+                    ["sudo", "-n", *self._self_argv("true")], capture_output=True).returncode == 0
                 if passwordless:
                     argv = ["sudo", "-n", *self._self_argv(cmd)]
                 else:
