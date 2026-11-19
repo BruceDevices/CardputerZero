@@ -181,6 +181,8 @@ void RfScreen::build_content(lv_obj_t* content) {
     if (!pixels_ && !history_) {
         nav_bar().set_enabled(2, false);
         lv_label_set_text(status_, "Could not allocate plot");
+    } else {
+        start();
     }
 }
 

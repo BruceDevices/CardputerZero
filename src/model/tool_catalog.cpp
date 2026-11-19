@@ -138,26 +138,26 @@ std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int g
     };
 
     std::vector<ToolAction> actions;
-    actions.push_back({"Scan / Capture", "Inspect received OOK pulses.", {}, false, false, false, RfTool::Scan});
-    actions.push_back({"Protocol Monitor", "Identify received OOK protocols.", {}, false, false, false,
+    ToolAction detect_action{
+        "Detect / refresh CC1101 CAP",
+        "Power and probe the CAP, then return to this menu to refresh RF actions.",
+        {self_exe_path(), "--cc1101-detect"}};
+    if (!cc1101_present) {
+        actions.push_back(std::move(detect_action));
+    }
+
+    actions.push_back({"Scan / Capture", "Identify received OOK protocols.", {}, false, false, false,
                        RfTool::ProtocolMonitor});
+    actions.push_back({"Signal Spectrum", "Inspect received OOK pulses.", {}, false, false, false, RfTool::Scan});
     actions.push_back({"RSSI Spectrum", "Sweep received power by frequency.", {}, false, false, false,
                        RfTool::Spectrum});
     actions.push_back({"Record RAW", "Record and export OOK pulses to a .sub file.", {}, false, false, false,
                        RfTool::Record});
     actions.push_back({"Spectrogram", "View recent RSSI sweeps over time.", {}, false, false, false,
                        RfTool::Spectrogram});
-    actions.push_back(ToolAction{
-        "Detect / refresh CC1101 CAP",
-        "Power and probe the CAP, then return to this menu to refresh RF actions.",
-        {self_exe_path(), "--cc1101-detect"}});
 
-    if (!cc1101_present) {
-        actions.push_back(ToolAction{
-            "CC1101 not detected",
-            "Connect a CAP CC1101 or Pingequa, then run Detect / refresh.",
-            {"sh", "-c", "echo 'CC1101 not detected. Connect the CAP and refresh this menu.'"}});
-    } else {
+    if (cc1101_present) {
+        actions.push_back(std::move(detect_action));
         actions.push_back(ToolAction{
             "Radio status / RSSI (433.92)",
             own("Native CC1101 RX status using detected pins: CS=G" + std::to_string(cs_gpio) +

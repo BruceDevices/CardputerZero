@@ -56,6 +56,26 @@ sudo pacman -S --needed \
 > `base-devel` is all the packaging needs. (If you want `apt`-style tooling to
 > inspect the package, `dpkg` is on the AUR — optional.)
 
+```
+# Download  CMake 3.31.9
+wget https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-linux-x86_64.tar.gz
+
+# Extract
+tar -xzf cmake-3.31.9-linux-x86_64.tar.gz
+
+# Install at /opt
+sudo mv cmake-3.31.9-linux-x86_64 /opt/cmake-3.31.9
+
+# Create simbolic links
+sudo ln -sf /opt/cmake-3.31.9/bin/cmake /usr/local/bin/cmake
+sudo ln -sf /opt/cmake-3.31.9/bin/ctest /usr/local/bin/ctest
+sudo ln -sf /opt/cmake-3.31.9/bin/cpack /usr/local/bin/cpack
+
+# Restart your terminal, so the new links get fetched
+cmake --version
+
+```
+
 ---
 
 ## Step 2 — Get the code

@@ -120,7 +120,12 @@ void MenuScreen::build_list(lv_obj_t* content) {
     lv_obj_set_size(header, LV_PCT(100), kHeaderHeight);
     lv_obj_set_style_text_font(header, &lv_font_montserrat_14, 0);
     lv_obj_set_style_pad_left(header, 8, 0);
-    lv_label_set_text(header, catalog[static_cast<size_t>(category_index_)].label);
+    const auto& category = catalog[static_cast<size_t>(category_index_)];
+    if (std::string(category.label) == "Sub-GHz / RF" && !hal::has_cc1101()) {
+        lv_label_set_text(header, "Sub-GHz / RF (CC1101 not detected)");
+    } else {
+        lv_label_set_text(header, category.label);
+    }
 
     auto* list = lv_list_create(content);
     lv_obj_set_size(list, LV_PCT(100), view::kScreenHeight - view::kTitleBarHeight - view::kNavBarHeight - kHeaderHeight);
