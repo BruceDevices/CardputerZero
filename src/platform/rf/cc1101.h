@@ -29,11 +29,10 @@ constexpr bool cc1101_version_valid(uint8_t v) {
 // Low-level CC1101 probe primitive, parameterized by the chip-select GPIO so
 // the CAP auto-detector (M3) can reuse it on whichever CS a given CAP wires.
 //   cs_gpio == 7  -> G7 = SPI0_CE1 = /dev/spidev0.1 hardware CS (kernel drives
-//                    CS; e.g. this is where the CC1101 CAP's ST25R lives, not
-//                    the CC1101 - see the CAP profiles).
+//                    CS; this is the CC1101 CS on the M5 CAP).
 //   cs_gpio != 7  -> open the node with SPI_NO_CS and bit-bang that GPIO as CS
 //                    (so CE0/G8 = the internal LCD never glitches). The CC1101
-//                    CAP wires CC1101_CS = G22; Pingequa wires it to G15.
+//                    Pingequa wires CC1101_CS to G14.
 //   rst_gpio >= 0 -> drive that GPIO high first to release the module's reset
 //                    (per-module RST; the known CAPs wire it to G26). -1 = none.
 // Strobes SRES, reads VERSION(0x31) with the burst header, stores it in
@@ -42,7 +41,7 @@ bool probe_cc1101(const char* spidev_path, int cs_gpio, int rst_gpio, uint8_t& v
 
 // Probe the M5 CAP CC1101 over spidev and return a human-readable report. Pins
 // come from the BruceModule registry (default profile: CAP CC1101 -> CC1101 on
-// G22 bit-banged). `detected` is set true only when a CC1101 answered.
+// G7 hardware CS). `detected` is set true only when a CC1101 answered.
 std::string cc1101_detect_report(const std::string& spidev_path, bool& detected);
 
 // Entry point for the app's `--cc1101-detect [spidev]` subcommand. `argc`/`argv`
@@ -93,6 +92,77 @@ bool probe_sx1262(const char* spidev_path, int cs_gpio, int busy_gpio, int rst_g
 // Returns true when the TX_ADDR scratch readback matched.
 bool probe_nrf24(const char* spidev_path, int cs_gpio, int ce_gpio,
                  uint8_t& status, uint8_t& config);
+
+// --- CC1101 radio session (OOK/ASK async) — M6: read/write of RF signals ------
+//
+// `probe_cc1101` above only does SRES + VERSION. To read Sub-GHz signals the
+// chip must be configured (frequency synthesis, OOK modulation, GDO0 in async
+// serial mode) and held in RX. This handle keeps the spidev node open and the
+// GPIO lines (bit-banged CS, RST, antenna SW0) claimed for the whole session, so
+// we do not reopen/reclaim them on every register access. Pins come from the
+// BruceModule profile — nothing hardcoded. Access to the shared bus must be
+// serialized by the caller (HAL: spi_bus_mutex()).
+struct Cc1101Radio {
+    int fd = -1;        // spidev fd (SPI_NO_CS when CS is bit-banged)
+    int cs_fd = -1;     // bit-banged CS line (-1 when CS is hardware, G7)
+    int rst_fd = -1;    // RST line held deasserted (-1 if none)
+    int sw0_fd = -1;    // antenna SW0 switch line (-1 if none)
+    bool hw_cs = false; // true when cs_gpio == G7 (kernel drives CE1)
+    int cs_gpio = -1, gdo0_gpio = -1, sw0_gpio = -1, rst_gpio = -1;
+    float mhz = 0.0f;   // last programmed frequency
+};
+
+// Open the spidev node and claim the lines (CS/RST/SW0). RST is pulsed for a
+// hardware reset and left deasserted. Does NOT configure modulation — call
+// config_ook_async_rx. Returns false (handle left closed) on error. gdo0/sw0/rst
+// may be -1.
+bool cc1101_radio_open(Cc1101Radio& r, const char* spidev_path,
+                       int cs_gpio, int gdo0_gpio, int sw0_gpio, int rst_gpio);
+
+// Close the node and release the lines. If gdo0/cs lived on G14/G15 (CAP CC1101),
+// restore the mini-UART mux (ALT5) on exit — same contract as the probes.
+void cc1101_radio_close(Cc1101Radio& r);
+
+// SPI primitives (CS handled internally: hardware on G7, bit-banged otherwise).
+void cc1101_reg_write(const Cc1101Radio& r, uint8_t addr, uint8_t value);
+uint8_t cc1101_reg_read(const Cc1101Radio& r, uint8_t addr);     // single read
+uint8_t cc1101_status_read(const Cc1101Radio& r, uint8_t addr);  // burst header (status regs)
+void cc1101_cmd(const Cc1101Radio& r, uint8_t strobe);           // command strobe
+
+// SRES + wait for the chip to leave reset (chip ends in IDLE).
+void cc1101_reset_chip(const Cc1101Radio& r);
+
+// Program FREQ2/1/0 (f = 26MHz*FREQ/2^16) and set the antenna switch (SW0 +
+// IOCFG2) for the band (315/433/868-915), as the M5 driver does.
+void cc1101_set_frequency(Cc1101Radio& r, float mhz);
+
+// Configure OOK/ASK modulation in ASYNC serial mode: raw demodulated data comes
+// out on GDO0 (IOCFG0=0x0D), PKTCTRL0=0x32 (async, infinite). Does a full
+// reset+config and ends by calling set_frequency(mhz). After this the chip is
+// ready for RX; call cc1101_rx() to enter reception.
+void cc1101_config_ook_async_rx(Cc1101Radio& r, float mhz);
+
+// Configure OOK/ASK ASYNC TX: GDO0 is the data input the MCU bit-bangs (the
+// CC1101 makes it an input automatically in TX), PATABLE keys carrier off/on.
+// Does a full reset+config and ends
+// with set_frequency(mhz). After this, strobe cc1101_tx() and drive GDO0.
+// Env: RF_TX_POWER overrides the PATABLE ON byte (default 0xC0, ~+10 dBm @433).
+void cc1101_config_ook_async_tx(Cc1101Radio& r, float mhz);
+
+// Overwrite the two OOK PATABLE levels (index 0 = data '0', index 1 = data '1').
+// Equal levels => continuous unmodulated carrier (diagnostic).
+void cc1101_set_patable(const Cc1101Radio& r, uint8_t off_level, uint8_t on_level);
+
+void cc1101_rx(const Cc1101Radio& r);   // strobe SRX (enter RX)
+void cc1101_tx(const Cc1101Radio& r);   // strobe STX (enter TX)
+void cc1101_idle(const Cc1101Radio& r); // strobe SIDLE
+
+// Read MARCSTATE (low 5 bits). Useful states: IDLE=0x01, RX=0x0D and
+// TX=0x13. Intermediate TX calibration/settling states are 0x12/0x14/0x15.
+uint8_t cc1101_marcstate(const Cc1101Radio& r);
+
+// Read the RSSI status register and convert to dBm (datasheet formula).
+int cc1101_rssi_dbm(const Cc1101Radio& r);
 
 // Probe the M5 CAP ST25R3916 over spidev and return a human-readable report.
 // Pins come from the BruceModule registry (default profile: CAP CC1101 ->

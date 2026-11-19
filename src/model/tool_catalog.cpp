@@ -115,6 +115,102 @@ std::vector<ToolAction> scan_scripts() {
     return actions;
 }
 
+std::string rf_recordings_dir() {
+    if (const char* env = std::getenv("BRUCE_RF_DIR"); env && env[0] != '\0') {
+        return env;
+    }
+    if (const char* home = std::getenv("HOME"); home && home[0] != '\0') {
+        return std::string(home) + "/BruceRF";
+    }
+    return "/tmp/BruceRF";
+}
+
+std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int gdo0_gpio) {
+    static std::deque<std::string> pool;
+    pool.clear();
+    auto own = [](std::string value) -> const char* {
+        pool.push_back(std::move(value));
+        return pool.back().c_str();
+    };
+
+    std::vector<ToolAction> actions;
+    actions.push_back(ToolAction{
+        "Detect / refresh CC1101 CAP",
+        "Power and probe the CAP, then return to this menu to refresh RF actions.",
+        {self_exe_path(), "--cc1101-detect"}});
+
+    if (!cc1101_present) {
+        actions.push_back(ToolAction{
+            "CC1101 not detected",
+            "Connect a CAP CC1101 or Pingequa, then run Detect / refresh.",
+            {"sh", "-c", "echo 'CC1101 not detected. Connect the CAP and refresh this menu.'"}});
+    } else {
+        actions.push_back(ToolAction{
+            "Radio status / RSSI (433.92)",
+            own("Native CC1101 RX status using detected pins: CS=G" + std::to_string(cs_gpio) +
+                " GDO0=G" + std::to_string(gdo0_gpio)),
+            {self_exe_path(), "--rf-info", "433.92"}});
+
+        const std::string dir = rf_recordings_dir();
+        const std::string record_command =
+            "mkdir -p " + sh_quote(dir) + "; RF_SAVE_DIR=" + sh_quote(dir) +
+            " RF_RECORD_SECS=20 exec " + sh_quote(self_exe_path()) +
+            " --rf-record 433.92 save";
+        actions.push_back(ToolAction{
+            "Record + save RAW (20s)",
+            own("Listen on 433.92 MHz for 20 seconds and save captures under " + dir + "."),
+            {"sh", "-c", record_command}});
+
+        std::vector<std::string> files;
+        if (DIR* directory = opendir(dir.c_str())) {
+            while (dirent* entry = readdir(directory)) {
+                const std::string name = entry->d_name;
+                if (name.size() < 5 || name.substr(name.size() - 4) != ".sub") continue;
+                const std::string path = dir + "/" + name;
+                struct stat st{};
+                if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) files.push_back(path);
+            }
+            closedir(directory);
+        }
+        std::sort(files.begin(), files.end());
+        for (const auto& path : files) {
+            const size_t slash = path.find_last_of('/');
+            const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+            actions.push_back(ToolAction{
+                own("Replay " + name),
+                own("Transmit the RAW durations and frequency stored in " + path + "."),
+                {self_exe_path(), "--rf-replay", path}});
+        }
+        if (files.empty()) {
+            actions.push_back(ToolAction{
+                "No saved RAW files yet",
+                own("Use Record + save; .sub files from " + dir + " will appear here."),
+                {"sh", "-c", "echo 'No saved .sub files yet. Run Record + save RAW first.'"}});
+        }
+    }
+
+    actions.push_back(ToolAction{
+        "Capture 433MHz (30s, RTL-SDR dongle)", "timeout 30 rtl_433",
+        {"sh", "-c",
+         "command -v rtl_433 >/dev/null 2>&1 || "
+         "{ echo 'rtl_433 is not installed (and it needs an RTL-SDR USB dongle).'; "
+         "echo 'Run: sudo apt install rtl-433'; exit 127; }; timeout 30 rtl_433 2>&1"}});
+    actions.push_back(ToolAction{
+        "List SDR devices (RTL-SDR dongle)", "rtl_test -t",
+        {"sh", "-c",
+         "command -v rtl_test >/dev/null 2>&1 || "
+         "{ echo 'rtl_test is not installed (and it needs an RTL-SDR USB dongle).'; "
+         "echo 'Run: sudo apt install rtl-sdr'; exit 127; }; rtl_test -t 2>&1"}});
+    actions.push_back(ToolAction{
+        "FM radio RX 100.0MHz (RTL-SDR)", "rtl_fm | aplay",
+        {"sh", "-c",
+         "command -v rtl_fm >/dev/null 2>&1 || "
+         "{ echo 'rtl_fm is not installed. Run: sudo apt install rtl-sdr'; exit 127; }; "
+         "rtl_fm -f 100M -M wbfm -s 200k -r 48k 2>/dev/null | aplay -r 48k -f S16_LE 2>&1 || "
+         "echo 'playback failed - needs an RTL-SDR dongle + alsa-utils (aplay)'"}});
+    return actions;
+}
+
 // --- Nmap guided flow: discover hosts -> pick host -> Fast/Full port scan -----
 //
 // The menu is a flat two-level list, so the drill-down is driven by two tiny
@@ -585,29 +681,7 @@ std::vector<ToolCategory>& mutable_catalog() {
             "M5 CAP CC1101 over SPI, or an SDR dongle (e.g. RTL-SDR)",
             icon::kRf,
             false,
-            {
-                {"Use CC1101 CAP (detect)",
-                 "Auto-detect the connected CAP, power it up, and confirm the "
-                 "CC1101 responds - pins are read dynamically from the detected "
-                 "profile (CAP CC1101 or Pingequa), not hardcoded.",
-                 {self_exe_path(), "--cc1101-detect"}},
-                {"Capture 433MHz (30s, RTL-SDR dongle)", "timeout 30 rtl_433",
-                 {"sh", "-c",
-                  "command -v rtl_433 >/dev/null 2>&1 || "
-                  "{ echo 'rtl_433 is not installed (and it needs an RTL-SDR USB dongle).'; "
-                  "echo 'Run: sudo apt install rtl-433'; exit 127; }; timeout 30 rtl_433 2>&1"}},
-                {"List SDR devices (RTL-SDR dongle)", "rtl_test -t",
-                 {"sh", "-c",
-                  "command -v rtl_test >/dev/null 2>&1 || "
-                  "{ echo 'rtl_test is not installed (and it needs an RTL-SDR USB dongle).'; "
-                  "echo 'Run: sudo apt install rtl-sdr'; exit 127; }; rtl_test -t 2>&1"}},
-                {"FM radio RX 100.0MHz (RTL-SDR)", "rtl_fm | aplay",
-                 {"sh", "-c",
-                  "command -v rtl_fm >/dev/null 2>&1 || "
-                  "{ echo 'rtl_fm is not installed. Run: sudo apt install rtl-sdr'; exit 127; }; "
-                  "rtl_fm -f 100M -M wbfm -s 200k -r 48k 2>/dev/null | aplay -r 48k -f S16_LE 2>&1 || "
-                  "echo 'playback failed - needs an RTL-SDR dongle + alsa-utils (aplay)'"}},
-            },
+            build_rf_actions(false, -1, -1),
         },
         {
             "Network Tools",
@@ -890,13 +964,24 @@ const std::vector<ToolCategory>& tool_catalog() {
     return mutable_catalog();
 }
 
-void refresh_dynamic_categories() {
-    for (auto& category : mutable_catalog()) {
+void refresh_dynamic_categories(int category_index) {
+    auto& catalog = mutable_catalog();
+    for (size_t i = 0; i < catalog.size(); ++i) {
+        auto& category = catalog[i];
         const std::string label = category.label;
         if (label == "Nmap") {
             category.actions = build_nmap_actions();
         } else if (label == "Wi-Fi") {
             category.actions = build_wifi_actions();
+        }
+    }
+}
+
+void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio) {
+    for (auto& category : mutable_catalog()) {
+        if (std::string(category.label) == "Sub-GHz / RF") {
+            category.actions = build_rf_actions(cc1101_present, cs_gpio, gdo0_gpio);
+            return;
         }
     }
 }

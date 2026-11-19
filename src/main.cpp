@@ -24,6 +24,41 @@ int main(int argc, char** argv) {
         // registry, then the CC1101 pins are read from there (zero hardcoding).
         return hal::cc1101_detect_cli(argc - 2, argv + 2);
     }
+    // Sub-GHz (M6): configure the CC1101 for OOK async RX and stream VERSION+RSSI.
+    if (argc >= 2 && std::strcmp(argv[1], "--rf-info") == 0) {
+        return hal::rf_info_cli(argc - 2, argv + 2);
+    }
+    // Sub-GHz (M7): capture GDO0 edges and print each frame's signed-µs durations.
+    if (argc >= 2 && std::strcmp(argv[1], "--rf-record") == 0) {
+        return hal::rf_record_cli(argc - 2, argv + 2);
+    }
+    // Sub-GHz (M9): transmit an OOK PT2262 code (bit-bang GDO0 in async TX).
+    if (argc >= 2 && std::strcmp(argv[1], "--rf-send") == 0) {
+        return hal::rf_send_cli(argc - 2, argv + 2);
+    }
+    // Sub-GHz (M9): replay a Flipper/Bruce RAW .sub recording.
+    if (argc >= 2 && std::strcmp(argv[1], "--rf-replay") == 0) {
+        return hal::rf_replay_cli(argc - 2, argv + 2);
+    }
+    // Sub-GHz protocol engine (ported Bruce): list registry / transmit by name.
+    if (argc >= 2 && std::strcmp(argv[1], "--rf-protos") == 0) {
+        return hal::rf_protos_cli(argc - 2, argv + 2);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--rf-tx-proto") == 0) {
+        return hal::rf_tx_proto_cli(argc - 2, argv + 2);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--rf-selftest") == 0) {
+        return hal::rf_selftest_cli(argc - 2, argv + 2);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--rf-raw") == 0) {
+        return hal::rf_raw_cli(argc - 2, argv + 2);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--rf-carrier") == 0) {
+        return hal::rf_carrier_cli(argc - 2, argv + 2);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--rf-decode-sub") == 0) {
+        return hal::rf_decode_sub_cli(argc - 2, argv + 2);
+    }
     // NFC half of the same CAP: probe the ST25R3916 over its own spidev CS.
     if (argc >= 2 && std::strcmp(argv[1], "--st25r-detect") == 0) {
         return platform::st25r_detect_main(argc - 2, argv + 2);

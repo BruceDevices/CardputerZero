@@ -62,7 +62,8 @@ std::string env_or(const char* name, const char* fallback) {
 
 int env_int_or(const char* name, int fallback) {
     const char* v = std::getenv(name);
-    return (v && v[0] != '\0') ? std::atoi(v) : fallback;
+    // base 0 => accept decimal and 0x.. hex (e.g. RF_TX_IOCFG0=0x2E).
+    return (v && v[0] != '\0') ? static_cast<int>(std::strtol(v, nullptr, 0)) : fallback;
 }
 
 #if defined(__linux__)
@@ -422,6 +423,392 @@ bool probe_nrf24(const char* spidev_path, int cs_gpio, int ce_gpio,
     (void)ce_gpio;
     return false;
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// CC1101 radio session (OOK async) — M6
+// ---------------------------------------------------------------------------
+namespace {
+
+// CC1101 register addresses (config space 0x00-0x2E) + strobes/status used here.
+enum : uint8_t {
+    R_IOCFG2 = 0x00, R_IOCFG0 = 0x02, R_FIFOTHR = 0x03,
+    R_PKTLEN = 0x06, R_PKTCTRL1 = 0x07, R_PKTCTRL0 = 0x08, R_ADDR = 0x09, R_CHANNR = 0x0A,
+    R_FSCTRL1 = 0x0B, R_FSCTRL0 = 0x0C, R_FREQ2 = 0x0D, R_FREQ1 = 0x0E, R_FREQ0 = 0x0F,
+    R_MDMCFG4 = 0x10, R_MDMCFG3 = 0x11, R_MDMCFG2 = 0x12, R_MDMCFG1 = 0x13, R_MDMCFG0 = 0x14,
+    R_DEVIATN = 0x15, R_MCSM0 = 0x18, R_FOCCFG = 0x19, R_BSCFG = 0x1A,
+    R_AGCCTRL2 = 0x1B, R_AGCCTRL1 = 0x1C, R_AGCCTRL0 = 0x1D,
+    R_FREND1 = 0x21, R_FREND0 = 0x22,
+    R_FSCAL3 = 0x23, R_FSCAL2 = 0x24, R_FSCAL1 = 0x25, R_FSCAL0 = 0x26,
+    R_FSTEST = 0x29, R_TEST2 = 0x2C, R_TEST1 = 0x2D, R_TEST0 = 0x2E,
+    S_SRES = 0x30, S_SCAL = 0x33, S_SRX = 0x34, S_STX = 0x35, S_SIDLE = 0x36, S_SFRX = 0x3A,
+    ST_RSSI = 0x34, ST_MARCSTATE = 0x35, // status registers (burst-read header)
+};
+constexpr uint8_t kReadSingle = 0x80; // read header for a single config register
+
+void radio_cs(const Cc1101Radio& r, bool high) {
+    if (!r.hw_cs && r.cs_fd >= 0) gpio_line_set(r.cs_fd, high);
+}
+
+} // namespace
+
+void cc1101_reg_write(const Cc1101Radio& r, uint8_t addr, uint8_t value) {
+#if defined(__linux__)
+    const uint8_t tx[2] = {addr, value};
+    uint8_t rx[2] = {0, 0};
+    radio_cs(r, false);
+    spi_xfer(r.fd, tx, rx, 2);
+    radio_cs(r, true);
+#else
+    (void)r; (void)addr; (void)value;
+#endif
+}
+
+uint8_t cc1101_reg_read(const Cc1101Radio& r, uint8_t addr) {
+#if defined(__linux__)
+    const uint8_t tx[2] = {static_cast<uint8_t>(addr | kReadSingle), 0x00};
+    uint8_t rx[2] = {0, 0};
+    radio_cs(r, false);
+    spi_xfer(r.fd, tx, rx, 2);
+    radio_cs(r, true);
+    return rx[1];
+#else
+    (void)r; (void)addr; return 0;
+#endif
+}
+
+uint8_t cc1101_status_read(const Cc1101Radio& r, uint8_t addr) {
+#if defined(__linux__)
+    const uint8_t tx[2] = {cc1101_status_read_header(addr), 0x00};
+    uint8_t rx[2] = {0, 0};
+    radio_cs(r, false);
+    spi_xfer(r.fd, tx, rx, 2);
+    radio_cs(r, true);
+    return rx[1];
+#else
+    (void)r; (void)addr; return 0;
+#endif
+}
+
+void cc1101_cmd(const Cc1101Radio& r, uint8_t strobe) {
+#if defined(__linux__)
+    radio_cs(r, false);
+    spi_strobe(r.fd, strobe);
+    radio_cs(r, true);
+#else
+    (void)r; (void)strobe;
+#endif
+}
+
+void cc1101_reset_chip(const Cc1101Radio& r) {
+#if defined(__linux__)
+    cc1101_cmd(r, S_SRES);
+    usleep(1000); // chip needs ~ms to complete the reset and settle in IDLE
+#else
+    (void)r;
+#endif
+}
+
+void cc1101_rx(const Cc1101Radio& r) { cc1101_cmd(r, S_SRX); }
+void cc1101_tx(const Cc1101Radio& r) { cc1101_cmd(r, S_STX); }
+void cc1101_idle(const Cc1101Radio& r) { cc1101_cmd(r, S_SIDLE); }
+
+uint8_t cc1101_marcstate(const Cc1101Radio& r) {
+    return static_cast<uint8_t>(cc1101_status_read(r, ST_MARCSTATE) & 0x1F);
+}
+
+int cc1101_rssi_dbm(const Cc1101Radio& r) {
+#if defined(__linux__)
+    const int raw = cc1101_status_read(r, ST_RSSI);
+    return raw >= 128 ? (raw - 256) / 2 - 74 : raw / 2 - 74;
+#else
+    (void)r; return 0;
+#endif
+}
+
+namespace {
+
+// Integer map(), matching Arduino's map() (truncating division) used by the
+// ELECHOUSE driver's Calibrate() to interpolate FSCTRL0.
+int cc1101_map_i(int x, int in_lo, int in_hi, int out_lo, int out_hi) {
+    if (x <= in_lo) return out_lo;
+    if (x >= in_hi) return out_hi;
+    return (x - in_lo) * (out_hi - out_lo) / (in_hi - in_lo) + out_lo;
+}
+
+// Port of ELECHOUSE SmartRC-CC1101-Driver-Lib Calibrate(): the active,
+// per-frequency synthesizer trim the M5/Bruce build runs inside setMHZ() (and
+// again in cc1101ApplyPreciseCalibration()). Our earlier port only wrote a
+// static register image and skipped this, so FSCTRL0 stayed at its reset 0x00
+// instead of the band-interpolated crystal-offset trim (~0x23 / +55 kHz at
+// 433.92). A wide RX bandwidth masked the offset; the narrow 270 kHz OOK preset
+// does not, which silently desensitized RX (flat noise floor) while TX, which
+// tolerates the miscalibration, kept working. This writes:
+//   - FSCTRL0 = frequency-offset trim, interpolated over the band (endpoints
+//     match Bruce's setClb(): 315->24..28, 433->31..38, 868->65..76,
+//     915->77..79);
+//   - TEST0   = 0x09 for the upper (high-VCO) half of each band, else 0x0B;
+//   - high-VCO FSCAL2 nudge (+0x20) so the PLL locks on the correct VCO core.
+// The chip must be in IDLE (the caller strobes SIDLE before changing FREQ).
+void cc1101_calibrate(const Cc1101Radio& r, float mhz) {
+    // Diagnostics / tuning overrides (no rebuild needed):
+    //   RF_CALIB=0     -> skip this routine entirely (leave FSCTRL0 at reset 0).
+    //   RF_FSCTRL0=<n> -> force FSCTRL0 to <n> instead of the band interpolation.
+    if (const char* v = std::getenv("RF_CALIB"); v && v[0] == '0') return;
+    const int m = static_cast<int>(mhz);
+    int in_lo, in_hi, clb_lo, clb_hi;
+    float high_edge; // frequencies >= this use the high VCO core; 0 = always high
+    if (m >= 280 && m <= 348) {
+        in_lo = 280; in_hi = 348; clb_lo = 24; clb_hi = 28; high_edge = 322.88f;
+    } else if (m >= 378 && m <= 464) {
+        in_lo = 378; in_hi = 464; clb_lo = 31; clb_hi = 38; high_edge = 430.5f;
+    } else if (m >= 779 && m <= 899) {
+        in_lo = 779; in_hi = 899; clb_lo = 65; clb_hi = 76; high_edge = 861.0f;
+    } else if (m >= 900 && m <= 928) {
+        in_lo = 900; in_hi = 928; clb_lo = 77; clb_hi = 79; high_edge = 0.0f;
+    } else {
+        return; // out of the supported bands: leave reset defaults
+    }
+    // FSCTRL0 is the FREQOFF crystal trim. Bruce's band-interpolated value
+    // (cc1101_map_i) is calibrated for the M5/T-Embed crystal; applying it to the
+    // CardputerZero CAP (a different, accurate crystal) shifts the carrier ~55 kHz
+    // off 433.92 and made the MODULATED TX invisible to a receiver tuned to the
+    // nominal frequency (continuous-carrier RSSI still showed a peak, which hid
+    // it). The CZ CAP needs NO trim, so default FSCTRL0 to 0; RF_FSCTRL0 can set
+    // an explicit trim for a board that needs one. (void the computed map value.)
+    int fsctrl0 = 0; // default: no trim (CZ CAP crystal is accurate)
+    if (const char* v = std::getenv("RF_FSCTRL0"); v && v[0] != '\0') {
+        fsctrl0 = (std::strcmp(v, "auto") == 0) ? cc1101_map_i(m, in_lo, in_hi, clb_lo, clb_hi)
+                                                : static_cast<int>(std::strtol(v, nullptr, 0));
+    }
+    cc1101_reg_write(r, R_FSCTRL0, static_cast<uint8_t>(fsctrl0));
+    const bool high_vco = (high_edge == 0.0f) || (mhz >= high_edge);
+    if (high_vco) {
+        cc1101_reg_write(r, R_TEST0, 0x09);
+        const uint8_t s = cc1101_reg_read(r, R_FSCAL2);
+        if (s < 0x20) cc1101_reg_write(r, R_FSCAL2, static_cast<uint8_t>(s + 0x20));
+    } else {
+        cc1101_reg_write(r, R_TEST0, 0x0B);
+    }
+}
+
+} // namespace
+
+void cc1101_set_frequency(Cc1101Radio& r, float mhz) {
+#if defined(__linux__)
+    r.mhz = mhz;
+    // Frequency word decomposition, bit-identical to the M5/ELECHOUSE setMHZ():
+    // f_carrier = 26MHz * FREQ / 2^16, built up by subtracting the per-register
+    // step sizes. Keep byte arithmetic so rounding matches the reference exactly.
+    uint8_t freq2 = 0, freq1 = 0, freq0 = 0;
+    float m = mhz;
+    for (bool done = false; !done;) {
+        if (m >= 26) { m -= 26; freq2++; }
+        else if (m >= 0.1015625f) { m -= 0.1015625f; freq1++; }
+        else if (m >= 0.00039675f) { m -= 0.00039675f; freq0++; }
+        else done = true;
+    }
+
+    cc1101_idle(r); // FREQ regs may only change while the synthesizer is off
+    cc1101_reg_write(r, R_FREQ2, freq2);
+    cc1101_reg_write(r, R_FREQ1, freq1);
+    cc1101_reg_write(r, R_FREQ0, freq0);
+
+    // Active per-frequency synthesizer trim (ELECHOUSE Calibrate()): sets
+    // FSCTRL0/TEST0 and the high-VCO FSCAL2 nudge. Missing this was what killed
+    // RX sensitivity under the narrow OOK bandwidth. Runs here (chip in IDLE)
+    // right after FREQ, exactly as setMHZ() does in the reference driver.
+    cc1101_calibrate(r, mhz);
+
+    // Antenna path (M5 CAP CC1101): SP3T switches fed by SW0 (a GPIO) and SW1
+    // (= CC1101 GDO2, forced through IOCFG2). Electrical levels measured on the
+    // CardputerZero CAP (433 was verified over the air against a T-Embed):
+    //   315 MHz       SW0=0 SW1=1
+    //   433 MHz       SW0=1 SW1=0
+    //   868/915 MHz   SW0=1 SW1=1
+    // These levels differ from the logical switch labels in M5's public table,
+    // implying an inversion in the CAP's control path.
+    // IOCFG2=0x2F forces GDO2 low; bit 6 inverts it, so 0x6F forces it high.
+    const int band = mhz < 374 ? 0 : (mhz < 650.5f ? 1 : 2); // 315 / 433 / 868-915
+    bool sw0 = band != 0;
+    bool sw1 = band != 1;
+    if (const char* value = std::getenv("RF_SW0"); value && value[0] != '\0') {
+        sw0 = std::atoi(value) != 0;
+    }
+    if (const char* value = std::getenv("RF_SW1"); value && value[0] != '\0') {
+        sw1 = std::atoi(value) != 0;
+    }
+    if (r.sw0_fd >= 0) gpio_line_set(r.sw0_fd, sw0);
+    cc1101_reg_write(r, R_IOCFG2, sw1 ? 0x6F : 0x2F);
+#else
+    (void)r; (void)mhz;
+#endif
+}
+
+void cc1101_config_ook_async_rx(Cc1101Radio& r, float mhz) {
+#if defined(__linux__)
+    cc1101_reset_chip(r);
+
+    // OOK/ASK, serial ASYNC: demodulated data appears on GDO0 (IOCFG0=0x0D),
+    // packet engine bypassed (PKTCTRL0=0x32, infinite length). The modem/AGC
+    // values are Bruce's tuned fixed-frequency OOK RX preset
+    // (cc1101ApplyFixedFreqOokPreset), NOT the wide generic scan profile — that
+    // is what keeps ambient noise out of the capture:
+    //   MDMCFG4=0x67 -> RX BW ~270 kHz (CHANBW_E=1,M=2), not 812 kHz;
+    //   MDMCFG3=0x32 -> data rate ~3.8 kBaud, matched to remote pulse widths;
+    //   AGCCTRL0=0x40/AGCCTRL1=0x01/FREND1=0xB6/FIFOTHR=0x07 -> OOK AGC that does
+    //   not crank gain into noise during the inter-frame silence.
+    cc1101_reg_write(r, R_FSCTRL1, 0x06);
+    cc1101_reg_write(r, R_IOCFG0, 0x0D);   // GDO0 = async serial data output
+    cc1101_reg_write(r, R_PKTCTRL0, 0x32); // async serial mode, infinite packet
+    cc1101_reg_write(r, R_PKTCTRL1, 0x04);
+    cc1101_reg_write(r, R_PKTLEN, 0x00);
+    cc1101_reg_write(r, R_ADDR, 0x00);
+    cc1101_reg_write(r, R_CHANNR, 0x00);
+    // FIFOTHR bits [5:4] = CLOSE_IN_RX attenuation (0/6/12/18 dB): raise it via
+    // RF_RX_CLOSE_IN (0..3) when a strong nearby transmitter saturates the front
+    // end (close-range bench test), which otherwise garbles the OOK envelope.
+    const int close_in = env_int_or("RF_RX_CLOSE_IN", 0) & 0x3;
+    cc1101_reg_write(r, R_FIFOTHR, static_cast<uint8_t>(0x07 | (close_in << 4)));
+    cc1101_reg_write(r, R_MDMCFG4, 0x67);  // RX BW ~270 kHz (narrow -> less noise)
+    cc1101_reg_write(r, R_MDMCFG3, 0x32);  // data rate ~3.8 kBaud (OOK remotes)
+    cc1101_reg_write(r, R_MDMCFG2, 0x30);  // ASK/OOK, no sync, no manchester
+    cc1101_reg_write(r, R_MDMCFG1, 0x00);
+    cc1101_reg_write(r, R_MDMCFG0, 0x00);
+    cc1101_reg_write(r, R_DEVIATN, 0x47);
+    cc1101_reg_write(r, R_MCSM0, 0x18);    // auto-calibrate when going IDLE->RX
+    cc1101_reg_write(r, R_FOCCFG, 0x18);
+    cc1101_reg_write(r, R_BSCFG, 0x1C);
+    cc1101_reg_write(r, R_AGCCTRL2, 0xC7);
+    cc1101_reg_write(r, R_AGCCTRL1, 0x01); // OOK AGC: carrier-sense threshold
+    cc1101_reg_write(r, R_AGCCTRL0, 0x40); // OOK AGC: filter/hysteresis/wait
+    cc1101_reg_write(r, R_FREND1, 0xB6);   // OOK RX front-end
+    cc1101_reg_write(r, R_FREND0, 0x11);   // ASK front-end
+    cc1101_reg_write(r, R_FSCAL3, 0xE9);
+    cc1101_reg_write(r, R_FSCAL2, 0x2A);
+    cc1101_reg_write(r, R_FSCAL1, 0x00);
+    cc1101_reg_write(r, R_FSCAL0, 0x1F);
+    cc1101_reg_write(r, R_FSTEST, 0x59);
+    cc1101_reg_write(r, R_TEST2, 0x81);
+    cc1101_reg_write(r, R_TEST1, 0x35);
+    cc1101_reg_write(r, R_TEST0, 0x09);
+
+    cc1101_set_frequency(r, mhz);
+#else
+    (void)r; (void)mhz;
+#endif
+}
+
+void cc1101_set_patable(const Cc1101Radio& r, uint8_t off_level, uint8_t on_level) {
+#if defined(__linux__)
+    // PATABLE burst (0x3E): index 0 = data '0' level, index 1 = data '1' level.
+    // Setting both equal forces an UNMODULATED carrier (diagnostic), independent
+    // of the GDO0 async data line.
+    const uint8_t tx[3] = {static_cast<uint8_t>(0x3E | 0x40), off_level, on_level};
+    uint8_t rx[3] = {0, 0, 0};
+    radio_cs(r, false);
+    spi_xfer(r.fd, tx, rx, 3);
+    radio_cs(r, true);
+#else
+    (void)r; (void)off_level; (void)on_level;
+#endif
+}
+
+void cc1101_config_ook_async_tx(Cc1101Radio& r, float mhz) {
+#if defined(__linux__)
+    cc1101_reset_chip(r);
+
+    // Same OOK modem as RX, but TX-side: GDO0 is automatically made the async
+    // DATA INPUT by the CC1101 while TX is active. Keep IOCFG0=0x0D, matching
+    // ELECHOUSE setCCMode(false); forcing 0x2E here prevented modulation on the
+    // M5 CAP even though MARCSTATE reached TX. FREND0=0x11 selects PATABLE[1].
+    cc1101_reg_write(r, R_FSCTRL1, 0x06);
+    const uint8_t iocfg0 = static_cast<uint8_t>(env_int_or("RF_TX_IOCFG0", 0x0D) & 0xFF);
+    cc1101_reg_write(r, R_IOCFG0, iocfg0); // GDO0 becomes the async TX input in TX state
+    cc1101_reg_write(r, R_PKTCTRL0, 0x32); // async serial mode, infinite packet
+    cc1101_reg_write(r, R_FIFOTHR, 0x47);
+    cc1101_reg_write(r, R_MDMCFG4, 0x67);
+    cc1101_reg_write(r, R_MDMCFG3, 0x32);
+    cc1101_reg_write(r, R_MDMCFG2, 0x30);  // ASK/OOK
+    cc1101_reg_write(r, R_MDMCFG1, 0x00);
+    cc1101_reg_write(r, R_MDMCFG0, 0x00);
+    cc1101_reg_write(r, R_DEVIATN, 0x47);
+    cc1101_reg_write(r, R_MCSM0, 0x18);
+    cc1101_reg_write(r, R_FOCCFG, 0x18);
+    cc1101_reg_write(r, R_FREND0, 0x11);   // ASK: PA_POWER index 1 = ON level
+    cc1101_reg_write(r, R_FSCAL3, 0xE9);
+    cc1101_reg_write(r, R_FSCAL2, 0x2A);
+    cc1101_reg_write(r, R_FSCAL1, 0x00);
+    cc1101_reg_write(r, R_FSCAL0, 0x1F);
+    cc1101_reg_write(r, R_FSTEST, 0x59);
+    cc1101_reg_write(r, R_TEST2, 0x81);
+    cc1101_reg_write(r, R_TEST1, 0x35);
+    cc1101_reg_write(r, R_TEST0, 0x09);
+
+    // PATABLE burst (0x3E): OOK keys the carrier between index 0 (off) and index
+    // 1 (ON power). 0xC0 ≈ +10..12 dBm at 433 MHz (ELECHOUSE PA table top entry).
+    // RF_TX_POWER overrides the ON byte for bench tuning.
+    const uint8_t on = static_cast<uint8_t>(env_int_or("RF_TX_POWER", 0xC0) & 0xFF);
+    const uint8_t pa_tx[9] = {static_cast<uint8_t>(0x3E | 0x40),
+                              0x00, on, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    uint8_t pa_rx[9] = {0};
+    radio_cs(r, false);
+    // Only the two OOK levels are transferred. Sending all eight entries on
+    // this CAP made the PA go silent even though MARCSTATE remained TX.
+    spi_xfer(r.fd, pa_tx, pa_rx, 3);
+    radio_cs(r, true);
+
+    cc1101_set_frequency(r, mhz);
+#else
+    (void)r; (void)mhz;
+#endif
+}
+
+bool cc1101_radio_open(Cc1101Radio& r, const char* spidev_path,
+                       int cs_gpio, int gdo0_gpio, int sw0_gpio, int rst_gpio) {
+    r = Cc1101Radio{};
+    r.cs_gpio = cs_gpio;
+    r.gdo0_gpio = gdo0_gpio;
+    r.sw0_gpio = sw0_gpio;
+    r.rst_gpio = rst_gpio;
+    r.hw_cs = (cs_gpio == kHwCsGpio);
+#if defined(__linux__)
+    r.fd = spi_open(spidev_path, SPI_MODE_0, /*no_cs=*/!r.hw_cs);
+    if (r.fd < 0) {
+        r = Cc1101Radio{};
+        return false;
+    }
+    if (!r.hw_cs) {
+        if (!gpio_claim_output(cs_chip().c_str(), static_cast<unsigned>(cs_gpio), true, &r.cs_fd)) {
+            close(r.fd);
+            r = Cc1101Radio{};
+            return false;
+        }
+    }
+    if (sw0_gpio >= 0) {
+        gpio_claim_output(cs_chip().c_str(), static_cast<unsigned>(sw0_gpio), true, &r.sw0_fd);
+    }
+    r.rst_fd = rst_begin(rst_gpio, /*pulse=*/true); // hardware reset, leave deasserted
+    return true;
+#else
+    (void)spidev_path;
+    return false;
+#endif
+}
+
+void cc1101_radio_close(Cc1101Radio& r) {
+#if defined(__linux__)
+    if (r.fd >= 0) close(r.fd);
+    if (r.cs_fd >= 0) close(r.cs_fd);
+    if (r.sw0_fd >= 0) close(r.sw0_fd);
+    if (r.rst_fd >= 0) close(r.rst_fd);
+    // Same mux contract as the probes: if a CC1101 CS or GDO0 lived on G14/G15
+    // (CAP CC1101), hand the mini-UART pins back to ALT5 on the way out.
+    if (r.cs_gpio == 14 || r.cs_gpio == 15 || r.gdo0_gpio == 14 || r.gdo0_gpio == 15) {
+        gpio_restore_serial_mux();
+    }
+#endif
+    r = Cc1101Radio{};
 }
 
 std::string cc1101_detect_report(const std::string& spidev_path, bool& detected) {

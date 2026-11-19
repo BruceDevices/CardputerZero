@@ -118,6 +118,43 @@ std::mutex& spi_bus_mutex();
 // ausente após `redetect()`, reporta "CC1101 ausente". Retorna 0 se presente.
 int cc1101_detect_cli(int argc, char** argv);
 
+// CLI `--rf-info [freq]`: run detection, read the dynamic CC1101 pins, configure
+// the radio for OOK async RX and stream VERSION + RSSI. Proves the M6 driver.
+int rf_info_cli(int argc, char** argv);
+
+// CLI `--rf-record [freq] [save]`: configure OOK async RX and capture GDO0 edges
+// via RfRxCapture (M7), printing the signed-µs durations of each frame. With the
+// `save` token, also write the recording to a Flipper/Bruce SubGhz RAW `.sub`
+// (M8). Env: RF_RECORD_SECS (default 20), RF_RX_GLITCH_US, RF_RX_MIN_TRANSITIONS,
+// RF_GDO0_GPIO, RF_SAVE_DIR (default ./BruceRF).
+int rf_record_cli(int argc, char** argv);
+
+// CLI `--rf-send <key_hex> [freq] [te] [count]`: transmit an OOK PT2262 code via
+// the CC1101 in async TX, bit-banging GDO0 (M9) — the same code `subghz tx`
+// sends on Bruce, so a reference Bruce receiver decodes it. Env: RF_TX_POWER.
+int rf_send_cli(int argc, char** argv);
+
+// CLI `--rf-replay <file.sub>`: load a Flipper/Bruce Protocol: RAW recording
+// and replay its signed durations at the frequency stored in the file (M9).
+int rf_replay_cli(int argc, char** argv);
+
+// CLI `--rf-protos`: list the ported Bruce protocol registry (name/bits/te).
+int rf_protos_cli(int argc, char** argv);
+
+// CLI `--rf-tx-proto <name> <key_hex> [bits] [te] [count] [freq]`: encode a
+// named registry protocol with the ported engine and transmit it (bit-banged).
+int rf_tx_proto_cli(int argc, char** argv);
+
+// CLI `--rf-selftest`: pure-software encode->decode round-trip of the ported
+// protocol engine (no radio). Returns 0 when every fixed-length protocol passes.
+int rf_selftest_cli(int argc, char** argv);
+
+// CLI `--rf-decode-sub <file.sub>`: decode every RAW frame in a .sub via the
+// ported engine (e.g. a RAW capture made by another receiver).
+int rf_raw_cli(int argc, char** argv);
+int rf_carrier_cli(int argc, char** argv);
+int rf_decode_sub_cli(int argc, char** argv);
+
 // Zera tudo (-1 / None, kind=None) e atualiza os Subjects.
 void reset_absent();
 

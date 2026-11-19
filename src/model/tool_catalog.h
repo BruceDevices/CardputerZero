@@ -67,7 +67,13 @@ const std::vector<ToolCategory>& tool_catalog();
 // whose rows depend on discovered hosts). Call before building a category's menu
 // so freshly discovered hosts / the current selection show up. Cheap; a no-op
 // for static categories.
-void refresh_dynamic_categories();
+// `category_index` lets hardware-backed categories refresh only when entered;
+// pass -1 to refresh all purely data-driven categories without probing hardware.
+void refresh_dynamic_categories(int category_index = -1);
+
+// Rebuild the native CC1101 rows plus the saved-RAW replay list. The view owns
+// hardware probing and passes the resulting availability/pins into the model.
+void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio);
 
 // A ToolAction with an empty argv is a navigation row (not a launchable tool):
 // selecting it mutates dynamic state instead of running a process. Screens route

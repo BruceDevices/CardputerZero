@@ -24,7 +24,7 @@
  *   CC1101_CS    = G7  = SPI0_CS1 -> hardware CS -> /dev/spidev0.1
  *   ST25R3916_CS = G22 (plain GPIO: spidev runs SPI_NO_CS, CS bit-banged)
  *   NFC_IRQ      = G23 (unused; the driver polls the IRQ registers)
- *   CC1101_GDO0  = G14, CC1101_RF_SW0 = G15 (RF TX/RX only; not probe-verified)
+ *   CC1101_GDO0  = G15, CC1101_RF_SW0 = G14 (verified with OOK RX/TX on hardware)
  * Note G8/SPI0_CS0 is the internal LCD - never asserted on purpose. On the
  * tested CAP CC1101 only the CC1101 (G7) answered; the ST25R (G22) was silent.
  *

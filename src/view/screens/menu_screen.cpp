@@ -8,6 +8,7 @@
 
 #include "asset_manager.h"
 #include "bindings.h"
+#include "bruce_module.h"
 #include "theme.h"
 #include "tool_catalog.h"
 #include "ui_const.h"
@@ -103,7 +104,16 @@ void MenuScreen::update_carousel() {
 void MenuScreen::build_list(lv_obj_t* content) {
     // Rebuild data-driven categories (e.g. Nmap's host list) before reading them,
     // so a just-finished discovery / host selection shows up on (re)entry.
-    model::refresh_dynamic_categories();
+    model::refresh_dynamic_categories(category_index_);
+    const auto& pre_refresh_catalog = model::tool_catalog();
+    if (category_index_ >= 0 &&
+        category_index_ < static_cast<int>(pre_refresh_catalog.size()) &&
+        std::string(pre_refresh_catalog[static_cast<size_t>(category_index_)].label) ==
+            "Sub-GHz / RF") {
+        hal::redetect();
+        const auto& pins = hal::modules().cc1101;
+        model::refresh_rf_category(hal::has_cc1101(), pins.cs, pins.gdo0);
+    }
     const auto& catalog = model::tool_catalog();
 
     auto* header = lv_label_create(content);
