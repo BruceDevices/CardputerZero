@@ -14,6 +14,7 @@ enum class AppPage {
     About    = 2,
     Clock    = 3,
     Terminal = 4,
+    Rf       = 5,
 };
 
 class BaseModel {

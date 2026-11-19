@@ -13,6 +13,7 @@
 #include "rf_capture.h"   // platform::RfRxCapture (M7)
 #include "rf_emit.h"      // platform::rf_ook_encode_pt2262 / RfTxLine (M9)
 #include "rf_recording.h" // platform::RawRecording / rf_save_sub (M8)
+#include "rf_receiver.h"
 #include "rf_bridge.h"    // rfproto:: encode/decode (ported Bruce engine)
 #include "subjects.h"
 
@@ -261,6 +262,55 @@ std::string pick_spidev() {
 }
 
 } // namespace
+
+const char* RfReceiver::start(float mhz, bool capture_pulses) {
+    stop();
+    if (!ensure_cc1101()) return "Connect a CC1101 CAP";
+
+    const auto pins = modules().cc1101;
+    const auto device = pick_spidev();
+    {
+        std::lock_guard<std::mutex> lock(spi_bus_mutex());
+        if (!platform::cc1101_radio_open(radio_, device.c_str(), pins.cs, pins.gdo0, pins.sw0, pins.rst)) {
+            return "Could not open CC1101";
+        }
+        platform::cc1101_config_ook_async_rx(radio_, mhz);
+        if (!platform::cc1101_version_valid(platform::cc1101_status_read(radio_, 0x31))) {
+            platform::cc1101_radio_close(radio_);
+            return "CC1101 did not respond";
+        }
+        platform::cc1101_rx(radio_);
+    }
+    if (capture_pulses && !capture_.begin(pins.gdo0)) {
+        stop();
+        return "Could not open GDO0 for capture";
+    }
+    return nullptr;
+}
+
+void RfReceiver::stop(std::deque<platform::RfRxFrame>* pending) {
+    if (!active()) return;
+    capture_.end(pending);
+    std::lock_guard<std::mutex> lock(spi_bus_mutex());
+    platform::cc1101_idle(radio_);
+    platform::cc1101_radio_close(radio_);
+}
+
+bool RfReceiver::tune(float mhz) {
+    const bool capturing = capture_.active();
+    if (capturing) capture_.end();
+    {
+        std::lock_guard<std::mutex> lock(spi_bus_mutex());
+        platform::cc1101_set_frequency(radio_, mhz);
+        platform::cc1101_rx(radio_);
+    }
+    return !capturing || capture_.begin(radio_.gdo0_gpio);
+}
+
+int RfReceiver::rssi_dbm() const {
+    std::lock_guard<std::mutex> lock(spi_bus_mutex());
+    return platform::cc1101_rssi_dbm(radio_);
+}
 
 int rf_info_cli(int argc, char** argv) {
     // --rf-info [freq_mhz]: detect the CAP, configure the CC1101 for OOK async

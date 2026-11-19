@@ -206,7 +206,12 @@ void MenuScreen::open_selected() {
 
     // A row with no argv is a navigation row (not a launchable tool).
     const auto& category = model::tool_catalog()[static_cast<size_t>(category_index_)];
-    if (category.actions[selected_index_].argv.empty()) {
+    const auto& action = category.actions[selected_index_];
+    if (action.rf_tool != model::RfTool::None) {
+        view_model().show_rf(category_index_, static_cast<int>(selected_index_));
+        return;
+    }
+    if (action.argv.empty()) {
         if (std::string(category.label) == "Theme") {
             // Apply the picked accent color and re-theme + rebuild in place.
             view::set_accent(static_cast<int>(selected_index_));

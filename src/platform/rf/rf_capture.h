@@ -22,11 +22,17 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 namespace platform {
+
+struct RfRxFrame {
+    std::vector<int> durations;
+    uint64_t start_ms = 0;
+};
 
 class RfRxCapture {
 public:
@@ -44,9 +50,11 @@ public:
     // Non-blocking. If a frame is ready, moves the (already filtered) signed
     // durations into `durations` and returns true; otherwise returns false.
     bool poll(std::vector<int>& durations);
+    bool poll(RfRxFrame& frame);
 
-    // Stop the thread and release the line.
-    void end();
+    // Stop the thread and release the line. Optionally drain pending bursts,
+    // including a frame interrupted by Stop before the idle timeout.
+    void end(std::deque<RfRxFrame>* pending = nullptr);
 
     bool active() const { return _running.load(); }
     // true if the last frame filled the buffer (signal longer than capacity).
@@ -64,8 +72,8 @@ private:
     std::atomic<uint64_t> _edges{0};
 
     std::mutex _mtx;
-    std::vector<int> _ready; // completed frame awaiting poll()
-    bool _buffer_full = false;
+    std::deque<RfRxFrame> _ready;
+    std::atomic_bool _buffer_full{false};
 };
 
 // Apply the glitch filter + same-level duration merge (port of Bruce's

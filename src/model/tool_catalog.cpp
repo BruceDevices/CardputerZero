@@ -115,6 +115,8 @@ std::vector<ToolAction> scan_scripts() {
     return actions;
 }
 
+} // namespace
+
 std::string rf_recordings_dir() {
     if (const char* env = std::getenv("BRUCE_RF_DIR"); env && env[0] != '\0') {
         return env;
@@ -125,6 +127,8 @@ std::string rf_recordings_dir() {
     return "/tmp/BruceRF";
 }
 
+namespace {
+
 std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int gdo0_gpio) {
     static std::deque<std::string> pool;
     pool.clear();
@@ -134,6 +138,15 @@ std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int g
     };
 
     std::vector<ToolAction> actions;
+    actions.push_back({"Scan / Capture", "Inspect received OOK pulses.", {}, false, false, false, RfTool::Scan});
+    actions.push_back({"Protocol Monitor", "Identify received OOK protocols.", {}, false, false, false,
+                       RfTool::ProtocolMonitor});
+    actions.push_back({"RSSI Spectrum", "Sweep received power by frequency.", {}, false, false, false,
+                       RfTool::Spectrum});
+    actions.push_back({"Record RAW", "Record and export OOK pulses to a .sub file.", {}, false, false, false,
+                       RfTool::Record});
+    actions.push_back({"Spectrogram", "View recent RSSI sweeps over time.", {}, false, false, false,
+                       RfTool::Spectrogram});
     actions.push_back(ToolAction{
         "Detect / refresh CC1101 CAP",
         "Power and probe the CAP, then return to this menu to refresh RF actions.",
@@ -152,14 +165,10 @@ std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int g
             {self_exe_path(), "--rf-info", "433.92"}});
 
         const std::string dir = rf_recordings_dir();
-        const std::string record_command =
-            "mkdir -p " + sh_quote(dir) + "; RF_SAVE_DIR=" + sh_quote(dir) +
-            " RF_RECORD_SECS=20 exec " + sh_quote(self_exe_path()) +
-            " --rf-record 433.92 save";
         actions.push_back(ToolAction{
-            "Record + save RAW (20s)",
-            own("Listen on 433.92 MHz for 20 seconds and save captures under " + dir + "."),
-            {"sh", "-c", record_command}});
+            "OOK test signal",
+            "Send the fixed Princeton bench-test pattern at 433.92 MHz.",
+            {self_exe_path(), "--rf-send", "A5C39A", "433.92", "350", "10"}});
 
         std::vector<std::string> files;
         if (DIR* directory = opendir(dir.c_str())) {
@@ -185,7 +194,7 @@ std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int g
             actions.push_back(ToolAction{
                 "No saved RAW files yet",
                 own("Use Record + save; .sub files from " + dir + " will appear here."),
-                {"sh", "-c", "echo 'No saved .sub files yet. Run Record + save RAW first.'"}});
+                {"sh", "-c", "echo 'No saved .sub files yet. Use Record RAW and select Save.'"}});
         }
     }
 

@@ -7,6 +7,7 @@
 #include "rf_capture.h"
 
 #include <cstdlib>
+#include <utility>
 
 #if defined(__linux__)
 #include <cerrno>
@@ -35,6 +36,7 @@ constexpr size_t kMinTransitions = 16;
 constexpr int kGlitchUs = 60;
 // Hard cap on a single frame (signed durations). ~Bruce's 8192 symbols worth.
 constexpr size_t kMaxDurations = 8192;
+constexpr size_t kMaxPendingFrames = 8;
 
 int env_int_or(const char* name, int fallback) {
     const char* v = std::getenv(name);
@@ -119,6 +121,7 @@ void RfRxCapture::reader_loop() {
     std::vector<int> frame;
     frame.reserve(1024);
     bool have_prev = false;
+    uint64_t first_ns = 0;
     uint64_t last_ns = 0;
 
     auto finalize = [&]() {
@@ -131,7 +134,8 @@ void RfRxCapture::reader_loop() {
         if (frame.size() >= min_transitions) {
             {
                 std::lock_guard<std::mutex> lk(_mtx);
-                _ready = frame; // last frame wins if poll() hasn't drained it yet
+                if (_ready.size() == kMaxPendingFrames) _ready.pop_front();
+                _ready.push_back({frame, first_ns / 1000000ULL});
                 _buffer_full = frame.size() >= kMaxDurations;
             }
         }
@@ -153,12 +157,14 @@ void RfRxCapture::reader_loop() {
             if (have_prev && !frame.empty()) finalize();
             continue;
         }
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
         if (!(pfd.revents & POLLIN)) continue;
 
         // Drain all pending edge events.
         gpio_v2_line_event ev{};
-        while (read(_req_fd, &ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev))) {
+        while (_running.load() && read(_req_fd, &ev, sizeof(ev)) == static_cast<ssize_t>(sizeof(ev))) {
             _edges.fetch_add(1, std::memory_order_relaxed);
+            if (!have_prev) first_ns = ev.timestamp_ns;
             if (have_prev) {
                 const uint64_t delta_ns = ev.timestamp_ns - last_ns;
                 int dur_us = static_cast<int>(delta_ns / 1000ULL);
@@ -171,6 +177,7 @@ void RfRxCapture::reader_loop() {
                 if (frame.size() >= kMaxDurations) {
                     finalize();
                     // start a fresh frame seeded from this edge
+                    first_ns = ev.timestamp_ns;
                     last_ns = ev.timestamp_ns;
                     have_prev = true;
                     continue;
@@ -180,17 +187,25 @@ void RfRxCapture::reader_loop() {
             have_prev = true;
         }
     }
+    if (!frame.empty()) finalize();
 }
 
 bool RfRxCapture::poll(std::vector<int>& durations) {
-    std::lock_guard<std::mutex> lk(_mtx);
-    if (_ready.empty()) return false;
-    durations.swap(_ready);
-    _ready.clear();
+    RfRxFrame frame;
+    if (!poll(frame)) return false;
+    durations = std::move(frame.durations);
     return true;
 }
 
-void RfRxCapture::end() {
+bool RfRxCapture::poll(RfRxFrame& frame) {
+    std::lock_guard<std::mutex> lk(_mtx);
+    if (_ready.empty()) return false;
+    frame = std::move(_ready.front());
+    _ready.pop_front();
+    return true;
+}
+
+void RfRxCapture::end(std::deque<RfRxFrame>* pending) {
     _running.store(false);
     if (_thread.joinable()) _thread.join();
     if (_req_fd >= 0) {
@@ -198,6 +213,7 @@ void RfRxCapture::end() {
         _req_fd = -1;
     }
     std::lock_guard<std::mutex> lk(_mtx);
+    if (pending) pending->swap(_ready);
     _ready.clear();
 }
 
@@ -206,7 +222,8 @@ void RfRxCapture::end() {
 bool RfRxCapture::begin(int, const char*) { return false; }
 void RfRxCapture::reader_loop() {}
 bool RfRxCapture::poll(std::vector<int>&) { return false; }
-void RfRxCapture::end() {}
+bool RfRxCapture::poll(RfRxFrame&) { return false; }
+void RfRxCapture::end(std::deque<RfRxFrame>*) {}
 
 #endif // __linux__
 

@@ -12,6 +12,8 @@
 
 namespace model {
 
+enum class RfTool { None, Scan, ProtocolMonitor, Record, Spectrum, Spectrogram };
+
 // A selectable UI accent color. Pure data (no LVGL) so it is the single source
 // of truth shared by the "Theme" menu (model) and the palette (view): `primary`
 // is the main accent, `info` a lighter companion used for secondary styling.
@@ -46,6 +48,7 @@ struct ToolAction {
     // (leading "sudo "), not per row. `argv` is a harmless fallback print used
     // only if the screen is ever dropped.
     bool terminal_view = false;
+    RfTool rf_tool = RfTool::None;
 };
 
 // A menu category shown on the root menu (e.g. "Wi-Fi", "Responder").
@@ -74,6 +77,7 @@ void refresh_dynamic_categories(int category_index = -1);
 // Rebuild the native CC1101 rows plus the saved-RAW replay list. The view owns
 // hardware probing and passes the resulting availability/pins into the model.
 void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio);
+std::string rf_recordings_dir();
 
 // A ToolAction with an empty argv is a navigation row (not a launchable tool):
 // selecting it mutates dynamic state instead of running a process. Screens route

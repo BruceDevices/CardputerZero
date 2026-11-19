@@ -9,6 +9,7 @@
 #include "about_screen.h"
 #include "clock_screen.h"
 #include "menu_screen.h"
+#include "rf_screen.h"
 #include "terminal_screen.h"
 #include "tool_run_screen.h"
 
@@ -80,6 +81,9 @@ void ScreenManager::flush_requested_refresh() {
             break;
         case model::AppPage::Terminal:
             load_screen(std::make_unique<screen::TerminalScreen>(view_model_, assets_));
+            break;
+        case model::AppPage::Rf:
+            load_screen(std::make_unique<screen::RfScreen>(view_model_, assets_));
             break;
         case model::AppPage::Menu:
         default:

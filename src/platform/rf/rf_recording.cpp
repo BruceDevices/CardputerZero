@@ -6,6 +6,7 @@
 
 #include "rf_recording.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -63,22 +64,21 @@ std::string rf_save_sub(const RawRecording& rec, const std::string& dir) {
     if (rec.frames.empty()) return "";
 
     std::error_code ec;
-    std::filesystem::create_directories(dir, ec); // ok if it already exists
+    std::filesystem::create_directories(dir, ec);
+    if (ec) return "";
 
     std::string path;
-    for (int i = 0;; ++i) {
+    FILE* f = nullptr;
+    for (int i = 0; i <= 100000; ++i) {
         path = dir + "/raw_" + std::to_string(i) + ".sub";
-        if (!std::filesystem::exists(path)) break;
-        if (i > 100000) return ""; // guard against a pathological loop
+        f = std::fopen(path.c_str(), "wbx");
+        if (f || errno != EEXIST) break;
     }
-
-    FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) return "";
 
-    // Header — byte-for-byte Bruce's save.cpp (Filetype/Version/Frequency/Preset/
-    // Protocol). Frequency is written in Hz.
+    // Sub-GHz RAW header. Frequency is written in Hz.
     std::fputs("Filetype: Bruce SubGhz File\n", f);
-    std::fputs("Version 1\n", f);
+    std::fputs("Version: 1\n", f);
     std::fprintf(f, "Frequency: %d\n", static_cast<int>(rec.frequency_hz));
     std::fputs("Preset: 0\n", f);
     std::fputs("Protocol: RAW\n", f);
@@ -95,14 +95,18 @@ std::string rf_save_sub(const RawRecording& rec, const std::string& dir) {
 
     for (size_t i = 0; i < rec.frames.size(); ++i) {
         for (int d : rec.frames[i]) emit(d);
-        if (i + 1 < rec.frames.size()) {
+        if (i + 1 < rec.frames.size() && rec.gaps_ms[i] > 0) {
             // Gap between bursts: a long LOW duration (negative µs), ms * -1000,
             // same as Bruce.
             emit(rec.gaps_ms[i] * -1000);
         }
     }
     std::fputc('\n', f);
-    std::fclose(f);
+    const bool failed = std::ferror(f);
+    if (std::fclose(f) != 0 || failed) {
+        std::filesystem::remove(path, ec);
+        return "";
+    }
     return path;
 }
 
