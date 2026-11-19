@@ -35,6 +35,7 @@ namespace {
 constexpr uint8_t kSres    = 0x30; // SRES command strobe (reset)
 constexpr uint8_t kVersion = 0x31; // status register VERSION
 constexpr uint32_t kSpeedHz = 500000; // 500 kHz - known-good CC1101/ST25R read speed
+constexpr unsigned kResetSettleUs = 10000;
 
 constexpr uint8_t kIcIdentity  = 0x3F; // ST25R3916 IC_IDENTITY (space-A register)
 constexpr uint8_t kIcTypeMask  = 0xF8; // ic_type field = bits [7:3]
@@ -164,7 +165,7 @@ bool probe_cc1101(const char* spidev_path, int cs_gpio, int rst_gpio, uint8_t& v
     cs(false);
     spi_strobe(fd, kSres);
     cs(true);
-    usleep(10000); // 10ms to leave reset before reading status
+    usleep(kResetSettleUs);
 
     cs(false);
     const bool ok = spi_status_read(fd, kVersion, version);
@@ -503,7 +504,9 @@ void cc1101_cmd(const Cc1101Radio& r, uint8_t strobe) {
 void cc1101_reset_chip(const Cc1101Radio& r) {
 #if defined(__linux__)
     cc1101_cmd(r, S_SRES);
-    usleep(1000); // chip needs ~ms to complete the reset and settle in IDLE
+    // spidev owns CS and MISO. Allow reset to finish before sending the first
+    // config writes, using the same settling time as the presence probe.
+    usleep(kResetSettleUs);
 #else
     (void)r;
 #endif
