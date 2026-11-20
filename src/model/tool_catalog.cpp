@@ -7,7 +7,6 @@
 #include "tool_catalog.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdio>
 #include <cctype>
 #include <cerrno>
@@ -1730,44 +1729,6 @@ bool sudo_passwordless() {
     }
     int status = 0;
     return ::waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-}
-
-namespace {
-std::string g_sudo_password;
-std::chrono::steady_clock::time_point g_sudo_password_used;
-
-void wipe(std::string& s) {
-    std::fill(s.begin(), s.end(), '\0'); // do not leave the bytes in freed memory
-    s.clear();
-}
-} // namespace
-
-std::string sudo_cached_password() {
-    if (g_sudo_password.empty()) {
-        return {};
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (now - g_sudo_password_used > std::chrono::seconds(kSudoCacheIdleSeconds)) {
-        wipe(g_sudo_password);
-        return {};
-    }
-    g_sudo_password_used = now;
-    return g_sudo_password;
-}
-
-void sudo_remember_password(const std::string& password) {
-    wipe(g_sudo_password);
-    g_sudo_password = password;
-    g_sudo_password_used = std::chrono::steady_clock::now();
-}
-
-void sudo_forget_password() {
-    wipe(g_sudo_password);
-}
-
-bool sudo_output_rejected_password(const std::string& output) {
-    return output.find("incorrect password") != std::string::npos ||
-           output.find("Sorry, try again") != std::string::npos;
 }
 
 std::vector<std::string> sudo_argv_with_password(const ToolAction& action) {

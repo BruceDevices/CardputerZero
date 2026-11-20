@@ -46,6 +46,10 @@ bool sudo_needs_password(const std::string& out) {
     return out.find("a password is required") != std::string::npos ||
            out.find("a terminal is required") != std::string::npos;
 }
+bool sudo_password_rejected(const std::string& out) {
+    return out.find("incorrect password") != std::string::npos ||
+           out.find("Sorry, try again") != std::string::npos;
+}
 
 // Concise, tagged diagnostics on stderr (LVGL's own log is WARN+ only).
 __attribute__((format(printf, 1, 2))) void scan_log(const char* fmt, ...) {
@@ -142,14 +146,6 @@ void WifiScanScreen::start_scan(const model::ToolAction& action) {
     scan_log("root needed=%s", needs_root ? (passwordless ? "yes, passwordless" : "yes, password") : "no");
 
     if (needs_root && !passwordless) {
-        // Reuse the password entered earlier this session, if still fresh.
-        const std::string cached = model::sudo_cached_password();
-        if (!cached.empty()) {
-            scan_log("using cached sudo password");
-            used_password_ = true;
-            launch_scan(pending_argv_, cached + "\n");
-            return;
-        }
         show_sudo_dialog();
         return;
     }
@@ -190,11 +186,8 @@ void WifiScanScreen::on_scan_exit() {
     scan_log("exited, %zu bytes of output", scan_buffer_.size());
 
     // sudo refused: offer the password dialog instead of an empty result.
-    if (used_password_ ? model::sudo_output_rejected_password(scan_buffer_)
+    if (used_password_ ? sudo_password_rejected(scan_buffer_)
                        : sudo_needs_password(scan_buffer_)) {
-        if (used_password_) {
-            model::sudo_forget_password(); // never retry a rejected password
-        }
         scan_log("%s", used_password_ ? "sudo rejected the password" : "sudo -n refused, asking for password");
         if (banner_) {
             lv_label_set_text(banner_, used_password_ ? "Wrong sudo password, try again."
@@ -648,7 +641,6 @@ void WifiScanScreen::submit_sudo_dialog() {
         return;
     }
     close_sudo_dialog();
-    model::sudo_remember_password(password);
     used_password_ = true;
     launch_scan(pending_argv_, password + "\n");
 }

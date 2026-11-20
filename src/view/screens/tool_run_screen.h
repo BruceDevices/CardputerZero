@@ -52,8 +52,6 @@ private:
     lv_obj_t* log_label_{nullptr}; // log text inside log_ta_
     bool follow_tail_{true}; // auto-scroll to newest output until the user scrolls up
     platform::ProcessRunner runner_;
-    bool used_password_{false}; // current run fed the sudo password via stdin
-    std::string run_output_;    // its output, to spot a rejected password
 
     lv_obj_t* sudo_modal_{nullptr};
     lv_obj_t* sudo_ta_{nullptr};

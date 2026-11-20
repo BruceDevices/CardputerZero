@@ -162,21 +162,6 @@ bool sudo_passwordless();
 // launches take the `sudo -n` path without asking again.
 std::vector<std::string> sudo_argv_with_password(const ToolAction& action);
 
-// App-wide sudo password cache. Needed because sudo's own credential cache
-// does not carry over between our tty-less launches (every child is setsid()ed,
-// and sudo keys tickets per tty/session), so without this every root command
-// asked again. Entered once, reused by every screen; it expires after
-// kSudoCacheIdleSeconds without use (sudo's default timeout) and is wiped
-// as soon as sudo rejects it. Memory only, never written anywhere.
-constexpr int kSudoCacheIdleSeconds = 15 * 60;
-// The cached password, or "" when none/expired. A hit counts as a use and
-// restarts the idle timer.
-std::string sudo_cached_password();
-void sudo_remember_password(const std::string& password);
-void sudo_forget_password();
-// sudo -S output that means the password was wrong.
-bool sudo_output_rejected_password(const std::string& output);
-
 // --- Terminal ("Terminal" category) ------------------------------------------------
 
 // How a root terminal command must be launched right now. NotNeeded: the app

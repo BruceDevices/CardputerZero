@@ -154,15 +154,14 @@ void TerminalScreen::start_command(const std::string& command, bool as_root) {
     // password must only ever reach a `sudo -S`.
     const bool needs_password = argv.size() > 1 && argv[0] == "sudo" && argv[1] == "-S";
     if (needs_password) {
-        const std::string cached = model::sudo_cached_password(); // app-wide cache
-        if (cached.empty()) {
+        if (cached_password_.empty()) {
             // Ask on-device first; run_command already echoed the prompt line.
             pending_command_ = command;
             pending_root_    = true;
             show_sudo_dialog();
             return;
         }
-        stdin_payload                    = cached + "\n";
+        stdin_payload                    = cached_password_ + "\n";
         last_run_used_sudo_password_     = true;
     } else {
         last_run_used_sudo_password_ = false;
@@ -437,7 +436,7 @@ void TerminalScreen::submit_sudo_dialog() {
         update_run_label();
         return;
     }
-    model::sudo_remember_password(password);
+    cached_password_ = password;
     const std::string command = pending_command_;
     const bool as_root        = pending_root_;
     pending_command_.clear();
@@ -457,8 +456,8 @@ void TerminalScreen::on_process_update(void* owner, const std::string& text, boo
         // One sudo -S attempt per password: a rejected password must not stay
         // cached, or every later root command fails without ever re-prompting.
         if (self->last_run_used_sudo_password_ &&
-            model::sudo_output_rejected_password(self->run_output_)) {
-            model::sudo_forget_password();
+            self->run_output_.find("incorrect password attempt") != std::string::npos) {
+            self->cached_password_.clear();
             self->append_log("[sudo password rejected - it will be asked again]\n");
         }
         self->run_output_.clear();
