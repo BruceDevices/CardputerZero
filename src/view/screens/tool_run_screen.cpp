@@ -114,6 +114,7 @@ void ToolRunScreen::show_sudo_dialog() {
     lv_obj_set_style_bg_color(sudo_modal_, lv_obj_get_style_bg_color(root(), LV_PART_MAIN), 0);
     lv_obj_set_style_bg_opa(sudo_modal_, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(sudo_modal_, 0, 0);
+    lv_obj_set_style_pad_all(sudo_modal_, 0, 0); // theme padding would shift every row below
     lv_obj_clear_flag(sudo_modal_, LV_OBJ_FLAG_SCROLLABLE);
 
     auto* title = lv_label_create(sudo_modal_);
@@ -132,12 +133,13 @@ void ToolRunScreen::show_sudo_dialog() {
     auto* hint = lv_label_create(sudo_modal_);
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
     lv_label_set_text(hint, "device default is often 'pi'");
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 78);
+    // Stack each row under the previous one so they can never overlap.
+    lv_obj_align_to(hint, sudo_ta_, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
 
     auto* keys = lv_label_create(sudo_modal_);
     lv_obj_set_style_text_font(keys, &lv_font_montserrat_12, 0);
     lv_label_set_text(keys, "ESC cancel - Enter OK");
-    lv_obj_align(keys, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_align_to(keys, hint, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
 
     // Re-point the nav slots: ESC = cancel, Enter/slot 2 = submit. Typing keys
     // reach the textarea through the indev group (see platform::set_text_input_mode).
@@ -188,12 +190,13 @@ void ToolRunScreen::submit_sudo_dialog() {
         return; // Enter can arrive twice (group READY + nav slot 2); one wins
     }
     const std::string password = lv_textarea_get_text(sudo_ta_);
-    close_sudo_dialog();
     if (password.empty()) {
-        append_log("\n[sudo: no password entered]\n");
-        update_run_label();
+        // The Enter that pressed Run can also reach this dialog right after it
+        // opens (press + release / double dispatch). Ignore an empty submit and
+        // keep the dialog up; ESC cancels.
         return;
     }
+    close_sudo_dialog();
     const auto& action = model::tool_catalog()[static_cast<size_t>(category_index_)]
                              .actions[static_cast<size_t>(item_index_)];
     // The password travels through the child's stdin pipe (ProcessRunner),

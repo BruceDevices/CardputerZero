@@ -1109,6 +1109,7 @@ bool sudo_passwordless() {
     if (geteuid() == 0) {
         return true;
     }
+    const std::string self = self_exe_path(); // before fork: no allocation in the child
     const pid_t pid = ::fork();
     if (pid < 0) {
         return false;
@@ -1120,7 +1121,11 @@ bool sudo_passwordless() {
             ::dup2(devnull, STDERR_FILENO);
             ::close(devnull);
         }
-        ::execlp("sudo", "sudo", "-n", "true", static_cast<char*>(nullptr));
+        // Probe the exact command the sudoers rule authorizes (this binary),
+        // not `true`: the rule does not cover `true`, so `sudo -n true` only
+        // passed while a cached sudo timestamp happened to be valid.
+        ::execlp("sudo", "sudo", "-n", self.c_str(), "--root-sh", "true",
+                 static_cast<char*>(nullptr));
         _exit(127);
     }
     int status = 0;
