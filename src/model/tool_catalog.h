@@ -136,6 +136,14 @@ std::vector<std::string> launch_argv(const ToolAction& action);
 // it returns the script; otherwise the argv joined by spaces.
 std::string action_command_text(const ToolAction& action);
 
+// The active wireless interface name. "wlan0" only exists on the CardputerZero;
+// on other hosts the Wi-Fi NIC is named differently (e.g. "wlp0s20f3"), so the
+// Wi-Fi tools must not hardcode it. A netdev is wireless iff it has a phy80211
+// link under /sys/class/net. Prefers "wlan0" when present (the device), else the
+// first wireless interface, else falls back to "wlan0". This is the single
+// source of truth every Wi-Fi command resolves its interface through.
+std::string wifi_interface();
+
 // True when launching `action` needs root at all (i.e. launch_argv would wrap
 // it with sudo for a non-root app). Screens use it to pick between the
 // passwordless fast path and the on-device sudo password prompt.

@@ -663,25 +663,44 @@ std::vector<ToolAction> build_theme_actions() {
 // Portal block (native --evil-portal subcommand) and the clone-AP drill-down,
 // rebuilt on every menu entry like Nmap's host list.
 
+// Interns an interface-bearing label/description so a ToolAction/ToolCategory
+// `const char*` field can be built at runtime from wifi_interface(). The pool
+// is persistent (never cleared) and deduplicated, so the handful of distinct
+// strings get stable addresses and repeated rebuilds do not grow it - and
+// build_wifi_static_actions().size() (called just for a count in
+// on_navigation_action) can never dangle pointers held by the live catalog.
+const char* intern_iface_text(const std::string& s) {
+    static std::deque<std::string> pool; // deque: push_back keeps element addresses stable
+    for (const auto& e : pool) {
+        if (e == s) {
+            return e.c_str();
+        }
+    }
+    pool.push_back(s);
+    return pool.back().c_str();
+}
+
 std::vector<ToolAction> build_wifi_static_actions() {
+    const std::string w = wifi_interface(); // real NIC, not a hardcoded "wlan0"
+    const std::string mon = w + "mon";      // airmon-ng's monitor VIF name (<iface>mon)
     return {
         // --- recon ---
         // needs_root rows are escalated by model::launch_argv (sudo -n <self>
         // --root-sh <script>); no in-script `id -u` guard needed.
         // wifi_view rows open the structured WifiScanScreen; the argv is the
         // scan command it runs. auto_run makes the recon rows scan on entry.
-        {"Scan nearby networks", "iw dev wlan0 scan (needs root)",
-         {"sh", "-c", "ip link set wlan0 up 2>/dev/null; iw dev wlan0 scan"},
+        {"Scan nearby networks", intern_iface_text("iw dev " + w + " scan (needs root)"),
+         {"sh", "-c", "ip link set " + w + " up 2>/dev/null; iw dev " + w + " scan"},
          true, false, false, true, RfTool::None, WifiView::ScanList},
         {"List SSIDs + signal", "iw scan | ssid/signal/freq",
-         {"sh", "-c", "ip link set wlan0 up 2>/dev/null; iw dev wlan0 scan"},
+         {"sh", "-c", "ip link set " + w + " up 2>/dev/null; iw dev " + w + " scan"},
          true, false, false, true, RfTool::None, WifiView::SsidList},
         {"Channel usage (APs/chan)", "scan grouped by channel",
          {"sh", "-c",
-          "iw dev wlan0 scan 2>/dev/null | awk '/freq:/{print $2}' | sort -n | uniq -c | "
+          "iw dev " + w + " scan 2>/dev/null | awk '/freq:/{print $2}' | sort -n | uniq -c | "
           "awk '{printf \"  %s MHz: %s APs\\n\", $2, $1}' || echo 'scan failed'"},
          true, false, false, true},
-        {"Show Wi-Fi status", "ip addr show wlan0", {"ip", "addr", "show", "wlan0"},
+        {"Show Wi-Fi status", intern_iface_text("ip addr show " + w), {"ip", "addr", "show", w},
          false, false, false, true},
         {"Scan LAN hosts (arp-scan)", "arp-scan --localnet",
          {"sh", "-c", "arp-scan --localnet 2>&1 || echo 'needs arp-scan (apt install arp-scan)'"},
@@ -699,55 +718,55 @@ std::vector<ToolAction> build_wifi_static_actions() {
         // back to a manual monitor VIF (mon0) and report what to attack with.
         {"Monitor mode ON (airmon-ng)", "airmon-ng; fallback: manual mon0 VIF",
          {"sh", "-c",
-          "airmon-ng check kill 2>&1; airmon-ng start wlan0 2>&1; "
-          "if ! ip link show wlan0mon >/dev/null 2>&1; then "
-          "echo; echo 'airmon-ng produced no wlan0mon (common on this chip) - creating mon0:'; "
-          "iw dev wlan0 interface add mon0 type monitor 2>&1 && ip link set mon0 up; fi; "
-          "echo; mon=; for d in wlan0mon mon0; do ip link show $d >/dev/null 2>&1 && mon=$d && break; done; "
+          "airmon-ng check kill 2>&1; airmon-ng start " + w + " 2>&1; "
+          "if ! ip link show " + mon + " >/dev/null 2>&1; then "
+          "echo; echo 'airmon-ng produced no " + mon + " - creating mon0:'; "
+          "iw dev " + w + " interface add mon0 type monitor 2>&1 && ip link set mon0 up; fi; "
+          "echo; mon=; for d in " + mon + " mon0; do ip link show $d >/dev/null 2>&1 && mon=$d && break; done; "
           "[ -n \"$mon\" ] && echo \"monitor interface: $mon (airodump/mdk4 find it automatically)\" || "
           "echo 'no monitor interface - this radio does not support monitor mode'"},
          true},
         {"Monitor mode OFF", "remove monitor ifaces; restart NetworkManager",
          {"sh", "-c",
-          "for d in wlan0mon mon0; do ip link del $d 2>/dev/null && echo \"removed $d\"; done; "
-          "airmon-ng stop wlan0mon 2>/dev/null; rfkill unblock wifi; "
+          "for d in " + mon + " mon0; do ip link del $d 2>/dev/null && echo \"removed $d\"; done; "
+          "airmon-ng stop " + mon + " 2>/dev/null; rfkill unblock wifi; "
           "systemctl restart NetworkManager 2>/dev/null; echo done"},
          true},
         // Consumers pick whichever monitor VIF exists (wlan0mon from airmon-ng
         // or mon0 from the manual fallback) instead of hardcoding wlan0mon.
         {"Airodump scan (APs+clients)", "airodump-ng <monitor if>",
          {"sh", "-c",
-          "mon=; for d in wlan0mon mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
+          "mon=; for d in " + mon + " mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
           "[ -n \"$mon\" ] || { echo 'enable Monitor mode first'; exit 1; }; airodump-ng \"$mon\" 2>&1"}},
         {"Capture handshakes -> /tmp", "airodump-ng -w /tmp/bruce-wifi <mon>",
          {"sh", "-c",
-          "mon=; for d in wlan0mon mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
+          "mon=; for d in " + mon + " mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
           "[ -n \"$mon\" ] || { echo 'enable Monitor mode first'; exit 1; }; "
           "airodump-ng -w /tmp/bruce-wifi \"$mon\" 2>&1"}},
 
         // --- attacks (authorized testing only) ---
         {"Deauth flood (mdk4)", "mdk4 <monitor if> d",
          {"sh", "-c",
-          "mon=; for d in wlan0mon mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
+          "mon=; for d in " + mon + " mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
           "[ -n \"$mon\" ] || { echo 'needs Monitor mode + mdk4'; exit 1; }; "
           "mdk4 \"$mon\" d 2>&1 || echo 'needs mdk4'"}},
         {"Beacon spam (mdk4)", "mdk4 <monitor if> b -s 100",
          {"sh", "-c",
-          "mon=; for d in wlan0mon mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
+          "mon=; for d in " + mon + " mon0; do [ -e /sys/class/net/$d ] && mon=$d && break; done; "
           "[ -n \"$mon\" ] || { echo 'needs Monitor mode + mdk4'; exit 1; }; "
           "mdk4 \"$mon\" b -s 100 2>&1 || echo 'needs mdk4'"}},
         // hostapd needs driver=nl80211 (it refuses to start without it) and
         // clients need DHCP+DNS to land anywhere: dnsmasq answers every name
         // with the AP. Both run in this script's process group, so the tool
         // Stop button kills them together.
-        {"Rogue open AP (hostapd)", "open AP 'Free WiFi' + DHCP/DNS captive on wlan0",
+        {"Rogue open AP (hostapd)", intern_iface_text("open AP 'Free WiFi' + DHCP/DNS captive on " + w),
          {"sh", "-c",
           "command -v hostapd >/dev/null 2>&1 || "
           "{ echo 'needs hostapd + dnsmasq (apt install hostapd dnsmasq)'; exit 1; }; "
-          "cfg=$(mktemp); printf 'driver=nl80211\\ninterface=wlan0\\nssid=Free WiFi\\nchannel=6\\n"
+          "cfg=$(mktemp); printf 'driver=nl80211\\ninterface=" + w + "\\nssid=Free WiFi\\nchannel=6\\n"
           "hw_mode=g\\nauth_algs=1\\n' > \"$cfg\"; "
-          "ip addr replace 192.168.4.1/24 dev wlan0 2>/dev/null; ip link set wlan0 up; "
-          "dns=$(mktemp); printf 'interface=wlan0\\nbind-interfaces\\nexcept-interface=lo\\nno-resolv\\n"
+          "ip addr replace 192.168.4.1/24 dev " + w + " 2>/dev/null; ip link set " + w + " up; "
+          "dns=$(mktemp); printf 'interface=" + w + "\\nbind-interfaces\\nexcept-interface=lo\\nno-resolv\\n"
           "dhcp-authoritative\\ndhcp-range=192.168.4.10,192.168.4.50,255.255.255.0,12h\\n"
           "dhcp-option=3,192.168.4.1\\ndhcp-option=6,192.168.4.1\\naddress=/#/192.168.4.1\\n' > \"$dns\"; "
           "echo 'open AP \"Free WiFi\" @ 192.168.4.1 (captive: every name resolves here)'; "
@@ -788,6 +807,7 @@ std::vector<ToolAction> build_portal_rows() {
         return pool.back().c_str();
     };
 
+    const std::string w = wifi_interface();
     const std::string dir = portal_dir();
     const std::string selected = read_first_line(dir + "/selected");
     std::vector<ToolAction> acts;
@@ -798,8 +818,8 @@ std::vector<ToolAction> build_portal_rows() {
             "Scan nearby APs, then go Back and pick one to clone. Needs root.",
             {"sh", "-c",
              "mkdir -p " + dir + "; rm -f " + dir + "/selected; "
-             "ip link set wlan0 up 2>/dev/null; "
-             "iw dev wlan0 scan 2>/dev/null | awk "
+             "ip link set " + w + " up 2>/dev/null; "
+             "iw dev " + w + " scan 2>/dev/null | awk "
              "'function flush(){ if (ss!=\"\") printf \"%d\\t%s\\n\", ch, ss } "
              "/^BSS /{flush(); ss=\"\"; ch=1; next} "
              "$1==\"freq:\"{ch=($2>=5000)?int(($2-5000)/5):int(($2-2407)/5); if(ch<1)ch=1; next} "
@@ -1062,7 +1082,7 @@ std::vector<ToolCategory>& mutable_catalog() {
     static std::vector<ToolCategory> catalog = {
         {
             "Wi-Fi",
-            "Scan, recon, 802.11 attacks and Evil Portal (wlan0; root needed)",
+            intern_iface_text("Scan, recon, 802.11 attacks and Evil Portal (" + wifi_interface() + "; root needed)"),
             icon::kWifi,
             false,
             build_wifi_actions(),
@@ -1210,8 +1230,9 @@ std::vector<ToolCategory>& mutable_catalog() {
             icon::kShield,
             false,
             {
-                {"Start Responder on wlan0", "responder -I wlan0",
-                 {"responder", "-I", "wlan0"}, true},
+                {intern_iface_text("Start Responder on " + wifi_interface()),
+                 intern_iface_text("responder -I " + wifi_interface()),
+                 {"responder", "-I", wifi_interface()}, true},
                 {"Start Responder on eth0", "responder -I eth0",
                  {"responder", "-I", "eth0"}, true},
             },
@@ -1346,9 +1367,11 @@ std::vector<ToolCategory>& mutable_catalog() {
                   "case \"$rc\" in 0|124|143) ;; *) echo \"read failed on $dev (status $rc)\"; exit \"$rc\";; esac; "
                   "echo '(no $G... lines above = no NMEA: check the Cap seating / antenna)'"}},
                 {"Wardriving -> WiGLE CSV",
-                 "Scan Wi-Fi + GPS fix and log APs in WiGLE format (upload to wigle.net). "
-                 "Needs gpsd running (Cap: sudo gpsd -n -s 115200 /dev/serial0) and wlan0 up.",
-                 {self_exe_path(), "--wardrive", "wlan0"}},
+                 intern_iface_text("Scan Wi-Fi + GPS fix and log APs in WiGLE format "
+                                   "(upload to wigle.net). Needs gpsd running "
+                                   "(Cap: sudo gpsd -n -s 115200 /dev/serial0) and " +
+                                   wifi_interface() + " up."),
+                 {self_exe_path(), "--wardrive", wifi_interface()}},
                 gps_tracker_action(),
             },
         },
@@ -1642,6 +1665,33 @@ std::string action_command_text(const ToolAction& action) {
         out += action.argv[i];
     }
     return out;
+}
+
+std::string wifi_interface() {
+    const char* base = "/sys/class/net";
+    DIR* dir = ::opendir(base);
+    if (!dir) {
+        return "wlan0";
+    }
+    std::string first;
+    for (struct dirent* e = ::readdir(dir); e; e = ::readdir(dir)) {
+        if (e->d_name[0] == '.') {
+            continue;
+        }
+        struct stat st;
+        const std::string path = std::string(base) + "/" + e->d_name + "/phy80211";
+        if (::stat(path.c_str(), &st) == 0) {
+            if (std::string(e->d_name) == "wlan0") {
+                ::closedir(dir);
+                return "wlan0"; // prefer the device's own name when present
+            }
+            if (first.empty()) {
+                first = e->d_name;
+            }
+        }
+    }
+    ::closedir(dir);
+    return first.empty() ? "wlan0" : first;
 }
 
 bool action_needs_root(const ToolAction& action) {

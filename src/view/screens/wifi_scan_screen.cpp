@@ -12,14 +12,10 @@
 #include "ui_const.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
-
-#include <dirent.h>
-#include <sys/stat.h>
 
 namespace screen {
 namespace {
@@ -28,45 +24,9 @@ constexpr int32_t kContentH = view::kScreenHeight - view::kTitleBarHeight - view
 constexpr int32_t kListW    = 146; // left list width in the ScanList split view
 constexpr int32_t kGap      = 4;
 
-// The active wireless interface. The old code hardcoded "wlan0", which only
-// exists on the CardputerZero; on a dev laptop the Wi-Fi NIC is named e.g.
-// "wlp0s20f3", so scans found nothing. A netdev is wireless iff it has a
-// phy80211 link under /sys/class/net. Falls back to "wlan0" when none is found.
-std::string wifi_interface() {
-    const char* base = "/sys/class/net";
-    DIR* dir = opendir(base);
-    if (!dir) {
-        return "wlan0";
-    }
-    std::string found;
-    for (struct dirent* e = readdir(dir); e; e = readdir(dir)) {
-        if (e->d_name[0] == '.') {
-            continue;
-        }
-        struct stat st;
-        const std::string path = std::string(base) + "/" + e->d_name + "/phy80211";
-        if (stat(path.c_str(), &st) == 0) {
-            found = e->d_name;
-            if (found == "wlan0") {
-                break; // prefer the device's own name when present
-            }
-        }
-    }
-    closedir(dir);
-    return found.empty() ? "wlan0" : found;
-}
-
-// Keep only characters valid in an interface name before putting it in a shell
-// command (defence in depth; /sys names are already safe).
-std::string sanitize_iface(const std::string& s) {
-    std::string out;
-    for (char c : s) {
-        if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.') {
-            out += c;
-        }
-    }
-    return out.empty() ? "wlan0" : out;
-}
+// The scan commands resolve the wireless interface through the shared
+// model::wifi_interface() (not a hardcoded "wlan0"), so this screen works on a
+// dev laptop too; see run_primary_scan / run_detail_scan.
 
 // Strip leading whitespace (iw indents fields with tabs).
 std::string ltrim(const std::string& s) {
@@ -148,7 +108,7 @@ void WifiScanScreen::build_content(lv_obj_t* content) {
 void WifiScanScreen::run_primary_scan() {
     // Build the scan command here (not the catalog's hardcoded "wlan0") so it
     // targets the real wireless interface and works on a dev laptop too.
-    const std::string iface = sanitize_iface(wifi_interface());
+    const std::string iface = model::wifi_interface();
     model::ToolAction a;
     a.argv = {"sh", "-c",
               "ip link set " + iface + " up 2>/dev/null; iw dev " + iface + " scan"};
@@ -161,7 +121,7 @@ void WifiScanScreen::run_detail_scan(const Network& net) {
     // Targeted deeper scan of one SSID. The SSID is passed as a distinct argv
     // word (never interpolated into a shell string), so a crafted SSID cannot
     // inject commands - escalated_argv sh-quotes each word.
-    const std::string iface = sanitize_iface(wifi_interface());
+    const std::string iface = model::wifi_interface();
     model::ToolAction a;
     a.argv = {"iw", "dev", iface, "scan", "ssid", net.ssid};
     a.needs_root = true;
