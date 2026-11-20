@@ -52,12 +52,17 @@ size_t last_dispatch_index = kNavKeyCount;
 //   Enter / Ok       -> slot 2  (select / run)
 //   X / down, C /right-> slot 3  (next item)
 //   T                -> slot 4  (theme toggle)
+//   4 5 6 7 8        -> slots 0-4, left to right: the number keys sit right
+//                       under the nav-bar labels (same as other CardputerZero
+//                       apps). Slot 0 is Back; the root menu leaves it unbound,
+//                       so 4 can never quit the app.
 // Left/right and up/down both just step the 1-D menu selection, so the carousel
 // (horizontal) and the tool lists (vertical) each feel natural. Back is ESC
-// only - never a letter key - so no keystroke can accidentally quit the app.
+// or 4 in sub-screens; the root menu has no Back, so no keystroke quits the app.
 size_t nav_key_to_index(uint32_t key) {
     switch (key) {
         case LV_KEY_ESC:
+        case '4':
             return 0;
         case 'f':
         case 'F':
@@ -66,8 +71,10 @@ size_t nav_key_to_index(uint32_t key) {
         case LV_KEY_UP:
         case LV_KEY_LEFT:
         case LV_KEY_PREV:
+        case '5':
             return 1;
         case LV_KEY_ENTER:
+        case '6':
             return 2;
         case 'x':
         case 'X':
@@ -76,9 +83,11 @@ size_t nav_key_to_index(uint32_t key) {
         case LV_KEY_DOWN:
         case LV_KEY_RIGHT:
         case LV_KEY_NEXT:
+        case '7':
             return 3;
         case 't':
         case 'T':
+        case '8':
             return 4;
         default:
             return kNavKeyCount;
@@ -86,6 +95,11 @@ size_t nav_key_to_index(uint32_t key) {
 }
 
 void dispatch_nav_key(uint32_t key) {
+    // Text-entry mode: digits are text (a password, a terminal command), never
+    // nav - '6' must not submit the dialog it is being typed into.
+    if (g_text_input_mode && key >= '0' && key <= '9') {
+        return;
+    }
     const auto index = nav_key_to_index(key);
     if (index >= nav_buttons.size()) {
         return;

@@ -255,8 +255,9 @@ void TerminalScreen::enter_typing_mode() {
 
     // While typing every key (digits included) must reach the input line, so
     // all nav slots go dark; ESC keeps nav meaning and lands on repointed
-    // slot 0 = leave input.
-    nav_bar().set_icon(0, "Esc", type_cb, this);
+    // slot 0 = leave input. No label: the slot sits over the 4 key, which types
+    // '4' here, so an "Esc" label there would only mislead.
+    nav_bar().set_icon(0, "", type_cb, this);
     nav_bar().set_enabled(1, false);
     nav_bar().set_enabled(2, false);
     nav_bar().set_enabled(3, false);
