@@ -94,10 +94,10 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libstdc++6, libgcc-s1, libfreetype6, li
 # Tools that back a visible menu feature a user expects to work out of the box
 # (SDR listing/capture, PN532 NFC, wardrive GPS, QR). `apt install ./pkg.deb`
 # pulls Recommends automatically, so these install with zero manual apt.
-set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "iproute2, iw, wireless-tools, rfkill, bluez, curl, netcat-openbsd, nmap, smbclient, i2c-tools, gpiod, flashrom, rtl-sdr, rtl-433, libnfc-bin, libnfc-examples, gpsd, gpsd-clients, qrencode")
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "iproute2, iw, wireless-tools, rfkill, bluez, curl, netcat-openbsd, nmap, smbclient, i2c-tools, gpiod, flashrom, rtl-sdr, rtl-433, libnfc-bin, libnfc-examples, gpsd, gpsd-clients, qrencode, hostapd, dnsmasq")
 # Suggests = heavier / offensive tooling the user opts into per feature (not
 # auto-installed). Promote to Recommends above if you want it on by default.
-set(CPACK_DEBIAN_PACKAGE_SUGGESTS "aircrack-ng, mdk4, hostapd, arp-scan, dnsmasq, v4l-utils, lirc, alsa-utils, dsniff, kismet")
+set(CPACK_DEBIAN_PACKAGE_SUGGESTS "aircrack-ng, mdk4, arp-scan, v4l-utils, lirc, alsa-utils, dsniff, kismet")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
 set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION TRUE)
 

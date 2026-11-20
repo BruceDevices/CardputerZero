@@ -402,7 +402,7 @@ std::string dnsmasq_conf(const std::string& iface, const std::string& gateway) {
                                  "except-interface=lo\n"
                                  "no-resolv\n"
                                  "dhcp-authoritative\n"
-                                 "leasefile=/tmp/bruce-portal/dnsmasq.leases\n"
+                                 "dhcp-leasefile=/tmp/bruce-portal/dnsmasq.leases\n"
                                  "dhcp-range=" +
            base + ".10," + base +
            ".50,255.255.255.0,12h\n"
@@ -534,6 +534,34 @@ bool file_exists(const std::string& path) {
     return ::stat(path.c_str(), &st) == 0;
 }
 
+// True if a command is on PATH (used to decide whether a dependency is present).
+bool have_cmd(const std::string& name) {
+    return std::system(("command -v " + name + " >/dev/null 2>&1").c_str()) == 0;
+}
+
+// Zero-touch dependency setup: the portal needs hostapd + dnsmasq, but the
+// end-user should never have to apt-install them by hand. The package pulls
+// them as Recommends; this is the fallback for installs/devices where they are
+// still missing. We are already root here, and this runs BEFORE NetworkManager
+// is stopped so apt still has a network. A non-Debian box (no apt-get) just
+// gets a hint and the later hostapd check reports the real failure.
+void ensure_ap_tools() {
+    std::vector<std::string> missing;
+    if (!have_cmd("hostapd")) missing.push_back("hostapd");
+    if (!have_cmd("dnsmasq")) missing.push_back("dnsmasq");
+    if (missing.empty()) return;
+    std::string pkgs;
+    for (size_t i = 0; i < missing.size(); ++i) pkgs += (i ? " " : "") + missing[i];
+    if (!have_cmd("apt-get")) {
+        std::printf("[!] missing %s and no apt-get to install it - install it manually.\n",
+                    pkgs.c_str());
+        return;
+    }
+    std::printf("[*] first run: installing %s (needs network; one-time)...\n", pkgs.c_str());
+    run("DEBIAN_FRONTEND=noninteractive apt-get update 2>&1");
+    run("DEBIAN_FRONTEND=noninteractive apt-get install -y " + pkgs + " 2>&1");
+}
+
 bool valid_iface(const std::string& iface) {
     if (iface.empty() || iface.size() > 15) return false;
     for (char c : iface) {
@@ -611,15 +639,28 @@ void stop_ap_services() {
 }
 
 void start_ap_services(const PortalOptions& opts, const std::string& iface) {
+    // A soft rfkill block (common after boot / when NetworkManager releases the
+    // radio) silently stops hostapd from ever opening the interface, which is
+    // the usual reason the AP "fails to start". Clear it before anything else.
+    run("rfkill unblock wifi 2>/dev/null");
+    run("rfkill unblock wlan 2>/dev/null");
+    const std::string wd = kWorkDir;
+    write_file(wd + "/hostapd.conf", hostapd_conf(iface, opts.ap_name, opts.channel));
+    write_file(wd + "/dnsmasq.conf", dnsmasq_conf(iface, opts.gateway));
+    // Start the AP first. Switching the NIC into AP mode (and hostapd's own
+    // interface up/down) flushes any IP, so the gateway address MUST be assigned
+    // AFTER hostapd - otherwise dnsmasq has no address to answer DHCP on and the
+    // client hangs at "obtaining IP address". hostapd's log is kept for
+    // diagnostics (no pidfile == failed, surfaced by serve_portal).
+    run("hostapd -B -P " + wd + "/hostapd.pid " + wd + "/hostapd.conf > " + wd +
+        "/hostapd.log 2>&1");
+    // (Re)assign the gateway IP now that the AP interface exists, then bring the
+    // DHCP/DNS server up bound to it. dnsmasq's log is kept the same way.
+    run("ip addr flush dev " + iface + " 2>/dev/null");
     run("ip addr replace " + opts.gateway + "/24 dev " + iface + " 2>/dev/null");
     run("ip link set " + iface + " up 2>/dev/null");
-    write_file(std::string(kWorkDir) + "/hostapd.conf",
-               hostapd_conf(iface, opts.ap_name, opts.channel));
-    write_file(std::string(kWorkDir) + "/dnsmasq.conf", dnsmasq_conf(iface, opts.gateway));
-    run("hostapd -B -P " + std::string(kWorkDir) + "/hostapd.pid " + kWorkDir +
-        "/hostapd.conf 2>&1");
-    run("dnsmasq -C " + std::string(kWorkDir) + "/dnsmasq.conf --pid-file=" + kWorkDir +
-        "/dnsmasq.pid 2>&1");
+    run("dnsmasq -C " + wd + "/dnsmasq.conf --pid-file=" + wd + "/dnsmasq.pid > " + wd +
+        "/dnsmasq.log 2>&1");
 }
 
 // Linux equivalent of Bruce's verifyCreds(): with one radio we must drop the
@@ -688,9 +729,32 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
     start_ap_services(opts, iface);
 
     if (!file_exists(std::string(kWorkDir) + "/hostapd.pid")) {
+        std::string hostapd_log;
+        read_file(std::string(kWorkDir) + "/hostapd.log", hostapd_log);
+        if (!hostapd_log.empty()) {
+            std::printf("--- hostapd ---\n%s--- end hostapd ---\n", hostapd_log.c_str());
+        }
         std::printf("error: hostapd failed to start (apt install hostapd; "
                     "disable Monitor mode / other APs on %s first)\n",
                     iface.c_str());
+        run("systemctl start NetworkManager 2>/dev/null");
+        return 1;
+    }
+
+    // The AP is up but clients still need DHCP+DNS from dnsmasq; without it they
+    // associate and then hang at "obtaining IP address". Treat a missing dnsmasq
+    // pidfile as fatal and surface its log (usual causes: port 53 held by
+    // systemd-resolved, or dnsmasq not installed).
+    if (!file_exists(std::string(kWorkDir) + "/dnsmasq.pid")) {
+        std::string dnsmasq_log;
+        read_file(std::string(kWorkDir) + "/dnsmasq.log", dnsmasq_log);
+        if (!dnsmasq_log.empty()) {
+            std::printf("--- dnsmasq ---\n%s--- end dnsmasq ---\n", dnsmasq_log.c_str());
+        }
+        std::printf("error: dnsmasq (DHCP/DNS) failed to start, so clients can't get an "
+                    "IP. Free port 53 (e.g. `systemctl stop systemd-resolved`) or install "
+                    "dnsmasq, then retry.\n");
+        stop_ap_services();
         run("systemctl start NetworkManager 2>/dev/null");
         return 1;
     }
@@ -920,6 +984,9 @@ int evil_portal_main(int argc, char** argv) {
         opts.output_file = base + "_creds.csv";
     }
 
+    // Make sure hostapd/dnsmasq exist before we touch the radio (apt needs the
+    // network, which serve_portal is about to tear down).
+    ensure_ap_tools();
     run("rm -rf " + std::string(kWorkDir));
     run("mkdir -p " + std::string(kWorkDir));
     return serve_portal(std::move(opts), iface);

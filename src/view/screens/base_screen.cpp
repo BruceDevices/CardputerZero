@@ -41,16 +41,19 @@ void BaseScreen::init() {
     lv_obj_clear_flag(root_, LV_OBJ_FLAG_SCROLLABLE);
     reactive::bind_theme(root_, view_model_.dark_mode_subject(), reactive::ThemeRole::Screen);
 
-    title_bar_ = std::make_unique<view::widgets::TitleBar>(root_, view_model_);
-    title_bar_->build();
+    const int32_t content_top = wants_title_bar() ? view::kTitleBarHeight : 0;
+    if (wants_title_bar()) {
+        title_bar_ = std::make_unique<view::widgets::TitleBar>(root_, view_model_);
+        title_bar_->build();
+    }
 
     nav_bar_ = std::make_unique<view::widgets::NavBar>(root_, view_model_, assets_);
     nav_bar_->build();
 
     content_ = lv_obj_create(root_);
     lv_obj_remove_style_all(content_);
-    lv_obj_set_size(content_, LV_PCT(100), view::kScreenHeight - view::kTitleBarHeight - view::kNavBarHeight);
-    lv_obj_align(content_, LV_ALIGN_TOP_MID, 0, view::kTitleBarHeight);
+    lv_obj_set_size(content_, LV_PCT(100), view::kScreenHeight - content_top - view::kNavBarHeight);
+    lv_obj_align(content_, LV_ALIGN_TOP_MID, 0, content_top);
     lv_obj_clear_flag(content_, LV_OBJ_FLAG_SCROLLABLE);
     reactive::bind_theme(content_, view_model_.dark_mode_subject(), reactive::ThemeRole::Surface);
 

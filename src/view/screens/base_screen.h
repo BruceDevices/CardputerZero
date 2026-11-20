@@ -33,6 +33,11 @@ public:
 protected:
     virtual void build_content(lv_obj_t* content) = 0;
 
+    // Screens default to the shared title bar (status cluster). A full-screen
+    // screen (the Terminal) overrides this to false to reclaim the 30px bar for
+    // its own content.
+    virtual bool wants_title_bar() const { return true; }
+
     viewmodel::BaseViewModel& view_model();
     app::AssetManager& assets();
     view::widgets::NavBar& nav_bar();

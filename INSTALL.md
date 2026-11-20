@@ -136,12 +136,14 @@ sudo apt install ./BruceCardputerZero_0.1.0_bruce1_arm64.deb
 > drives (curl, netcat-openbsd, smbclient, iw, wireless-tools, bluez, rfkill,
 > iproute2, nmap, i2c-tools, gpiod, flashrom, **rtl-sdr, rtl-433** for Sub-GHz,
 > **libnfc-bin/libnfc-examples** for PN532, **gpsd/gpsd-clients** for wardrive,
-> qrencode) are **Recommends**: `apt install ./pkg.deb` pulls them in
-> automatically, so every menu feature works with zero manual `apt` (use
-> `--no-install-recommends` to skip them; note `dpkg -i` installs the app but
-> does **not** pull Recommends — always use `apt install ./…`). Heavier /
-> offensive tooling (aircrack-ng, mdk4, hostapd, arp-scan, dnsmasq) and
-> `responder` are **Suggests** — install per feature, e.g.
+> **hostapd/dnsmasq** for Evil Portal, qrencode) are **Recommends**:
+> `apt install ./pkg.deb` pulls them in automatically, so every menu feature
+> works with zero manual `apt` (use `--no-install-recommends` to skip them;
+> note `dpkg -i` installs the app but does **not** pull Recommends — always use
+> `apt install ./…`). If hostapd/dnsmasq are somehow still missing, Evil Portal
+> apt-installs them itself on first run (it is already root and apt still has a
+> network at that point). Heavier / offensive tooling (aircrack-ng, mdk4,
+> arp-scan) and `responder` are **Suggests** — install per feature, e.g.
 > `sudo apt install aircrack-ng mdk4`.
 > The RFID menu's **PN532** entries use libnfc (auto-installed above); point it
 > at your reader in `/etc/nfc/libnfc.conf`
@@ -192,7 +194,8 @@ The tool's live output streams into the log area.
 
 Menu contents: **Wi-Fi** (including **Evil Portal** — AP + DNS-hijacked captive
 portal capturing credentials to `~/.bruce/BruceEvilCreds/`, a Linux port of the
-ESP32 Bruce feature; needs root and `sudo apt install hostapd dnsmasq`), plus
+ESP32 Bruce feature; needs root — hostapd/dnsmasq ship as Recommends and are
+auto-installed on first run if missing), plus
 **Bluetooth LE**, **RFID**, **Sub-GHz/RF**, **Network Tools**, **Nmap**,
 **SMB Client**, **Responder**, hardware buses, **Terminal**, **Scripts**,
 **Theme** and **About**. Add or edit tools by editing one file —

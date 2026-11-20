@@ -20,12 +20,9 @@ namespace {
 // Sysfs polling is cheap but pointless at 1 Hz; one status refresh every 5th tick.
 constexpr uint32_t kDeviceRefreshTicks = 5;
 
-// Fixed cluster width caps how far a long title can run before it scrolls.
+// Status cluster width; wifi/battery pin to the right edge inside it.
 constexpr int32_t kStatusClusterWidth = 120;
 constexpr int32_t kClusterEdgeGap = 5;
-// A centered title clears the cluster box only if it fits between two mirrored
-// cluster gaps, so cap it to the middle span instead of eyeballing a margin.
-constexpr int32_t kTitleMaxWidth = kScreenWidth - 2 * (kStatusClusterWidth + kClusterEdgeGap);
 
 // LVGL ships one wifi glyph; strength is conveyed by the percent label instead.
 constexpr const char* kWifiIcon = LV_SYMBOL_WIFI;
@@ -87,15 +84,9 @@ void TitleBar::build() {
     lv_obj_clear_flag(core_obj_, LV_OBJ_FLAG_SCROLLABLE);
     reactive::bind_theme(core_obj_, view_model_.dark_mode_subject(), reactive::ThemeRole::Bar);
 
-    auto* title = lv_label_create(core_obj_);
-    lv_label_bind_text(title, view_model_.title_subject(), nullptr);
-    lv_obj_set_width(title, kTitleMaxWidth);
-    // Fixed width keeps a long title clear of the status cluster; it scrolls instead of clipping.
-    lv_label_set_long_mode(title, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-    lv_obj_align(title, LV_ALIGN_CENTER, 0, 0);
-    reactive::bind_theme(title, view_model_.dark_mode_subject(), reactive::ThemeRole::Text);
+    // No title label: the app name used to scroll here as a marquee across the
+    // 320px bar, which read poorly. The right-aligned status cluster below is
+    // the whole titlebar now.
 
     auto* status = lv_obj_create(core_obj_);
     lv_obj_remove_style_all(status);

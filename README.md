@@ -33,13 +33,14 @@ That keeps the port tiny and every tool behaves exactly like its CLI.
   subject.
 - **Theme** — purple/black palette in `src/view/ui_const.h`; light/dark toggle
   in the nav bar.
-- **Terminal** — type a command on the device keyboard, Enter runs it, output
-  streams into a tail-following log (Up/Down recall history while typing, ESC
-  leaves the input). A leading `sudo ` runs the command as root: passwordless
-  through the installed sudoers rule, otherwise the app asks for the sudo
-  password on-device once and caches it for the terminal session. The same
-  screen serves the user and root rows; `Tool catalog` stays the only place
-  tools are defined.
+- **Terminal** — a full-screen interactive shell (no title bar, so the log
+  gets the whole panel). Press **OK** or **Type** to open the command line;
+  Enter runs it, Up/Down recall history while typing, `ESC` leaves the input
+  (press it again to return to the menu). A leading `sudo ` runs the command as
+  root: passwordless through the installed sudoers rule, otherwise the app asks
+  for the sudo password on-device once and caches it for the terminal session.
+  The same screen serves the user and root rows; the tool catalog stays the
+  only place tools are defined.
 - **Status bar** — the title bar shows Wi-Fi strength and battery
   (charge state included) read from `/sys`, refreshed every 5 s
   (`src/platform/device_status.*`, ported from the official M5Stack template).
@@ -92,7 +93,7 @@ That keeps the port tiny and every tool behaves exactly like its CLI.
 
 ### Modules
 
-- `src/app/asset_manager.*`: resolves runtime assets from the optional CMake asset root, source tree `assets/`, and installed `/usr/share/<APP_NAME>/` path.
+- `src/app/asset_manager.*`: resolves runtime assets from the optional CMake asset root, the source tree `assets/`, and the installed `/usr/share/APPLaunch/share` (plus `/usr/share/<APP_NAME>/`) paths.
 - `src/app/screen_namager.cpp`: switches LVGL screens when the current page subject changes.
 - `src/config/lv_conf_desktop.h`: desktop SDL simulator LVGL settings.
 - `src/config/lv_conf_cm0.h`: embedded Linux/CardputerZero LVGL settings.
@@ -104,24 +105,25 @@ That keeps the port tiny and every tool behaves exactly like its CLI.
 
 ## Build Options
 
-Common CMake cache options:
+Key CMake cache options — the presets in `CMakePresets.json` already set sensible
+values per platform, so you rarely set these by hand:
 
-| Option | Default | Description |
-| --- | --- | --- |
-| `USE_DESKTOP` | `ON` | Build SDL desktop simulator when `ON`; build embedded Linux target when `OFF`. |
-| `APP_NAME` | `bruce_cardputerzero` | Application name used by installed asset lookup. |
-| `APP_ASSETS_ROOT` | empty | Optional runtime asset root. Expected layout includes `fonts/`, `images/`, etc. |
-| `APP_KEY_INPUT_DEVICE` | empty | Optional Linux evdev device path, e.g. `/dev/input/event0`. Empty means auto-scan `/dev/input/event*`. |
-| `APP_FRAMEBUFFER_DEVICE` | `/dev/fb0` | Linux framebuffer device used by embedded builds when `APP_USE_DRM=OFF`. |
-| `APP_USE_DRM` | `OFF` | Use LVGL's Linux DRM/KMS backend instead of fbdev for embedded builds. |
-| `APP_DRM_DEVICE` | `/dev/dri/card0` | DRM device path used when `APP_USE_DRM=ON`. |
-| `APP_DRM_CONNECTOR_ID` | `-1` | DRM connector id used when `APP_USE_DRM=ON`; `-1` auto-selects. |
+| Option | Description |
+| --- | --- |
+| `USE_DESKTOP` | Build the SDL desktop simulator (`ON`) or the embedded Linux target (`OFF`). |
+| `APP_NAME` | Application name used for installed asset lookup. |
+| `APP_ASSETS_ROOT` | Optional runtime asset root (expects `fonts/`, `images/`, …). |
+| `APP_KEY_INPUT_DEVICE` | Linux evdev device path; empty auto-scans `/dev/input/event*`. |
+| `APP_FRAMEBUFFER_DEVICE` | Linux framebuffer device for embedded fbdev builds. |
+| `APP_USE_DRM` | Use LVGL's DRM/KMS backend instead of fbdev for embedded builds. |
+| `APP_DRM_DEVICE` | DRM device path when `APP_USE_DRM=ON`. |
+| `APP_DRM_CONNECTOR_ID` | DRM connector id when `APP_USE_DRM=ON` (`-1` auto-selects). |
 
 Asset lookup order:
 
 1. `APP_ASSETS_ROOT` when provided by CMake
 2. source-tree `assets/` for development
-3. `/usr/share/<APP_NAME>/` for installed deployments
+3. `/usr/share/APPLaunch/share` (and `/usr/share/<APP_NAME>/`) for installed deployments
 
 ## Desktop Builds
 
@@ -133,19 +135,18 @@ Desktop builds are intended for fast UI development and use SDL as the LVGL disp
 | --- | --- | --- |
 | ![macOS simulator screenshot](screenshot/darwin_screenshot.png) | ![Debian simulator screenshot](screenshot/linux_screenshot.png) | ![Windows simulator screenshot](screenshot/win_screenshot.png) |
 
-Current dependencies info:
+Dependencies (exact versions are pinned in `CMakeLists.txt` for LVGL and in
+`vcpkg.json` / `vcpkg-configuration.json` for Windows builds):
 
-| Dependency | Version | Source | Notes |
-| --- | --- | --- | --- |
-| LVGL | `v9.5.0` | `CMakeLists.txt` FetchContent | Main GUI framework. |
-| fmt | `12.1.0` | System package manager or `vcpkg.json` override | Logging and formatted strings. |
-| libpng | `1.6.48` | System package manager or `vcpkg.json` override | PNG image decoding support for LVGL. |
-| libjpeg-turbo | `3.1.3` | System package manager or `vcpkg.json` override | JPEG image decoding support for LVGL. |
-| zlib | `1.3.1` | System package manager or `vcpkg.json` override | Compression dependency used by image libraries. |
-| SDL2 | `2.32.54` | System package manager or `vcpkg.json` override | Desktop simulator display and input backend. |
-| FreeType | `2.13.3` | System package manager or `vcpkg.json` override | Runtime TTF font rendering. |
-
-> Windows vcpkg installs use the versions above through manifest mode, with the registry baseline pinned in `vcpkg-configuration.json`.
+| Dependency | Source | Notes |
+| --- | --- | --- |
+| LVGL | `CMakeLists.txt` FetchContent | Main GUI framework. |
+| fmt | system package / `vcpkg.json` | Logging and formatted strings. |
+| libpng | system package / `vcpkg.json` | PNG decoding for LVGL. |
+| libjpeg-turbo | system package / `vcpkg.json` | JPEG decoding for LVGL. |
+| zlib | system package / `vcpkg.json` | Compression used by the image libraries. |
+| SDL2 | system package / `vcpkg.json` | Desktop simulator display/input backend. |
+| FreeType | system package / `vcpkg.json` | Runtime TTF font rendering. |
 
 ### Linux Desktop
 
@@ -399,7 +400,7 @@ By default, the debian package is copied to '$HOME' folder, normally it's under 
 On your device, install the copied package with `apt` and replace the package file name with the one you copied:
 
 ```shell
-sudo apt install --no-install-recommends ./BruceCardputerZero_0.1.0_bruce1_arm64.deb
+sudo apt install ./BruceCardputerZero_*_arm64.deb   # plain apt pulls Recommends (hostapd, dnsmasq, iw, ...)
 ```
 
 
@@ -419,10 +420,10 @@ The bottom nav bar maps hardware/keyboard keys from left to right:
 | `ESC` | First icon button / quit |
 
 Per-screen slot meanings: on `ToolRunScreen` the slots are Back / Up / Run-Stop
-/ Down / Clear; on `TerminalScreen` they are Back / Up / Run-Stop / Down / Type
-(slot 4 focuses the command input — while typing, every key feeds the input,
-Enter runs the command, Up/Down recall history and `ESC` returns to nav mode;
-a leading `sudo ` in a command runs it as root).
+/ Down / Clear; on `TerminalScreen` they are Back / Up / Run-Stop / Down / Type.
+Pressing **OK** (Run) or **Type** while idle opens the command input; while
+typing, every key feeds the input, Enter runs the command, Up/Down recall
+history and `ESC` returns to nav mode (a leading `sudo ` runs it as root).
 
 ### Adding a Screen
 
@@ -450,7 +451,7 @@ assets/fonts/
 Installed deployments can place fonts in:
 
 ```text
-/usr/share/<APP_NAME>/fonts/
+/usr/share/APPLaunch/share/fonts/
 ```
 
 You can also provide an asset root at configure time:
@@ -462,28 +463,17 @@ cmake --preset darwin-arm64 -DAPP_ASSETS_ROOT=/path/to/assets
 
 ## Debian Package
 
-Debian packages are produced with CPack and written to `dist/`. The package file name follows:
+CPack produces the `.deb` in `dist/`, named like
+`BruceCardputerZero_<version>-bruce1_arm64.deb`. Everything installs under the
+`/usr/share/APPLaunch/` prefix the app store requires — there is **no**
+`/usr/bin` entry and **no** systemd service:
 
-```text
-<AppName>_<Version>_m5stack1_arm64.deb
-```
-
-Default example:
-
-```text
-dist/BruceCardputerZero_0.1.0_bruce1_arm64.deb
-```
-
-Package layout:
-
-| Path | Content |
+| Path (under `/usr/share/APPLaunch/`) | Content |
 | --- | --- |
-| `/usr/bin/bruce_cardputerzero` | Application executable. |
-| `/usr/share/bruce_cardputerzero/` | Runtime assets: fonts, images, audio. |
-| `/usr/share/APPLaunch/applications/bruce_cardputerzero.desktop` | APPLaunch launcher entry. |
-| `/usr/share/APPLaunch/share/images/template*.png` | APPLaunch launcher icons/fallbacks. |
-| `/usr/lib/systemd/system/bruce_cardputerzero.service` | Optional systemd service for embedded autostart. |
-| `/usr/share/doc/bruce_cardputerzero/` | README and third-party asset license notes. |
+| `bin/bruce_cardputerzero` | Application executable. |
+| `share/fonts/`, `share/images/`, `share/audio/` | Runtime assets. |
+| `applications/bruce_cardputerzero.desktop` | APPLaunch launcher entry (icon `share/images/bruce_icon.png`). |
+| `share/doc/bruce_cardputerzero/` | README + third-party asset license. |
 
 Build and package:
 

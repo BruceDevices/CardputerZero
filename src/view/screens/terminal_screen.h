@@ -28,6 +28,9 @@ public:
 
 private:
     void build_content(lv_obj_t* content) override;
+    // Full-screen terminal: drop the shared title bar so the log/input get the
+    // whole panel above the nav bar.
+    bool wants_title_bar() const override { return false; }
 
     void run_command();
     void start_command(const std::string& command, bool as_root);

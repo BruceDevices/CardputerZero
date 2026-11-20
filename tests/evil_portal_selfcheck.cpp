@@ -109,7 +109,10 @@ int main() {
     assert(dns.find("address=/#/192.168.4.1") != std::string::npos); // DNS hijack
     assert(dns.find("dhcp-range=192.168.4.10,192.168.4.50") != std::string::npos);
     assert(dns.find("dhcp-option=6,192.168.4.1") != std::string::npos);
-    assert(dns.find("leasefile=/tmp/bruce-portal/") != std::string::npos);
+    // Must be the valid dnsmasq keyword (dhcp-leasefile), not the bogus
+    // "leasefile=" which makes dnsmasq reject the config and never serve DHCP.
+    assert(dns.find("dhcp-leasefile=/tmp/bruce-portal/") != std::string::npos);
+    assert(dns.find("\nleasefile=") == std::string::npos);
     assert(wpa_conf("Net", "pa\"ss").find("psk=\"pa\\\"ss\"") != std::string::npos);
 
     // --- route table, plain capture mode ------------------------------------

@@ -90,7 +90,7 @@ void TerminalScreen::build_content(lv_obj_t* content) {
     lv_obj_set_style_text_font(header, &lv_font_montserrat_14, 0);
     lv_label_set_text(header, action.label);
 
-    const int32_t content_height = view::kScreenHeight - view::kTitleBarHeight - view::kNavBarHeight;
+    const int32_t content_height = view::kScreenHeight - view::kNavBarHeight;
     // Plain label in a scrollable box: a textarea would snap back to its cursor
     // (always at the end) on every size/style change and fight manual scrolling.
     log_ta_ = lv_obj_create(content);
@@ -106,8 +106,8 @@ void TerminalScreen::build_content(lv_obj_t* content) {
     lv_label_set_long_mode(log_label_, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_style_text_font(log_label_, &lv_font_montserrat_12, 0);
     lv_label_set_text(log_label_,
-                      "Bruce terminal - type a command, Enter runs it\n"
-                      "'sudo cmd' runs as root; Up/Down history; ESC leaves input\n\n");
+                      "Bruce terminal - press OK (or Type) to start a command\n"
+                      "Enter runs it; 'sudo cmd' as root; Up/Down history; ESC leaves\n\n");
 
     input_ta_ = lv_textarea_create(content);
     lv_obj_set_size(input_ta_, LV_PCT(100), kInputHeight);
@@ -182,7 +182,7 @@ void TerminalScreen::set_input_visible(bool visible) {
     } else {
         lv_obj_add_flag(input_ta_, LV_OBJ_FLAG_HIDDEN);
     }
-    const int32_t content_height = view::kScreenHeight - view::kTitleBarHeight - view::kNavBarHeight;
+    const int32_t content_height = view::kScreenHeight - view::kNavBarHeight;
     lv_obj_set_height(log_ta_, content_height - kHeaderHeight - (visible ? kInputHeight : 0));
     lv_obj_update_layout(log_ta_);
     if (follow_tail_) {
@@ -477,7 +477,10 @@ void TerminalScreen::run_stop_cb(lv_event_t* event) {
         self->append_log("\n[stopped]\n");
         self->update_run_label();
     } else {
-        self->run_command();
+        // Idle in nav mode Enter/OK opens the command line to type into. It used
+        // to run the empty, hidden input and looked dead; typing mode is where a
+        // command is actually entered (the input's Enter then runs it).
+        self->enter_typing_mode();
     }
 }
 
