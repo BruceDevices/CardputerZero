@@ -16,8 +16,13 @@ public:
 
 private:
     void build_content(lv_obj_t* content) override;
+    void scroll(int32_t delta);
 
+    static void scroll_up_cb(lv_event_t* event);
+    static void scroll_down_cb(lv_event_t* event);
     static void back_cb(lv_event_t* event);
+
+    lv_obj_t* scroll_{nullptr};
 };
 
 } // namespace screen

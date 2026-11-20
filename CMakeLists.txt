@@ -6,7 +6,7 @@
 
 cmake_minimum_required(VERSION 3.31)
 
-project(bruce_cardputerzero VERSION 0.1.0 LANGUAGES C CXX)
+project(bruce_cardputerzero VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -572,6 +572,13 @@ target_link_libraries(${PROJECT_NAME}_view
         ${PROJECT_NAME}_model
         ${PROJECT_NAME}_platform
         ${PROJECT_NAME}_hal
+)
+
+# Compile-time app version string, shown in the title bar when the system clock
+# is unset (no RTC/NTP). Tracks the project() version above.
+target_compile_definitions(${PROJECT_NAME}_view
+    PRIVATE
+        APP_VERSION="${PROJECT_VERSION}"
 )
 
 # ====================================================

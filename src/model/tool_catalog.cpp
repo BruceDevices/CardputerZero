@@ -581,6 +581,117 @@ constexpr const char* kOneWire   = ""; // git-commit
 constexpr const char* kGpio      = ""; // cpu
 } // namespace icon
 
+// Common IANA timezones offered as a picker under "System / Clock". Selecting
+// one sets the system zone (timedatectl, or the zoneinfo symlink fallback) so
+// the clock shows the right local time; NTP only fixes UTC, not the zone.
+std::vector<ToolAction> build_timezone_actions() {
+    static const char* const kZones[] = {
+        "UTC",               "Europe/London",    "Europe/Lisbon",
+        "Europe/Madrid",     "Europe/Paris",     "Europe/Berlin",
+        "Europe/Athens",     "Europe/Moscow",    "America/New_York",
+        "America/Chicago",   "America/Denver",   "America/Los_Angeles",
+        "America/Sao_Paulo", "Asia/Dubai",       "Asia/Kolkata",
+        "Asia/Shanghai",     "Asia/Tokyo",       "Australia/Sydney",
+        "Pacific/Auckland",
+    };
+    // ToolAction::label is a const char*; dynamically built labels live in a
+    // static pool, cleared each rebuild (safe: a live ToolRunScreen has already
+    // copied the label text, and no rebuild happens while it is open).
+    static std::deque<std::string> pool;
+    pool.clear();
+    auto own = [](std::string s) -> const char* {
+        pool.push_back(std::move(s));
+        return pool.back().c_str();
+    };
+    std::vector<ToolAction> acts;
+    acts.reserve(sizeof(kZones) / sizeof(kZones[0]));
+    for (const char* z : kZones) {
+        const std::string zone = z;
+        ToolAction a;
+        a.label       = own("Timezone: " + zone);
+        a.description = own("Set the system timezone to " + zone +
+                            " (needs root); the clock then shows this zone's local time.");
+        a.argv        = {"sh", "-c",
+                         "tz='" + zone + "'; "
+                         "timedatectl set-timezone \"$tz\" 2>/dev/null || "
+                         "ln -sf \"/usr/share/zoneinfo/$tz\" /etc/localtime 2>&1; "
+                         "echo \"timezone set to $tz\"; date"};
+        a.needs_root  = true;
+        acts.push_back(std::move(a));
+    }
+    return acts;
+}
+// System / Clock utilities plus a single "Set timezone >" entry that drills
+// into the timezone picker in place (Nmap-style), so the long zone list never
+// clutters the category. tz_picker_open() is the in-memory toggle, flipped by
+// on_navigation_action() and read here on every rebuild.
+bool& tz_picker_open() {
+    static bool open = false;
+    return open;
+}
+
+std::vector<ToolAction> build_system_clock_actions() {
+    if (tz_picker_open()) {
+        // Dedicated picker view: a Back row, then the runnable zone rows.
+        std::vector<ToolAction> picker;
+        picker.push_back(ToolAction{"<  Back", "Return to System / Clock.", {}});
+        for (auto& z : build_timezone_actions()) {
+            picker.push_back(std::move(z));
+        }
+        return picker;
+    }
+    return {
+        {"Clock", "A full-screen themed clock \xe2\x80\x94 just the time and date",
+         {"sh", "-c", "while true; do printf '\\r%s' \"$(date '+%Y-%m-%d %H:%M:%S')\"; sleep 1; done"},
+         false, /*clock_view=*/true},
+        {"Sync time (NTP)",
+         "Set the system clock from the internet (needs root). Tries "
+         "ntpdate/sntp/chrony, else enables systemd-timesyncd.",
+         {"sh", "-c",
+          "ok=0; "
+          "for c in 'ntpdate -u pool.ntp.org' 'sntp -s pool.ntp.org' 'chronyc -a makestep'; do "
+          "bin=${c%% *}; command -v \"$bin\" >/dev/null 2>&1 || continue; "
+          "echo \"+ $c\"; $c 2>&1 && ok=1 && break; done; "
+          "if [ \"$ok\" = 0 ] && command -v timedatectl >/dev/null 2>&1; then "
+          "echo '+ timedatectl set-ntp true'; timedatectl set-ntp true 2>&1 && ok=1; "
+          "echo '(systemd-timesyncd syncs in the background; give it ~1 min)'; fi; "
+          "[ \"$ok\" = 0 ] && echo 'no NTP client; install one: sudo apt install ntpdate (or sntp/chrony)'; "
+          "echo; echo \"now: $(date)\""},
+         /*needs_root=*/true},
+        {"Set timezone  >",
+         "Pick your timezone so the clock shows the right local time.",
+         {}}, // empty argv => navigation row that opens the picker
+        {"Set time manually",
+         "Opens the terminal; type  sudo date -s \"YYYY-MM-DD HH:MM:SS\"  "
+         "to set the clock by hand (quote the whole date).",
+         {"sh", "-c", "echo 'set the clock with: sudo date -s \"YYYY-MM-DD HH:MM:SS\"'"},
+         false, false, /*terminal_view=*/true},
+        {"Countdown timer (60s)", "sleep 60; beep",
+         {"sh", "-c", "for i in $(seq 60 -1 1); do printf '\\r%2ds remaining ' \"$i\"; sleep 1; done; "
+          "echo; echo 'Time up!'"}},
+        {"Uptime + load", "uptime", {"uptime"}},
+        {"Install optional tools (apt)",
+         "apt-get install the Suggests set (aircrack-ng, mdk4, hostapd, "
+         "arp-scan, dnsmasq, ...). Passwordless via the installed sudoers rule.",
+         {"sh", "-c",
+          "export DEBIAN_FRONTEND=noninteractive; "
+          "apt-get update 2>&1; "
+          "apt-get install -y aircrack-ng mdk4 hostapd arp-scan dnsmasq "
+          "v4l-utils lirc alsa-utils dsniff 2>&1; echo; echo 'done.'"},
+         true},
+        {"QR code (this device URL)", "qrencode -t UTF8",
+         {"sh", "-c", "ip=$(hostname -I 2>/dev/null | awk '{print $1}'); "
+          "qrencode -t UTF8 \"http://$ip:8080\" 2>&1 || echo 'needs qrencode'"}},
+        {"Microphone record (5s)", "arecord -d 5 /tmp/rec.wav",
+         {"sh", "-c", "arecord -d 5 -f cd /tmp/bruce-rec.wav 2>&1 && echo 'saved /tmp/bruce-rec.wav' || "
+          "echo 'needs a mic + alsa-utils (arecord)'"}},
+        {"iButton read (1-Wire ROM)", "cat /sys/bus/w1/devices/*/id",
+         {"sh", "-c", "for d in /sys/bus/w1/devices/*/; do n=$(basename \"$d\"); "
+          "[ \"$n\" != w1_bus_master1 ] && echo \"iButton/1-Wire: $n\"; done 2>/dev/null || "
+          "echo 'no 1-Wire device (needs w1-gpio overlay + an iButton)'"}},
+    };
+}
+
 // Mutable backing store so data-driven categories (Nmap) can be rebuilt in
 // place; tool_catalog() hands out a const view of it.
 std::vector<ToolCategory>& mutable_catalog() {
@@ -899,37 +1010,7 @@ std::vector<ToolCategory>& mutable_catalog() {
             "Clock, timer, uptime and handy local tools",
             icon::kClock,
             false,
-            {
-                {"Clock", "A full-screen themed clock \xe2\x80\x94 just the time and date",
-                 {"sh", "-c", "while true; do printf '\\r%s' \"$(date '+%Y-%m-%d %H:%M:%S')\"; sleep 1; done"},
-                 false, /*clock_view=*/true},
-                {"Countdown timer (60s)", "sleep 60; beep",
-                 {"sh", "-c", "for i in $(seq 60 -1 1); do printf '\\r%2ds remaining ' \"$i\"; sleep 1; done; "
-                  "echo; echo 'Time up!'"}},
-                {"Uptime + load", "uptime", {"uptime"}},
-                // Installs the optional/offensive tooling (Suggests set) with no
-                // password prompt: needs_root routes this through sudo -n <self>
-                // --root-sh, and the package's sudoers rule makes that passwordless.
-                {"Install optional tools (apt)",
-                 "apt-get install the Suggests set (aircrack-ng, mdk4, hostapd, "
-                 "arp-scan, dnsmasq, ...). Passwordless via the installed sudoers rule.",
-                 {"sh", "-c",
-                  "export DEBIAN_FRONTEND=noninteractive; "
-                  "apt-get update 2>&1; "
-                  "apt-get install -y aircrack-ng mdk4 hostapd arp-scan dnsmasq "
-                  "v4l-utils lirc alsa-utils dsniff 2>&1; echo; echo 'done.'"},
-                 true},
-                {"QR code (this device URL)", "qrencode -t UTF8",
-                 {"sh", "-c", "ip=$(hostname -I 2>/dev/null | awk '{print $1}'); "
-                  "qrencode -t UTF8 \"http://$ip:8080\" 2>&1 || echo 'needs qrencode'"}},
-                {"Microphone record (5s)", "arecord -d 5 /tmp/rec.wav",
-                 {"sh", "-c", "arecord -d 5 -f cd /tmp/bruce-rec.wav 2>&1 && echo 'saved /tmp/bruce-rec.wav' || "
-                  "echo 'needs a mic + alsa-utils (arecord)'"}},
-                {"iButton read (1-Wire ROM)", "cat /sys/bus/w1/devices/*/id",
-                 {"sh", "-c", "for d in /sys/bus/w1/devices/*/; do n=$(basename \"$d\"); "
-                  "[ \"$n\" != w1_bus_master1 ] && echo \"iButton/1-Wire: $n\"; done 2>/dev/null || "
-                  "echo 'no 1-Wire device (needs w1-gpio overlay + an iButton)'"}},
-            },
+            build_system_clock_actions(),
         },
         {
             "Terminal",
@@ -985,6 +1066,8 @@ void refresh_dynamic_categories(int category_index) {
             category.actions = build_nmap_actions();
         } else if (label == "Wi-Fi") {
             category.actions = build_wifi_actions();
+        } else if (label == "System / Clock") {
+            category.actions = build_system_clock_actions();
         }
     }
 }
@@ -1046,6 +1129,22 @@ void on_navigation_action(int category_index, int item_index) {
             // "< Back to AP list".
             std::remove((dir + "/selected").c_str());
         }
+    }
+
+    if (label == "System / Clock") {
+        // One nav row toggles the in-place timezone picker: "Set timezone >"
+        // opens it, "<  Back" closes it. Zone rows are runnable (not nav rows).
+        const auto& acts = catalog[static_cast<size_t>(category_index)].actions;
+        if (item_index < 0 || item_index >= static_cast<int>(acts.size())) {
+            return;
+        }
+        const std::string row = acts[static_cast<size_t>(item_index)].label;
+        if (row.rfind("Set timezone", 0) == 0) {
+            tz_picker_open() = true;
+        } else if (!row.empty() && row[0] == '<') {
+            tz_picker_open() = false;
+        }
+        return;
     }
 }
 

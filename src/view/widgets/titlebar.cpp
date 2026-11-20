@@ -8,11 +8,23 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <fstream>
+#include <string>
+
+#include <unistd.h>
 
 #include "bindings.h"
 #include "device_status.h"
 #include "theme.h"
+
+// Injected by CMake (target_compile_definitions) from the project() version.
+#ifndef APP_VERSION
+#define APP_VERSION "0.0.0"
+#endif
 
 namespace view::widgets {
 namespace {
@@ -60,6 +72,50 @@ void set_visible(lv_obj_t* obj, bool visible) {
     }
 }
 
+// Pick up a timezone change made at runtime (the "Set timezone" picker runs
+// `timedatectl set-timezone`, which rewrites /etc/localtime). glibc caches the
+// zone, so we must re-read the current zone name and re-apply it via TZ+tzset;
+// the name only changes when the user actually switches zones, so the file read
+// each tick is cheap and tzset only re-parses on a real change.
+std::string current_zone_name() {
+    // /etc/localtime is authoritative: timedatectl always repoints this symlink,
+    // whereas /etc/timezone is frequently left stale on systemd/Debian (that
+    // staleness showed the wrong UTC offset). Resolve it (realpath follows
+    // relative / multi-hop links) and take the part after ".../zoneinfo/".
+    if (char* resolved = ::realpath("/etc/localtime", nullptr)) {
+        const std::string path(resolved);
+        std::free(resolved);
+        const std::string marker = "/zoneinfo/";
+        const auto pos = path.find(marker);
+        if (pos != std::string::npos) {
+            return path.substr(pos + marker.size());
+        }
+    }
+    // Fallback: /etc/localtime is a plain copy, not a symlink -> the name file.
+    std::ifstream tz("/etc/timezone");
+    std::string name;
+    if (tz && std::getline(tz, name)) {
+        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) {
+            name.pop_back();
+        }
+        if (!name.empty()) {
+            return name;
+        }
+    }
+    return {};
+}
+
+void sync_timezone() {
+    static std::string applied;
+    const std::string zone = current_zone_name();
+    if (zone.empty() || zone == applied) {
+        return;
+    }
+    applied = zone;
+    ::setenv("TZ", zone.c_str(), 1);
+    ::tzset();
+}
+
 } // namespace
 
 TitleBar::TitleBar(lv_obj_t* parent, viewmodel::BaseViewModel& view_model)
@@ -84,9 +140,14 @@ void TitleBar::build() {
     lv_obj_clear_flag(core_obj_, LV_OBJ_FLAG_SCROLLABLE);
     reactive::bind_theme(core_obj_, view_model_.dark_mode_subject(), reactive::ThemeRole::Bar);
 
-    // No title label: the app name used to scroll here as a marquee across the
-    // 320px bar, which read poorly. The right-aligned status cluster below is
-    // the whole titlebar now.
+    // Clock on the left. When the system clock is unset (no RTC/NTP) it falls
+    // back to the app version string. The app name used to scroll in the centre
+    // as a marquee, which read poorly, so the bar is now clock | status cluster.
+    clock_label_ = lv_label_create(core_obj_);
+    lv_obj_set_style_text_font(clock_label_, &lv_font_montserrat_14, 0);
+    lv_obj_align(clock_label_, LV_ALIGN_LEFT_MID, kClusterEdgeGap + 3, 0);
+    reactive::bind_theme(clock_label_, view_model_.dark_mode_subject(), reactive::ThemeRole::Text);
+    update_clock();
 
     auto* status = lv_obj_create(core_obj_);
     lv_obj_remove_style_all(status);
@@ -111,6 +172,25 @@ void TitleBar::build() {
 
     refresh_device_status();
     refresh_timer_ = lv_timer_create(refresh_timer_cb, 1000, this);
+}
+
+void TitleBar::update_clock() {
+    if (!clock_label_) {
+        return;
+    }
+    sync_timezone(); // reflect a runtime timezone switch before converting
+    std::time_t now = std::time(nullptr);
+    std::tm lt{};
+    localtime_r(&now, &lt);
+    // A pre-2024 system time means the clock was never set (devices without an
+    // RTC/NTP boot near the epoch); show the app version instead of a bogus time.
+    if (lt.tm_year + 1900 >= 2024) {
+        char buf[8];
+        std::strftime(buf, sizeof(buf), "%H:%M", &lt);
+        lv_label_set_text(clock_label_, buf);
+    } else {
+        lv_label_set_text(clock_label_, APP_VERSION);
+    }
 }
 
 void TitleBar::refresh_device_status() {
@@ -145,6 +225,7 @@ void TitleBar::refresh_timer_cb(lv_timer_t* timer) {
     if (!title_bar) {
         return;
     }
+    title_bar->update_clock(); // cheap; keep the minute digit fresh every tick
     if (++title_bar->refresh_tick_ >= kDeviceRefreshTicks) {
         title_bar->refresh_tick_ = 0;
         title_bar->refresh_device_status();
