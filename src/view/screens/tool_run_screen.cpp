@@ -44,21 +44,25 @@ void ToolRunScreen::build_content(lv_obj_t* content) {
     lv_obj_set_style_text_font(header, &lv_font_montserrat_14, 0);
     lv_label_set_text(header, action.label);
 
-    log_ta_ = lv_textarea_create(content);
+    // Plain label in a scrollable box: a textarea snaps back to its cursor (always
+    // at the end) on every size/style change and fights manual scrolling. Scrolling
+    // up pauses tail-follow so new output cannot yank the view back down.
+    log_ta_ = lv_obj_create(content);
     lv_obj_set_size(log_ta_,
                     LV_PCT(100),
                     view::kScreenHeight - view::kTitleBarHeight - view::kNavBarHeight - kHeaderHeight);
     lv_obj_align(log_ta_, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_textarea_set_cursor_click_pos(log_ta_, false);
-    lv_obj_clear_flag(log_ta_, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_text_font(log_ta_, &lv_font_montserrat_12, 0);
-    // Streaming tools append constantly, so the log must be keyboard-scrollable
-    // (keys 5/7 below) with a visible scrollbar; scrolling up pauses tail-follow
-    // so new output cannot yank the view back down while reading.
+    lv_obj_set_style_pad_all(log_ta_, 4, 0);
     lv_obj_add_flag(log_ta_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(log_ta_, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(log_ta_, LV_SCROLLBAR_MODE_AUTO);
-    lv_textarea_set_text(log_ta_, action.description);
-    lv_textarea_add_text(log_ta_, "\n\n");
+
+    log_label_ = lv_label_create(log_ta_);
+    lv_obj_set_width(log_label_, LV_PCT(100));
+    lv_label_set_long_mode(log_label_, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_text_font(log_label_, &lv_font_montserrat_12, 0);
+    lv_label_set_text(log_label_, action.description);
+    lv_label_ins_text(log_label_, LV_LABEL_POS_LAST, "\n\n");
 
     // 4=Back  5=Log up  6=Run/Stop  7=Log down  8=Clear
     nav_bar().set_icon(1, view::NAV_UP, scroll_up_cb, this);
@@ -89,6 +93,7 @@ void ToolRunScreen::toggle_run() {
 }
 
 void ToolRunScreen::start_tool(std::vector<std::string> argv, const std::string& stdin_payload) {
+    follow_tail_ = true;
     if (!runner_.start(std::move(argv), &ToolRunScreen::on_process_update, this, stdin_payload)) {
         append_log("\n[failed to launch]\n");
     }
@@ -198,27 +203,38 @@ void ToolRunScreen::submit_sudo_dialog() {
 }
 
 void ToolRunScreen::clear_log() {
-    if (log_ta_) {
-        lv_textarea_set_text(log_ta_, "");
+    if (log_label_) {
+        lv_label_set_text(log_label_, "");
         follow_tail_ = true;
     }
 }
 
 void ToolRunScreen::append_log(const std::string& text) {
-    if (!log_ta_ || text.empty()) {
+    if (!log_label_ || text.empty()) {
         return;
     }
 
-    if (lv_textarea_get_text(log_ta_)[0] != '\0' && strlen(lv_textarea_get_text(log_ta_)) > kMaxLogChars) {
-        lv_textarea_set_text(log_ta_, "");
+    // Trim from the front (on a line boundary) so scrollback survives overflow.
+    std::string current = lv_label_get_text(log_label_);
+    if (current.size() + text.size() > kMaxLogChars) {
+        size_t cut = current.size() + text.size() - kMaxLogChars + kMaxLogChars / 4;
+        if (cut >= current.size()) {
+            current.clear();
+        } else {
+            const size_t nl = current.find('\n', cut);
+            current.erase(0, nl == std::string::npos ? cut : nl + 1);
+        }
+        lv_label_set_text(log_label_, current.c_str());
     }
 
-    // add_text moves the cursor (and the view) to the end; while the user is
-    // reading history that yank is exactly the bug - restore their position
-    // and let tail-follow resume only once they scroll back to the bottom.
+    lv_obj_update_layout(log_ta_);
     const lv_coord_t prev_scroll = lv_obj_get_scroll_y(log_ta_);
-    lv_textarea_add_text(log_ta_, text.c_str());
-    if (!follow_tail_) {
+    lv_label_ins_text(log_label_, LV_LABEL_POS_LAST, text.c_str());
+    lv_obj_update_layout(log_ta_);
+    if (follow_tail_) {
+        lv_obj_scroll_to_y(log_ta_, lv_obj_get_scroll_y(log_ta_) + lv_obj_get_scroll_bottom(log_ta_),
+                           LV_ANIM_OFF);
+    } else {
         lv_obj_scroll_to_y(log_ta_, prev_scroll, LV_ANIM_OFF);
     }
 }
@@ -227,9 +243,13 @@ void ToolRunScreen::scroll_log(int32_t delta) {
     if (!log_ta_) {
         return;
     }
-    lv_obj_scroll_by(log_ta_, 0, delta, LV_ANIM_OFF);
-    // Delta > 0 moves the view toward older output; delta < 0 toward the tail.
-    follow_tail_ = delta <= 0 && lv_obj_get_scroll_bottom(log_ta_) < 2;
+    lv_obj_update_layout(log_ta_);
+    // delta > 0 reveals older output (content moves down); clamp to the real limits.
+    const lv_coord_t max_y = lv_obj_get_scroll_y(log_ta_) + lv_obj_get_scroll_bottom(log_ta_);
+    lv_coord_t target      = lv_obj_get_scroll_y(log_ta_) - delta;
+    target                 = target < 0 ? 0 : (target > max_y ? max_y : target);
+    lv_obj_scroll_to_y(log_ta_, target, LV_ANIM_OFF);
+    follow_tail_ = target >= max_y - 2;
 }
 
 void ToolRunScreen::update_run_label() {
