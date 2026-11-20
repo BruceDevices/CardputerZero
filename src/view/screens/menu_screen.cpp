@@ -132,6 +132,7 @@ void MenuScreen::build_list(lv_obj_t* content) {
     lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_row(list, 2, 0); // tighter gap so ~4 rows fit, not 2
 
     const size_t item_count = catalog[static_cast<size_t>(category_index_)].actions.size();
     rows_.reserve(item_count);
@@ -139,6 +140,10 @@ void MenuScreen::build_list(lv_obj_t* content) {
         const char* label = catalog[static_cast<size_t>(category_index_)].actions[i].label;
         auto* row = lv_list_add_button(list, nullptr, label);
         lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        // Compact rows: the default list button is tall enough that only ~2 fit
+        // in the content area; trim the vertical padding so ~4 are visible.
+        lv_obj_set_style_pad_ver(row, 3, 0);
+        lv_obj_set_style_text_font(row, &lv_font_montserrat_14, 0);
         rows_.push_back(row);
     }
 
@@ -214,6 +219,10 @@ void MenuScreen::open_selected() {
     const auto& action = category.actions[selected_index_];
     if (action.rf_tool != model::RfTool::None) {
         view_model().show_rf(category_index_, static_cast<int>(selected_index_));
+        return;
+    }
+    if (action.wifi_view != model::WifiView::None) {
+        view_model().show_wifi_scan(category_index_, static_cast<int>(selected_index_));
         return;
     }
     if (action.argv.empty()) {

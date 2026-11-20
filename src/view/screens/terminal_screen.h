@@ -77,7 +77,6 @@ private:
     size_t history_index_{0}; // one-past-last = drafting a new line
     std::string history_draft_;
 
-    std::string cached_password_; // sudo password for this screen's lifetime
     std::string pending_command_; // root command waiting for the password dialog
     bool pending_root_{false};
     bool last_run_used_sudo_password_{false}; // to sniff a wrong-password failure

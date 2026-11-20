@@ -79,7 +79,10 @@
 
 #define LV_USE_LOG                         1
 
-#define LV_LOG_LEVEL                       LV_LOG_LEVEL_INFO
+/* WARN, not INFO: INFO floods stdout with per-object/refresh traces and buries
+ * the app's own [tag] diagnostics. */
+// #define LV_LOG_LEVEL                       LV_LOG_LEVEL_INFO
+#define LV_LOG_LEVEL                       LV_LOG_LEVEL_WARN
 
 /* Printf backend */
 #define LV_LOG_PRINTF                      1

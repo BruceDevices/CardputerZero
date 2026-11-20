@@ -7,6 +7,7 @@
 #include "tool_catalog.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -146,14 +147,14 @@ std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int g
         actions.push_back(std::move(detect_action));
     }
 
-    actions.push_back({"Scan / Capture", "Identify received OOK protocols.", {}, false, false, false,
+    actions.push_back({"Scan / Capture", "Identify received OOK protocols.", {}, false, false, false, false,
                        RfTool::ProtocolMonitor});
-    actions.push_back({"Signal Spectrum", "Inspect received OOK pulses.", {}, false, false, false, RfTool::Scan});
-    actions.push_back({"RSSI Spectrum", "Sweep received power by frequency.", {}, false, false, false,
+    actions.push_back({"Signal Spectrum", "Inspect received OOK pulses.", {}, false, false, false, false, RfTool::Scan});
+    actions.push_back({"RSSI Spectrum", "Sweep received power by frequency.", {}, false, false, false, false,
                        RfTool::Spectrum});
-    actions.push_back({"Record RAW", "Record and export OOK pulses to a .sub file.", {}, false, false, false,
+    actions.push_back({"Record RAW", "Record and export OOK pulses to a .sub file.", {}, false, false, false, false,
                        RfTool::Record});
-    actions.push_back({"Spectrogram", "View recent RSSI sweeps over time.", {}, false, false, false,
+    actions.push_back({"Spectrogram", "View recent RSSI sweeps over time.", {}, false, false, false, false,
                        RfTool::Spectrogram});
 
     if (cc1101_present) {
@@ -359,27 +360,29 @@ std::vector<ToolAction> build_wifi_static_actions() {
         // --- recon ---
         // needs_root rows are escalated by model::launch_argv (sudo -n <self>
         // --root-sh <script>); no in-script `id -u` guard needed.
+        // wifi_view rows open the structured WifiScanScreen; the argv is the
+        // scan command it runs. auto_run makes the recon rows scan on entry.
         {"Scan nearby networks", "iw dev wlan0 scan (needs root)",
          {"sh", "-c", "ip link set wlan0 up 2>/dev/null; iw dev wlan0 scan"},
-         true},
+         true, false, false, true, RfTool::None, WifiView::ScanList},
         {"List SSIDs + signal", "iw scan | ssid/signal/freq",
-         {"sh", "-c",
-          "iw dev wlan0 scan 2>/dev/null | grep -E 'SSID:|signal:|freq:' || "
-          "echo 'scan failed (is wlan0 up?)'"},
-         true},
+         {"sh", "-c", "ip link set wlan0 up 2>/dev/null; iw dev wlan0 scan"},
+         true, false, false, true, RfTool::None, WifiView::SsidList},
         {"Channel usage (APs/chan)", "scan grouped by channel",
          {"sh", "-c",
           "iw dev wlan0 scan 2>/dev/null | awk '/freq:/{print $2}' | sort -n | uniq -c | "
           "awk '{printf \"  %s MHz: %s APs\\n\", $2, $1}' || echo 'scan failed'"},
-         true},
-        {"Show Wi-Fi status", "ip addr show wlan0", {"ip", "addr", "show", "wlan0"}},
+         true, false, false, true},
+        {"Show Wi-Fi status", "ip addr show wlan0", {"ip", "addr", "show", "wlan0"},
+         false, false, false, true},
         {"Scan LAN hosts (arp-scan)", "arp-scan --localnet",
          {"sh", "-c", "arp-scan --localnet 2>&1 || echo 'needs arp-scan (apt install arp-scan)'"},
-         true},
+         true, false, false, true},
         {"Scan LAN hosts (nmap)", "nmap -sn <subnet>",
          {"sh", "-c",
           "nmap -sn \"$(ip -o -f inet addr show wlan0 | awk '{print $4}')\" 2>&1 || "
-          "echo 'needs nmap; is wlan0 connected?'"}},
+          "echo 'needs nmap; is wlan0 connected?'"},
+         false, false, false, true},
 
         // --- monitor mode (prerequisite for the attacks below) ---
         // airmon-ng frequently produces no wlan0mon on this Wi-Fi chip, so fall
@@ -1100,6 +1103,23 @@ std::vector<std::string> launch_argv(const ToolAction& action) {
     return escalated_argv(action, {"-n"}); // never prompt: the sudoers.d rule makes it passwordless
 }
 
+std::string action_command_text(const ToolAction& action) {
+    if (action.argv.empty()) {
+        return "";
+    }
+    // `sh -c "<script>"` rows: the script in argv[2] is the real command.
+    if (action.argv[0] == "sh" && action.argv.size() >= 3 &&
+        (action.argv[1] == "-c" || action.argv[1] == "-ec")) {
+        return action.argv[2];
+    }
+    std::string out = action.argv[0];
+    for (size_t i = 1; i < action.argv.size(); ++i) {
+        out += ' ';
+        out += action.argv[i];
+    }
+    return out;
+}
+
 bool action_needs_root(const ToolAction& action) {
     return !action.argv.empty() && geteuid() != 0 &&
            (action.argv[0] == self_exe_path() || action.needs_root);
@@ -1115,6 +1135,12 @@ bool sudo_passwordless() {
         return false;
     }
     if (pid == 0) {
+        // Same session context as ProcessRunner, which setsid()s every child:
+        // sudo caches credentials per tty, so a probe that kept the launching
+        // terminal's tty could pass on that terminal's cached ticket while the
+        // real tty-less `sudo -n` launch then failed with "a password is
+        // required" - and the password dialog was never offered.
+        ::setsid();
         const int devnull = ::open("/dev/null", O_WRONLY);
         if (devnull >= 0) {
             ::dup2(devnull, STDOUT_FILENO);
@@ -1130,6 +1156,44 @@ bool sudo_passwordless() {
     }
     int status = 0;
     return ::waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+namespace {
+std::string g_sudo_password;
+std::chrono::steady_clock::time_point g_sudo_password_used;
+
+void wipe(std::string& s) {
+    std::fill(s.begin(), s.end(), '\0'); // do not leave the bytes in freed memory
+    s.clear();
+}
+} // namespace
+
+std::string sudo_cached_password() {
+    if (g_sudo_password.empty()) {
+        return {};
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_sudo_password_used > std::chrono::seconds(kSudoCacheIdleSeconds)) {
+        wipe(g_sudo_password);
+        return {};
+    }
+    g_sudo_password_used = now;
+    return g_sudo_password;
+}
+
+void sudo_remember_password(const std::string& password) {
+    wipe(g_sudo_password);
+    g_sudo_password = password;
+    g_sudo_password_used = std::chrono::steady_clock::now();
+}
+
+void sudo_forget_password() {
+    wipe(g_sudo_password);
+}
+
+bool sudo_output_rejected_password(const std::string& output) {
+    return output.find("incorrect password") != std::string::npos ||
+           output.find("Sorry, try again") != std::string::npos;
 }
 
 std::vector<std::string> sudo_argv_with_password(const ToolAction& action) {

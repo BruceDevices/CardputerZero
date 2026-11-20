@@ -105,6 +105,13 @@ void BaseViewModel::show_rf(int category_index, int item_index) {
     publish_all();
 }
 
+void BaseViewModel::show_wifi_scan(int category_index, int item_index) {
+    model_.set_current_page(model::AppPage::WifiScan);
+    model_.set_active_category(category_index);
+    model_.set_active_item(item_index);
+    publish_all();
+}
+
 void BaseViewModel::show_about() {
     model_.set_current_page(model::AppPage::About);
     publish_all();
@@ -116,6 +123,7 @@ void BaseViewModel::go_back() {
         case model::AppPage::Clock:
         case model::AppPage::Terminal:
         case model::AppPage::Rf:
+        case model::AppPage::WifiScan:
             show_menu(model_.active_category());
             break;
         case model::AppPage::About:

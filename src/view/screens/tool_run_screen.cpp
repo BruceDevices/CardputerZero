@@ -61,8 +61,16 @@ void ToolRunScreen::build_content(lv_obj_t* content) {
     lv_obj_set_width(log_label_, LV_PCT(100));
     lv_label_set_long_mode(log_label_, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_style_text_font(log_label_, &lv_font_montserrat_12, 0);
-    lv_label_set_text(log_label_, action.description);
-    lv_label_ins_text(log_label_, LV_LABEL_POS_LAST, "\n\n");
+    if (action.auto_run) {
+        // Autonomous rows run on entry: show what is executing until output
+        // starts arriving, instead of the idle description + a Run press.
+        const std::string banner =
+            "Running command: \"" + model::action_command_text(action) + "\", wait...\n\n";
+        lv_label_set_text(log_label_, banner.c_str());
+    } else {
+        lv_label_set_text(log_label_, action.description);
+        lv_label_ins_text(log_label_, LV_LABEL_POS_LAST, "\n\n");
+    }
 
     // 4=Back  5=Log up  6=Run/Stop  7=Log down  8=Clear
     nav_bar().set_icon(1, view::NAV_UP, scroll_up_cb, this);
@@ -70,6 +78,11 @@ void ToolRunScreen::build_content(lv_obj_t* content) {
     nav_bar().set_icon(3, view::NAV_DOWN, scroll_down_cb, this);
     configure_common_nav(view::NAV_BACK, back_cb, this);
     nav_bar().set_icon(4, view::NAV_CLEAR, clear_cb, this); // common nav sets Theme; Clear wins here
+
+    // Autonomous rows start immediately (sudo prompt still appears if needed).
+    if (action.auto_run && !runner_.running()) {
+        toggle_run();
+    }
 }
 
 void ToolRunScreen::toggle_run() {
@@ -86,6 +99,13 @@ void ToolRunScreen::toggle_run() {
     // ask for the sudo password on-device instead of failing with
     // "sudo: a password is required" in the log.
     if (model::action_needs_root(action) && !model::sudo_passwordless()) {
+        // Reuse the session's sudo password before asking again.
+        const std::string cached = model::sudo_cached_password();
+        if (!cached.empty()) {
+            start_tool(model::sudo_argv_with_password(action), cached + "\n");
+            used_password_ = true;
+            return;
+        }
         show_sudo_dialog();
         return;
     }
@@ -94,6 +114,8 @@ void ToolRunScreen::toggle_run() {
 
 void ToolRunScreen::start_tool(std::vector<std::string> argv, const std::string& stdin_payload) {
     follow_tail_ = true;
+    used_password_ = false; // callers that fed a password set it after this
+    run_output_.clear();
     if (!runner_.start(std::move(argv), &ToolRunScreen::on_process_update, this, stdin_payload)) {
         append_log("\n[failed to launch]\n");
     }
@@ -202,7 +224,9 @@ void ToolRunScreen::submit_sudo_dialog() {
     // The password travels through the child's stdin pipe (ProcessRunner),
     // never in argv and never into the log. sudo -S makes one attempt, so a
     // wrong password shows "1 incorrect password attempt" in the log.
+    model::sudo_remember_password(password);
     start_tool(model::sudo_argv_with_password(action), password + "\n");
+    used_password_ = true;
 }
 
 void ToolRunScreen::clear_log() {
@@ -266,7 +290,16 @@ void ToolRunScreen::on_process_update(void* owner, const std::string& text, bool
     }
 
     self->append_log(text);
+    if (self->used_password_ && self->run_output_.size() < 8192) {
+        self->run_output_ += text; // sudo's verdict comes first; no need for more
+    }
     if (exited) {
+        if (self->used_password_ && model::sudo_output_rejected_password(self->run_output_)) {
+            model::sudo_forget_password();
+            self->append_log("\n[sudo password rejected - it will be asked again]\n");
+        }
+        self->used_password_ = false;
+        self->run_output_.clear();
         self->append_log("\n[exited]\n");
         self->update_run_label();
     }

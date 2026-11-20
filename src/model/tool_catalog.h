@@ -14,6 +14,13 @@ namespace model {
 
 enum class RfTool { None, Scan, ProtocolMonitor, Record, Spectrum, Spectrogram };
 
+// Which structured Wi-Fi scan UI a row opens instead of the raw tool-run log.
+// ScanList  -> "Scan nearby networks": a signal-sorted, selectable network list
+//              on the left with the selected network's details on the right.
+// SsidList  -> "List SSIDs + signal": a selectable "SSID (RSSI)" list; picking
+//              one runs a targeted deeper scan and shows it on a detail screen.
+enum class WifiView { None, ScanList, SsidList };
+
 // A selectable UI accent color. Pure data (no LVGL) so it is the single source
 // of truth shared by the "Theme" menu (model) and the palette (view): `primary`
 // is the main accent, `info` a lighter companion used for secondary styling.
@@ -48,7 +55,14 @@ struct ToolAction {
     // (leading "sudo "), not per row. `argv` is a harmless fallback print used
     // only if the screen is ever dropped.
     bool terminal_view = false;
+    // Run the command automatically on screen entry instead of waiting for the
+    // operator to press Run. Used for the read-only Wi-Fi recon rows so they
+    // behave autonomously; left false for attacks and mode toggles.
+    bool auto_run = false;
     RfTool rf_tool = RfTool::None;
+    // Non-None opens the dedicated WifiScanScreen (structured list/detail view)
+    // instead of the raw tool-run log. `argv` is still the scan command it runs.
+    WifiView wifi_view = WifiView::None;
 };
 
 // A menu category shown on the root menu (e.g. "Wi-Fi", "Responder").
@@ -95,6 +109,11 @@ void on_navigation_action(int category_index, int item_index);
 // unchanged.
 std::vector<std::string> launch_argv(const ToolAction& action);
 
+// A human-readable one-line form of the command a row runs, for the
+// "Running command: "<...>", wait..." status line. For `sh -c "<script>"` rows
+// it returns the script; otherwise the argv joined by spaces.
+std::string action_command_text(const ToolAction& action);
+
 // True when launching `action` needs root at all (i.e. launch_argv would wrap
 // it with sudo for a non-root app). Screens use it to pick between the
 // passwordless fast path and the on-device sudo password prompt.
@@ -112,6 +131,21 @@ bool sudo_passwordless();
 // timestamp cached, so the next sudo_passwordless() probe passes and later
 // launches take the `sudo -n` path without asking again.
 std::vector<std::string> sudo_argv_with_password(const ToolAction& action);
+
+// App-wide sudo password cache. Needed because sudo's own credential cache
+// does not carry over between our tty-less launches (every child is setsid()ed,
+// and sudo keys tickets per tty/session), so without this every root command
+// asked again. Entered once, reused by every screen; it expires after
+// kSudoCacheIdleSeconds without use (sudo's default timeout) and is wiped
+// as soon as sudo rejects it. Memory only, never written anywhere.
+constexpr int kSudoCacheIdleSeconds = 15 * 60;
+// The cached password, or "" when none/expired. A hit counts as a use and
+// restarts the idle timer.
+std::string sudo_cached_password();
+void sudo_remember_password(const std::string& password);
+void sudo_forget_password();
+// sudo -S output that means the password was wrong.
+bool sudo_output_rejected_password(const std::string& output);
 
 // --- Terminal ("Terminal" category) ------------------------------------------------
 
