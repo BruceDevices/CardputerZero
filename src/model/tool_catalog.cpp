@@ -1052,7 +1052,7 @@ namespace {
 // command is either a native re-exec of this binary (already authorized by the
 // sudoers rule) or, for other root-needing rows, this binary's `--root-sh`
 // passthrough. `flags` selects the authentication mode: `{"-n"}` for the
-// passwordless rule, `{"-k", "-S", "-p", ""}` for the password prompt path.
+// passwordless rule, `{"-S", "-p", ""}` for the password prompt path.
 std::vector<std::string> escalated_argv(const ToolAction& action,
                                         const std::vector<const char*>& flags) {
     std::vector<std::string> out;
@@ -1138,7 +1138,7 @@ std::vector<std::string> sudo_argv_with_password(const ToolAction& action) {
         !(action.argv[0] == self_exe_path() || action.needs_root)) {
         return action.argv;
     }
-    return escalated_argv(action, {"-k", "-S", "-p", ""});
+    return escalated_argv(action, {"-S", "-p", ""});
 }
 
 TerminalAuth terminal_auth_mode() {
@@ -1159,12 +1159,11 @@ std::vector<std::string> terminal_command_argv(const std::string& command, bool 
     // every root catalog row (see escalated_argv): the rule authorizes exactly
     // this binary, with any argv, so a user-typed command adds no new access.
     std::vector<std::string> out;
-    out.reserve(7);
+    out.reserve(6);
     out.emplace_back("sudo");
     if (terminal_auth_mode() == TerminalAuth::Passwordless) {
         out.emplace_back("-n");
     } else {
-        out.emplace_back("-k");
         out.emplace_back("-S");
         out.emplace_back("-p");
         out.emplace_back("");

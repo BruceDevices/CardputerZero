@@ -149,7 +149,11 @@ void TerminalScreen::start_command(const std::string& command, bool as_root) {
     auto argv = model::terminal_command_argv(command, as_root);
     run_output_.clear();
     std::string stdin_payload;
-    if (as_root && model::terminal_auth_mode() == model::TerminalAuth::Password) {
+    // Decide from the argv just built, not a second probe: with sudo's
+    // timestamp cached (no -k) the mode can flip between two probes, and the
+    // password must only ever reach a `sudo -S`.
+    const bool needs_password = argv.size() > 1 && argv[0] == "sudo" && argv[1] == "-S";
+    if (needs_password) {
         if (cached_password_.empty()) {
             // Ask on-device first; run_command already echoed the prompt line.
             pending_command_ = command;

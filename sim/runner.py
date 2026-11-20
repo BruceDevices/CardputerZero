@@ -77,7 +77,7 @@ class ProcessRunner:
     #   user command            -> sh -c <cmd>
     #   root, already root      -> sh -c <cmd>
     #   root, passwordless rule -> sudo -n <self> --root-sh <cmd>
-    #   root, otherwise         -> sudo -k -S -p '' <self> --root-sh <cmd>
+    #   root, otherwise         -> sudo -S -p '' <self> --root-sh <cmd>
     #                             with the password fed on stdin on demand.
     def start_command(self, cmd, root=False):
         if self.running():
@@ -133,7 +133,7 @@ class ProcessRunner:
                         self._emit("sudo: no password entered — aborted")
                         self._finish()
                         return
-                    argv = ["sudo", "-k", "-S", "-p", "", *self._self_argv(cmd)]
+                    argv = ["sudo", "-S", "-p", "", *self._self_argv(cmd)]
                     stdin_line = self._pw + "\n"
             else:
                 argv = ["sh", "-c", cmd]

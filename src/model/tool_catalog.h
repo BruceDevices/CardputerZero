@@ -105,11 +105,12 @@ bool action_needs_root(const ToolAction& action);
 // launch is cheap and the rule can appear at any time.
 bool sudo_passwordless();
 
-// Like launch_argv, but for the password-prompt path: `sudo -k -S -p ''` with
+// Like launch_argv, but for the password-prompt path: `sudo -S -p ''` with
 // the same command tail. `-S` reads the password from stdin (ProcessRunner
-// feeds it through a pipe; it never travels in argv or the log), `-k` forces a
-// fresh authentication so the password line is always consumed predictably,
-// `-p ''` keeps sudo's prompt out of the tool log.
+// feeds it through a pipe; it never travels in argv or the log), `-p ''` keeps
+// sudo's prompt out of the tool log. No `-k`: a successful run leaves sudo's
+// timestamp cached, so the next sudo_passwordless() probe passes and later
+// launches take the `sudo -n` path without asking again.
 std::vector<std::string> sudo_argv_with_password(const ToolAction& action);
 
 // --- Terminal ("Terminal" category) ------------------------------------------------
@@ -117,7 +118,7 @@ std::vector<std::string> sudo_argv_with_password(const ToolAction& action);
 // How a root terminal command must be launched right now. NotNeeded: the app
 // itself is root (euid == 0), so commands run directly. Passwordless: the
 // /etc/sudoers.d rule covers this binary, `sudo -n <self> --root-sh` works.
-// Password: no rule - the command needs `sudo -k -S` plus the user's password
+// Password: no rule - the command needs `sudo -S` plus the user's password
 // on stdin (TerminalScreen caches it for the session, ToolRunScreen asks once
 // per run - same split as the catalog rows).
 enum class TerminalAuth { NotNeeded, Passwordless, Password };
