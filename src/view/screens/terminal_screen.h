@@ -38,8 +38,10 @@ private:
 
     // Typing mode: full keyboard reaches the input line (letters/digits arrive
     // via the indev group), nav keys yield; ESC re-enters nav mode via slot 0.
+    void set_input_visible(bool visible);
     void enter_typing_mode();
     void leave_typing_mode();
+    static void attach_typing_group_async(void* user_data);
 
     // Command history (Up = older, Down = newer while typing).
     void push_history(const std::string& command);
@@ -65,7 +67,8 @@ private:
 
     int category_index_{-1};
     int item_index_{-1};
-    lv_obj_t* log_ta_{nullptr};
+    lv_obj_t* log_ta_{nullptr};    // scrollable log container
+    lv_obj_t* log_label_{nullptr}; // log text inside log_ta_
     lv_obj_t* input_ta_{nullptr};
     bool follow_tail_{true}; // auto-scroll to newest output until the user scrolls up
     platform::ProcessRunner runner_;
@@ -74,7 +77,6 @@ private:
     size_t history_index_{0}; // one-past-last = drafting a new line
     std::string history_draft_;
 
-    std::string cached_password_; // sudo password for this screen's lifetime
     std::string pending_command_; // root command waiting for the password dialog
     bool pending_root_{false};
     bool last_run_used_sudo_password_{false}; // to sniff a wrong-password failure

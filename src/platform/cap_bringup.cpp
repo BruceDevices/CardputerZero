@@ -18,6 +18,7 @@
 #include <linux/i2c-dev.h>
 #include <linux/i2c.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -141,6 +142,28 @@ bool set_line_impl(int handle_fd, bool high) {
     return ioctl(handle_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &data) >= 0;
 }
 
+bool read_line_impl(const char* chip_path, unsigned line, bool& value) {
+    const int fd = open(chip_path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return false;
+    gpiohandle_request req{};
+    req.lineoffsets[0] = line;
+    req.lines = 1;
+    req.flags = GPIOHANDLE_REQUEST_INPUT;
+    std::strncpy(req.consumer_label, "bruce-cap", sizeof(req.consumer_label) - 1);
+    if (ioctl(fd, GPIO_GET_LINEHANDLE_IOCTL, &req) < 0) {
+        close(fd);
+        return false;
+    }
+    close(fd);
+    gpiohandle_data data{};
+    const bool ok = ioctl(req.fd, GPIOHANDLE_GET_LINE_VALUES_IOCTL, &data) >= 0;
+    close(req.fd); // release the input line
+    if (ok) {
+        value = data.values[0] != 0;
+    }
+    return ok;
+}
+
 bool ioe_present(int fd, uint8_t addr, uint16_t& uid) {
     if (ioctl(fd, I2C_SLAVE, addr) < 0) return false;
     ioe_wake(fd);
@@ -156,11 +179,11 @@ CapBringupReport cap_bringup() {
     CapBringupReport r;
 
 #if defined(__linux__)
-    if (geteuid() != 0) {
-        r.text += "cap power: running as non-root - the CAP tools need root for "
-                  "GPIO/I2C/SPI.\n";
-        r.text += "  fix: stop the app and start it with: sudo bruce_cardputerzero\n";
-    }
+    // No root check here: on a properly provisioned CardputerZero the user is in
+    // the gpio/spi/i2c groups and the ext_5v_out LED is group-writable, so the
+    // CAP tools run fine unprivileged. A real permission problem surfaces as an
+    // EACCES hint at the specific step that failed (below).
+
     // Primary 5V rail enable (device-tree gpio-led). Done before the I2C path
     // so the rail is already coming up while we poke the expander.
     r.rail_led = enable_ext_5v_led();
@@ -193,8 +216,11 @@ CapBringupReport cap_bringup() {
             }
         }
         if (used_addr == 0) {
-            r.text += "cap power: no M5IOE1 expander on " + i2c_dev +
-                      " (0x4F/0x6F) - is this a CardputerZero?\n";
+            // On the shipped image the m5ioe1 kernel driver owns 0x4F, so the raw
+            // I2C_SLAVE claim returns EBUSY - not an error: the rail is already
+            // enabled via the ext_5v_out gpio-led above (and PYG13 by that driver).
+            r.text += "cap power: M5IOE1 at 0x4F is kernel-driver-bound (expected) "
+                      "- rail handled by the ext_5v_out LED path\n";
         } else {
             // PYG13 high = HAT-port 5V load switch; PYG1 low = HAT_P0/P1 to GPIO.
             r.hat_5v = ioe_pin_set(fd, 13, true) && ioe_pin_set(fd, 1, false);
@@ -206,25 +232,14 @@ CapBringupReport cap_bringup() {
         close(fd);
     }
 
-    // Cap POWER_EN sits on HAT_P0 = BCM 26 (claimed from the gpiochip so it
-    // stays driven for the life of the process).
-    const std::string chip = env_or("CAP_POWER_CHIP", "/dev/gpiochip0");
-    const unsigned pwr_line =
-        static_cast<unsigned>(std::atoi(env_or("CAP_POWER_GPIO", "26").c_str()));
-    r.cap_en = gpio_line_write(chip.c_str(), pwr_line, true);
-    if (r.cap_en) {
-        r.text += "cap power: POWER_EN (GPIO" + std::to_string(pwr_line) + ") high\n";
-    } else {
-        r.text += "cap power: cannot drive POWER_EN on " + chip + " (" +
-                  std::strerror(errno) + ")\n";
-        if (errno == EACCES || errno == EPERM) {
-            r.text += "  hint: permission denied - restart the app with sudo.\n";
-        }
-    }
+    // NOTE: G26/GPIO26 is NOT a system power-enable. Per the C154 schematic the
+    // HAT 5V rail is gated solely by M5IOE1 PYG13_HAT_EN (above); G26 is a plain
+    // GPIO routed to the HAT that the known CAPs use as a per-module RST line.
+    // Reset is therefore handled per module in the probes (each probe releases
+    // its own `rst` GPIO), not as a blanket drive here. See bruce_module.h.
+    r.cap_en = false;
 
-    // Let the DC-DC and the CC1101 crystal come up before anyone reads SPI. The
-    // working stack waits ~100ms after 5V and ~150ms after POWER_EN; one settle
-    // here covers both since the rail was switched on just above.
+    // Let the DC-DC and the chip crystals come up before anyone reads SPI.
     // ponytail: fixed 250ms settle; make it env-tunable only if a cap needs longer.
     usleep(250 * 1000);
 #else
@@ -257,6 +272,55 @@ bool gpio_line_set(int handle_fd, bool high) {
     return set_line_impl(handle_fd, high);
 #else
     (void)handle_fd; (void)high;
+    return false;
+#endif
+}
+
+bool gpio_read_line(const char* chip_path, unsigned line, bool& value) {
+#if defined(__linux__)
+    return read_line_impl(chip_path, line, value);
+#else
+    (void)chip_path; (void)line; (void)value;
+    return false;
+#endif
+}
+
+bool gpio_set_function(unsigned line, unsigned fsel) {
+#if defined(__linux__)
+    // BCM GPFSEL: 10 pins per 32-bit register, 3 bits per pin. /dev/gpiomem maps
+    // the GPIO block at offset 0 (GPFSEL0), readable/writable by the gpio group.
+    const int fd = open("/dev/gpiomem", O_RDWR | O_SYNC);
+    if (fd < 0) {
+        return false;
+    }
+    const size_t len = 4096;
+    void* map = mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) {
+        return false;
+    }
+    volatile uint32_t* gpio = static_cast<volatile uint32_t*>(map);
+    const unsigned reg = line / 10;
+    const unsigned shift = (line % 10) * 3;
+    uint32_t v = gpio[reg];
+    v = (v & ~(0x7u << shift)) | ((fsel & 0x7u) << shift);
+    gpio[reg] = v;
+    munmap(map, len);
+    return true;
+#else
+    (void)line; (void)fsel;
+    return false;
+#endif
+}
+
+bool gpio_restore_serial_mux() {
+#if defined(__linux__)
+    // G14/G15 = mini-UART TXD1/RXD1 = ALT5 (FSEL 0b010) on the CardputerZero.
+    constexpr unsigned kAlt5 = 0x2;
+    const bool a = gpio_set_function(14, kAlt5);
+    const bool b = gpio_set_function(15, kAlt5);
+    return a && b;
+#else
     return false;
 #endif
 }

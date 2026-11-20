@@ -7,6 +7,7 @@
 #include "tool_catalog.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -112,6 +113,111 @@ std::vector<ToolAction> scan_scripts() {
              "echo 'Add a script with a shebang, chmod +x, then restart Bruce.'"}});
     }
 
+    return actions;
+}
+
+} // namespace
+
+std::string rf_recordings_dir() {
+    if (const char* env = std::getenv("BRUCE_RF_DIR"); env && env[0] != '\0') {
+        return env;
+    }
+    if (const char* home = std::getenv("HOME"); home && home[0] != '\0') {
+        return std::string(home) + "/BruceRF";
+    }
+    return "/tmp/BruceRF";
+}
+
+namespace {
+
+std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int gdo0_gpio) {
+    static std::deque<std::string> pool;
+    pool.clear();
+    auto own = [](std::string value) -> const char* {
+        pool.push_back(std::move(value));
+        return pool.back().c_str();
+    };
+
+    std::vector<ToolAction> actions;
+    ToolAction detect_action{
+        "Detect / refresh CC1101 CAP",
+        "Power and probe the CAP, then return to this menu to refresh RF actions.",
+        {self_exe_path(), "--cc1101-detect"}};
+    if (!cc1101_present) {
+        actions.push_back(std::move(detect_action));
+    }
+
+    actions.push_back({"Scan / Capture", "Identify received OOK protocols.", {}, false, false, false, false,
+                       RfTool::ProtocolMonitor});
+    actions.push_back({"Signal Spectrum", "Inspect received OOK pulses.", {}, false, false, false, false, RfTool::Scan});
+    actions.push_back({"RSSI Spectrum", "Sweep received power by frequency.", {}, false, false, false, false,
+                       RfTool::Spectrum});
+    actions.push_back({"Record RAW", "Record and export OOK pulses to a .sub file.", {}, false, false, false, false,
+                       RfTool::Record});
+    actions.push_back({"Spectrogram", "View recent RSSI sweeps over time.", {}, false, false, false, false,
+                       RfTool::Spectrogram});
+
+    if (cc1101_present) {
+        actions.push_back(std::move(detect_action));
+        actions.push_back(ToolAction{
+            "Radio status / RSSI (433.92)",
+            own("Native CC1101 RX status using detected pins: CS=G" + std::to_string(cs_gpio) +
+                " GDO0=G" + std::to_string(gdo0_gpio)),
+            {self_exe_path(), "--rf-info", "433.92"}});
+
+        const std::string dir = rf_recordings_dir();
+        actions.push_back(ToolAction{
+            "OOK test signal",
+            "Send the fixed Princeton bench-test pattern at 433.92 MHz.",
+            {self_exe_path(), "--rf-send", "A5C39A", "433.92", "350", "10"}});
+
+        std::vector<std::string> files;
+        if (DIR* directory = opendir(dir.c_str())) {
+            while (dirent* entry = readdir(directory)) {
+                const std::string name = entry->d_name;
+                if (name.size() < 5 || name.substr(name.size() - 4) != ".sub") continue;
+                const std::string path = dir + "/" + name;
+                struct stat st{};
+                if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) files.push_back(path);
+            }
+            closedir(directory);
+        }
+        std::sort(files.begin(), files.end());
+        for (const auto& path : files) {
+            const size_t slash = path.find_last_of('/');
+            const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+            actions.push_back(ToolAction{
+                own("Replay " + name),
+                own("Transmit the RAW durations and frequency stored in " + path + "."),
+                {self_exe_path(), "--rf-replay", path}});
+        }
+        if (files.empty()) {
+            actions.push_back(ToolAction{
+                "No saved RAW files yet",
+                own("Use Record + save; .sub files from " + dir + " will appear here."),
+                {"sh", "-c", "echo 'No saved .sub files yet. Use Record RAW and select Save.'"}});
+        }
+    }
+
+    actions.push_back(ToolAction{
+        "Capture 433MHz (30s, RTL-SDR dongle)", "timeout 30 rtl_433",
+        {"sh", "-c",
+         "command -v rtl_433 >/dev/null 2>&1 || "
+         "{ echo 'rtl_433 is not installed (and it needs an RTL-SDR USB dongle).'; "
+         "echo 'Run: sudo apt install rtl-433'; exit 127; }; timeout 30 rtl_433 2>&1"}});
+    actions.push_back(ToolAction{
+        "List SDR devices (RTL-SDR dongle)", "rtl_test -t",
+        {"sh", "-c",
+         "command -v rtl_test >/dev/null 2>&1 || "
+         "{ echo 'rtl_test is not installed (and it needs an RTL-SDR USB dongle).'; "
+         "echo 'Run: sudo apt install rtl-sdr'; exit 127; }; rtl_test -t 2>&1"}});
+    actions.push_back(ToolAction{
+        "FM radio RX 100.0MHz (RTL-SDR)", "rtl_fm | aplay",
+        {"sh", "-c",
+         "command -v rtl_fm >/dev/null 2>&1 || "
+         "{ echo 'rtl_fm is not installed. Run: sudo apt install rtl-sdr'; exit 127; }; "
+         "rtl_fm -f 100M -M wbfm -s 200k -r 48k 2>/dev/null | aplay -r 48k -f S16_LE 2>&1 || "
+         "echo 'playback failed - needs an RTL-SDR dongle + alsa-utils (aplay)'"}});
     return actions;
 }
 
@@ -254,27 +360,29 @@ std::vector<ToolAction> build_wifi_static_actions() {
         // --- recon ---
         // needs_root rows are escalated by model::launch_argv (sudo -n <self>
         // --root-sh <script>); no in-script `id -u` guard needed.
+        // wifi_view rows open the structured WifiScanScreen; the argv is the
+        // scan command it runs. auto_run makes the recon rows scan on entry.
         {"Scan nearby networks", "iw dev wlan0 scan (needs root)",
          {"sh", "-c", "ip link set wlan0 up 2>/dev/null; iw dev wlan0 scan"},
-         true},
+         true, false, false, true, RfTool::None, WifiView::ScanList},
         {"List SSIDs + signal", "iw scan | ssid/signal/freq",
-         {"sh", "-c",
-          "iw dev wlan0 scan 2>/dev/null | grep -E 'SSID:|signal:|freq:' || "
-          "echo 'scan failed (is wlan0 up?)'"},
-         true},
+         {"sh", "-c", "ip link set wlan0 up 2>/dev/null; iw dev wlan0 scan"},
+         true, false, false, true, RfTool::None, WifiView::SsidList},
         {"Channel usage (APs/chan)", "scan grouped by channel",
          {"sh", "-c",
           "iw dev wlan0 scan 2>/dev/null | awk '/freq:/{print $2}' | sort -n | uniq -c | "
           "awk '{printf \"  %s MHz: %s APs\\n\", $2, $1}' || echo 'scan failed'"},
-         true},
-        {"Show Wi-Fi status", "ip addr show wlan0", {"ip", "addr", "show", "wlan0"}},
+         true, false, false, true},
+        {"Show Wi-Fi status", "ip addr show wlan0", {"ip", "addr", "show", "wlan0"},
+         false, false, false, true},
         {"Scan LAN hosts (arp-scan)", "arp-scan --localnet",
          {"sh", "-c", "arp-scan --localnet 2>&1 || echo 'needs arp-scan (apt install arp-scan)'"},
-         true},
+         true, false, false, true},
         {"Scan LAN hosts (nmap)", "nmap -sn <subnet>",
          {"sh", "-c",
           "nmap -sn \"$(ip -o -f inet addr show wlan0 | awk '{print $4}')\" 2>&1 || "
-          "echo 'needs nmap; is wlan0 connected?'"}},
+          "echo 'needs nmap; is wlan0 connected?'"},
+         false, false, false, true},
 
         // --- monitor mode (prerequisite for the attacks below) ---
         // airmon-ng frequently produces no wlan0mon on this Wi-Fi chip, so fall
@@ -585,28 +693,7 @@ std::vector<ToolCategory>& mutable_catalog() {
             "M5 CAP CC1101 over SPI, or an SDR dongle (e.g. RTL-SDR)",
             icon::kRf,
             false,
-            {
-                {"Use CC1101 CAP (detect)",
-                 "Select the M5 CAP CC1101: powers the cap up, probes it over "
-                 "SPI (CS1/G7) and confirms the chip responds.",
-                 {self_exe_path(), "--cc1101-detect"}},
-                {"Capture 433MHz (30s, RTL-SDR dongle)", "timeout 30 rtl_433",
-                 {"sh", "-c",
-                  "command -v rtl_433 >/dev/null 2>&1 || "
-                  "{ echo 'rtl_433 is not installed (and it needs an RTL-SDR USB dongle).'; "
-                  "echo 'Run: sudo apt install rtl-433'; exit 127; }; timeout 30 rtl_433 2>&1"}},
-                {"List SDR devices (RTL-SDR dongle)", "rtl_test -t",
-                 {"sh", "-c",
-                  "command -v rtl_test >/dev/null 2>&1 || "
-                  "{ echo 'rtl_test is not installed (and it needs an RTL-SDR USB dongle).'; "
-                  "echo 'Run: sudo apt install rtl-sdr'; exit 127; }; rtl_test -t 2>&1"}},
-                {"FM radio RX 100.0MHz (RTL-SDR)", "rtl_fm | aplay",
-                 {"sh", "-c",
-                  "command -v rtl_fm >/dev/null 2>&1 || "
-                  "{ echo 'rtl_fm is not installed. Run: sudo apt install rtl-sdr'; exit 127; }; "
-                  "rtl_fm -f 100M -M wbfm -s 200k -r 48k 2>/dev/null | aplay -r 48k -f S16_LE 2>&1 || "
-                  "echo 'playback failed - needs an RTL-SDR dongle + alsa-utils (aplay)'"}},
-            },
+            build_rf_actions(false, -1, -1),
         },
         {
             "Network Tools",
@@ -889,13 +976,24 @@ const std::vector<ToolCategory>& tool_catalog() {
     return mutable_catalog();
 }
 
-void refresh_dynamic_categories() {
-    for (auto& category : mutable_catalog()) {
+void refresh_dynamic_categories(int category_index) {
+    auto& catalog = mutable_catalog();
+    for (size_t i = 0; i < catalog.size(); ++i) {
+        auto& category = catalog[i];
         const std::string label = category.label;
         if (label == "Nmap") {
             category.actions = build_nmap_actions();
         } else if (label == "Wi-Fi") {
             category.actions = build_wifi_actions();
+        }
+    }
+}
+
+void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio) {
+    for (auto& category : mutable_catalog()) {
+        if (std::string(category.label) == "Sub-GHz / RF") {
+            category.actions = build_rf_actions(cc1101_present, cs_gpio, gdo0_gpio);
+            return;
         }
     }
 }
@@ -957,7 +1055,7 @@ namespace {
 // command is either a native re-exec of this binary (already authorized by the
 // sudoers rule) or, for other root-needing rows, this binary's `--root-sh`
 // passthrough. `flags` selects the authentication mode: `{"-n"}` for the
-// passwordless rule, `{"-k", "-S", "-p", ""}` for the password prompt path.
+// passwordless rule, `{"-S", "-p", ""}` for the password prompt path.
 std::vector<std::string> escalated_argv(const ToolAction& action,
                                         const std::vector<const char*>& flags) {
     std::vector<std::string> out;
@@ -1005,6 +1103,23 @@ std::vector<std::string> launch_argv(const ToolAction& action) {
     return escalated_argv(action, {"-n"}); // never prompt: the sudoers.d rule makes it passwordless
 }
 
+std::string action_command_text(const ToolAction& action) {
+    if (action.argv.empty()) {
+        return "";
+    }
+    // `sh -c "<script>"` rows: the script in argv[2] is the real command.
+    if (action.argv[0] == "sh" && action.argv.size() >= 3 &&
+        (action.argv[1] == "-c" || action.argv[1] == "-ec")) {
+        return action.argv[2];
+    }
+    std::string out = action.argv[0];
+    for (size_t i = 1; i < action.argv.size(); ++i) {
+        out += ' ';
+        out += action.argv[i];
+    }
+    return out;
+}
+
 bool action_needs_root(const ToolAction& action) {
     return !action.argv.empty() && geteuid() != 0 &&
            (action.argv[0] == self_exe_path() || action.needs_root);
@@ -1014,22 +1129,71 @@ bool sudo_passwordless() {
     if (geteuid() == 0) {
         return true;
     }
+    const std::string self = self_exe_path(); // before fork: no allocation in the child
     const pid_t pid = ::fork();
     if (pid < 0) {
         return false;
     }
     if (pid == 0) {
+        // Same session context as ProcessRunner, which setsid()s every child:
+        // sudo caches credentials per tty, so a probe that kept the launching
+        // terminal's tty could pass on that terminal's cached ticket while the
+        // real tty-less `sudo -n` launch then failed with "a password is
+        // required" - and the password dialog was never offered.
+        ::setsid();
         const int devnull = ::open("/dev/null", O_WRONLY);
         if (devnull >= 0) {
             ::dup2(devnull, STDOUT_FILENO);
             ::dup2(devnull, STDERR_FILENO);
             ::close(devnull);
         }
-        ::execlp("sudo", "sudo", "-n", "true", static_cast<char*>(nullptr));
+        // Probe the exact command the sudoers rule authorizes (this binary),
+        // not `true`: the rule does not cover `true`, so `sudo -n true` only
+        // passed while a cached sudo timestamp happened to be valid.
+        ::execlp("sudo", "sudo", "-n", self.c_str(), "--root-sh", "true",
+                 static_cast<char*>(nullptr));
         _exit(127);
     }
     int status = 0;
     return ::waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+namespace {
+std::string g_sudo_password;
+std::chrono::steady_clock::time_point g_sudo_password_used;
+
+void wipe(std::string& s) {
+    std::fill(s.begin(), s.end(), '\0'); // do not leave the bytes in freed memory
+    s.clear();
+}
+} // namespace
+
+std::string sudo_cached_password() {
+    if (g_sudo_password.empty()) {
+        return {};
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_sudo_password_used > std::chrono::seconds(kSudoCacheIdleSeconds)) {
+        wipe(g_sudo_password);
+        return {};
+    }
+    g_sudo_password_used = now;
+    return g_sudo_password;
+}
+
+void sudo_remember_password(const std::string& password) {
+    wipe(g_sudo_password);
+    g_sudo_password = password;
+    g_sudo_password_used = std::chrono::steady_clock::now();
+}
+
+void sudo_forget_password() {
+    wipe(g_sudo_password);
+}
+
+bool sudo_output_rejected_password(const std::string& output) {
+    return output.find("incorrect password") != std::string::npos ||
+           output.find("Sorry, try again") != std::string::npos;
 }
 
 std::vector<std::string> sudo_argv_with_password(const ToolAction& action) {
@@ -1038,7 +1202,7 @@ std::vector<std::string> sudo_argv_with_password(const ToolAction& action) {
         !(action.argv[0] == self_exe_path() || action.needs_root)) {
         return action.argv;
     }
-    return escalated_argv(action, {"-k", "-S", "-p", ""});
+    return escalated_argv(action, {"-S", "-p", ""});
 }
 
 TerminalAuth terminal_auth_mode() {
@@ -1059,12 +1223,11 @@ std::vector<std::string> terminal_command_argv(const std::string& command, bool 
     // every root catalog row (see escalated_argv): the rule authorizes exactly
     // this binary, with any argv, so a user-typed command adds no new access.
     std::vector<std::string> out;
-    out.reserve(7);
+    out.reserve(6);
     out.emplace_back("sudo");
     if (terminal_auth_mode() == TerminalAuth::Passwordless) {
         out.emplace_back("-n");
     } else {
-        out.emplace_back("-k");
         out.emplace_back("-S");
         out.emplace_back("-p");
         out.emplace_back("");

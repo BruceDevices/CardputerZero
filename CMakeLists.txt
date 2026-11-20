@@ -396,16 +396,57 @@ file(GLOB_RECURSE PLATFORM_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/*.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/*.cpp"
 )
+# The Bruce RF encode/decode engine (copied verbatim under src/platform/rf/
+# protocols/) and its Arduino/ESP compat shims (src/platform/rf/compat/) build
+# into a SEPARATE library (bruce_..._rf_protocols) so the Arduino `String` /
+# min/max macros never leak into the rest of the app. The two glue TUs that
+# include those shims (rf_utils_compat.cpp, rf_bridge.cpp) also belong there.
+list(FILTER PLATFORM_SOURCES EXCLUDE REGEX "/src/platform/rf/(protocols|compat)/")
+list(FILTER PLATFORM_SOURCES EXCLUDE REGEX "/src/platform/rf/(rf_utils_compat|rf_bridge)\\.cpp$")
 
-add_library(${PROJECT_NAME}_platform 
+add_library(${PROJECT_NAME}_platform
     STATIC
     ${PLATFORM_SOURCES}
 )
+
+# --- RF protocol engine (verbatim Bruce sources + compat shims) --------------
+file(GLOB_RECURSE RF_PROTO_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf/protocols/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf/protocols/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf/compat/tiny_aes/*.c"
+)
+# rf_protocol_radio.cpp is the ESP32 radio-transmit glue (ELECHOUSE_cc1101); the
+# CM0 bridges TX through rf_bitbang instead, and nothing we build references
+# rf_protocol_transmit_raw, so it is left out of the compile.
+list(FILTER RF_PROTO_SOURCES EXCLUDE REGEX "/rf_protocol_radio\\.cpp$")
+add_library(${PROJECT_NAME}_rf_protocols
+    STATIC
+    ${RF_PROTO_SOURCES}
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf/rf_utils_compat.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf/rf_bridge.cpp"
+)
+target_include_directories(${PROJECT_NAME}_rf_protocols
+    PRIVATE
+        # compat shims resolve <Arduino.h>, <FS.h>, <driver/...>, <freertos/...>,
+        # <esp_heap_caps.h>, <mbedtls/aes.h>, <globals.h>, "core/..." and
+        # <ArduinoJson.h>. Kept PRIVATE so none of this leaks to consumers.
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf/compat"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf/compat/arduinojson_src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf/protocols"
+    PUBLIC
+        # Only the clean std-typed bridge header is exposed.
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf"
+)
+target_compile_definitions(${PROJECT_NAME}_rf_protocols PRIVATE LITE_VERSION=0)
 
 target_include_directories(${PROJECT_NAME}_platform
     PUBLIC
         ${LVGL_INCLUDE_DIR}
         "${CMAKE_CURRENT_SOURCE_DIR}/src/platform"
+        # Sub-GHz / RF unit (cc1101 radio + probes, RfRxCapture). Headers stay
+        # reachable as "cc1101.h" / "rf_capture.h" so no includes had to change.
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf"
 )
 
 target_compile_definitions(${PROJECT_NAME}_platform
@@ -423,6 +464,7 @@ target_link_libraries(${PROJECT_NAME}_platform
     PUBLIC
         lvgl
         Threads::Threads
+        ${PROJECT_NAME}_rf_protocols
 )
 
 # ====================================================
@@ -468,9 +510,40 @@ target_link_libraries(${PROJECT_NAME}_reactive
         lvgl
 )
 
+# ====================================================
+# HAL sources (BruceModule: registro dinâmico de módulos da CAP)
+# ====================================================
+file(GLOB_RECURSE HAL_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/hal/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/hal/*.cpp"
+)
+
+add_library(${PROJECT_NAME}_hal
+    STATIC
+    ${HAL_SOURCES}
+)
+
+target_include_directories(${PROJECT_NAME}_hal
+    PUBLIC
+        ${LVGL_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hal
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/reactive
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/logger
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform
+)
+
+# hal sits ABOVE platform: detect_cap() drives the raw SPI probe primitives.
+target_link_libraries(${PROJECT_NAME}_hal
+    PUBLIC
+        lvgl
+        ${PROJECT_NAME}_reactive
+        ${PROJECT_NAME}_platform
+        logger
+)
+
 file(GLOB_RECURSE UI_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/view/*.c"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/view/*.cpp"  
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/view/*.cpp"
 )
 
 add_library(${PROJECT_NAME}_view
@@ -488,6 +561,7 @@ target_include_directories(${PROJECT_NAME}_view
         ${CMAKE_CURRENT_SOURCE_DIR}/src/reactive
         ${CMAKE_CURRENT_SOURCE_DIR}/src/viewmodel
         ${CMAKE_CURRENT_SOURCE_DIR}/src/model
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/hal
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform
 )
 
@@ -497,6 +571,7 @@ target_link_libraries(${PROJECT_NAME}_view
         ${PROJECT_NAME}_reactive
         ${PROJECT_NAME}_model
         ${PROJECT_NAME}_platform
+        ${PROJECT_NAME}_hal
 )
 
 # ====================================================
@@ -595,6 +670,7 @@ target_link_libraries(${PROJECT_NAME}_core
         ${PROJECT_NAME}_view
         ${PROJECT_NAME}_viewmodel
         ${PROJECT_NAME}_platform
+        ${PROJECT_NAME}_hal
 )
 
 # ====================================================
@@ -611,6 +687,7 @@ target_link_libraries(${PROJECT_NAME}
         ${PROJECT_NAME}_model
         ${PROJECT_NAME}_view
         ${PROJECT_NAME}_viewmodel
+        ${PROJECT_NAME}_hal
 )
 
 # Package deb

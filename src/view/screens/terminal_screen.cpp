@@ -91,17 +91,23 @@ void TerminalScreen::build_content(lv_obj_t* content) {
     lv_label_set_text(header, action.label);
 
     const int32_t content_height = view::kScreenHeight - view::kTitleBarHeight - view::kNavBarHeight;
-    log_ta_ = lv_textarea_create(content);
+    // Plain label in a scrollable box: a textarea would snap back to its cursor
+    // (always at the end) on every size/style change and fight manual scrolling.
+    log_ta_ = lv_obj_create(content);
     lv_obj_set_size(log_ta_, LV_PCT(100), content_height - kHeaderHeight - kInputHeight);
     lv_obj_align(log_ta_, LV_ALIGN_TOP_MID, 0, kHeaderHeight);
-    lv_textarea_set_cursor_click_pos(log_ta_, false);
-    lv_obj_clear_flag(log_ta_, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_text_font(log_ta_, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_pad_all(log_ta_, 4, 0);
     lv_obj_add_flag(log_ta_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(log_ta_, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(log_ta_, LV_SCROLLBAR_MODE_AUTO);
-    lv_textarea_set_text(log_ta_,
-                         "Bruce terminal - type a command, Enter runs it\n"
-                         "'sudo cmd' runs as root; Up/Down history; ESC leaves input\n\n");
+
+    log_label_ = lv_label_create(log_ta_);
+    lv_obj_set_width(log_label_, LV_PCT(100));
+    lv_label_set_long_mode(log_label_, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_text_font(log_label_, &lv_font_montserrat_12, 0);
+    lv_label_set_text(log_label_,
+                      "Bruce terminal - type a command, Enter runs it\n"
+                      "'sudo cmd' runs as root; Up/Down history; ESC leaves input\n\n");
 
     input_ta_ = lv_textarea_create(content);
     lv_obj_set_size(input_ta_, LV_PCT(100), kInputHeight);
@@ -111,13 +117,15 @@ void TerminalScreen::build_content(lv_obj_t* content) {
     lv_obj_set_style_text_font(input_ta_, &lv_font_montserrat_12, 0);
     lv_obj_set_style_border_width(input_ta_, 1, 0);
     lv_obj_add_event_cb(input_ta_, input_ready_cb, LV_EVENT_READY, this);
+    set_input_visible(false);
 
+    // configure_common_nav claims slot 4 for the theme toggle, so it must run first.
+    configure_common_nav(view::NAV_BACK, back_cb, this);
     // 0=Back/leave-input  1=Log up  2=Run/Stop  3=Log down  4=Type
     nav_bar().set_icon(1, view::NAV_UP, scroll_up_cb, this);
     nav_bar().set_icon(2, view::NAV_RUN, run_stop_cb, this);
     nav_bar().set_icon(3, view::NAV_DOWN, scroll_down_cb, this);
     nav_bar().set_icon(4, "Type", type_cb, this);
-    configure_common_nav(view::NAV_BACK, back_cb, this);
 }
 
 void TerminalScreen::run_command() {
@@ -131,6 +139,7 @@ void TerminalScreen::run_command() {
     }
     push_history(command);
     lv_textarea_set_text(input_ta_, "");
+    follow_tail_ = true;
     const bool as_root = strip_sudo_prefix(command);
     append_log(prompt_prefix(as_root) + command + "\n");
     start_command(command, as_root);
@@ -140,15 +149,20 @@ void TerminalScreen::start_command(const std::string& command, bool as_root) {
     auto argv = model::terminal_command_argv(command, as_root);
     run_output_.clear();
     std::string stdin_payload;
-    if (as_root && model::terminal_auth_mode() == model::TerminalAuth::Password) {
-        if (cached_password_.empty()) {
+    // Decide from the argv just built, not a second probe: with sudo's
+    // timestamp cached (no -k) the mode can flip between two probes, and the
+    // password must only ever reach a `sudo -S`.
+    const bool needs_password = argv.size() > 1 && argv[0] == "sudo" && argv[1] == "-S";
+    if (needs_password) {
+        const std::string cached = model::sudo_cached_password(); // app-wide cache
+        if (cached.empty()) {
             // Ask on-device first; run_command already echoed the prompt line.
             pending_command_ = command;
             pending_root_    = true;
             show_sudo_dialog();
             return;
         }
-        stdin_payload                    = cached_password_ + "\n";
+        stdin_payload                    = cached + "\n";
         last_run_used_sudo_password_     = true;
     } else {
         last_run_used_sudo_password_ = false;
@@ -159,25 +173,57 @@ void TerminalScreen::start_command(const std::string& command, bool as_root) {
     update_run_label();
 }
 
+void TerminalScreen::set_input_visible(bool visible) {
+    if (!input_ta_ || !log_ta_) {
+        return;
+    }
+    if (visible) {
+        lv_obj_clear_flag(input_ta_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(input_ta_, LV_OBJ_FLAG_HIDDEN);
+    }
+    const int32_t content_height = view::kScreenHeight - view::kTitleBarHeight - view::kNavBarHeight;
+    lv_obj_set_height(log_ta_, content_height - kHeaderHeight - (visible ? kInputHeight : 0));
+    lv_obj_update_layout(log_ta_);
+    if (follow_tail_) {
+        lv_obj_scroll_to_y(log_ta_, lv_obj_get_scroll_y(log_ta_) + lv_obj_get_scroll_bottom(log_ta_),
+                           LV_ANIM_OFF);
+    }
+}
+
 void TerminalScreen::clear_log() {
-    if (log_ta_) {
-        lv_textarea_set_text(log_ta_, "");
+    if (log_label_) {
+        lv_label_set_text(log_label_, "");
         follow_tail_ = true;
     }
 }
 
 void TerminalScreen::append_log(const std::string& text) {
-    if (!log_ta_ || text.empty()) {
+    if (!log_label_ || text.empty()) {
         return;
     }
 
-    if (lv_textarea_get_text(log_ta_)[0] != '\0' && strlen(lv_textarea_get_text(log_ta_)) > kMaxLogChars) {
-        lv_textarea_set_text(log_ta_, "");
+    // Trim from the front (on a line boundary) so scrollback survives overflow.
+    std::string current = lv_label_get_text(log_label_);
+    if (current.size() + text.size() > kMaxLogChars) {
+        size_t cut = current.size() + text.size() - kMaxLogChars + kMaxLogChars / 4;
+        if (cut >= current.size()) {
+            current.clear();
+        } else {
+            const size_t nl = current.find('\n', cut);
+            current.erase(0, nl == std::string::npos ? cut : nl + 1);
+        }
+        lv_label_set_text(log_label_, current.c_str());
     }
 
+    lv_obj_update_layout(log_ta_);
     const lv_coord_t prev_scroll = lv_obj_get_scroll_y(log_ta_);
-    lv_textarea_add_text(log_ta_, text.c_str());
-    if (!follow_tail_) {
+    lv_label_ins_text(log_label_, LV_LABEL_POS_LAST, text.c_str());
+    lv_obj_update_layout(log_ta_);
+    if (follow_tail_) {
+        lv_obj_scroll_to_y(log_ta_, lv_obj_get_scroll_y(log_ta_) + lv_obj_get_scroll_bottom(log_ta_),
+                           LV_ANIM_OFF);
+    } else {
         lv_obj_scroll_to_y(log_ta_, prev_scroll, LV_ANIM_OFF);
     }
 }
@@ -186,8 +232,13 @@ void TerminalScreen::scroll_log(int32_t delta) {
     if (!log_ta_) {
         return;
     }
-    lv_obj_scroll_by(log_ta_, 0, delta, LV_ANIM_OFF);
-    follow_tail_ = delta <= 0 && lv_obj_get_scroll_bottom(log_ta_) < 2;
+    lv_obj_update_layout(log_ta_);
+    // delta > 0 reveals earlier text (content moves down); clamp to the real limits.
+    const lv_coord_t max_y  = lv_obj_get_scroll_y(log_ta_) + lv_obj_get_scroll_bottom(log_ta_);
+    lv_coord_t target       = lv_obj_get_scroll_y(log_ta_) - delta;
+    target                  = target < 0 ? 0 : (target > max_y ? max_y : target);
+    lv_obj_scroll_to_y(log_ta_, target, LV_ANIM_OFF);
+    follow_tail_ = target >= max_y - 2;
 }
 
 void TerminalScreen::update_run_label() {
@@ -199,24 +250,36 @@ void TerminalScreen::enter_typing_mode() {
         return;
     }
     typing_ = true;
+    set_input_visible(true);
     platform::set_text_input_mode(true);
 
     // While typing every key (digits included) must reach the input line, so
     // all nav slots go dark; ESC keeps nav meaning and lands on repointed
-    // slot 0 = leave input.
-    nav_bar().set_icon(0, "Esc", type_cb, this);
+    // slot 0 = leave input. No label: the slot sits over the 4 key, which types
+    // '4' here, so an "Esc" label there would only mislead.
+    nav_bar().set_icon(0, "", type_cb, this);
     nav_bar().set_enabled(1, false);
     nav_bar().set_enabled(2, false);
     nav_bar().set_enabled(3, false);
     nav_bar().set_enabled(4, false);
 
-    typing_group_ = lv_group_create();
-    lv_group_add_obj(typing_group_, input_ta_);
-    lv_group_focus_obj(input_ta_);
+    // Attach the keypad group on the next tick: the "T" press that got us here is
+    // still being processed and would otherwise be typed into the input line.
+    lv_async_call(attach_typing_group_async, this);
+}
+
+void TerminalScreen::attach_typing_group_async(void* user_data) {
+    auto* self = static_cast<TerminalScreen*>(user_data);
+    if (!self->typing_ || self->typing_group_) {
+        return;
+    }
+    self->typing_group_ = lv_group_create();
+    lv_group_add_obj(self->typing_group_, self->input_ta_);
+    lv_group_focus_obj(self->input_ta_);
     for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev;
          indev = lv_indev_get_next(indev)) {
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_KEYPAD) {
-            lv_indev_set_group(indev, typing_group_);
+            lv_indev_set_group(indev, self->typing_group_);
         }
     }
 }
@@ -226,15 +289,19 @@ void TerminalScreen::leave_typing_mode() {
         return;
     }
     typing_ = false;
+    lv_async_call_cancel(attach_typing_group_async, this);
     for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev;
          indev = lv_indev_get_next(indev)) {
         if (lv_indev_get_type(indev) == LV_INDEV_TYPE_KEYPAD) {
             lv_indev_set_group(indev, nullptr);
         }
     }
-    lv_group_delete(typing_group_);
-    typing_group_ = nullptr;
+    if (typing_group_) {
+        lv_group_delete(typing_group_);
+        typing_group_ = nullptr;
+    }
     platform::set_text_input_mode(false);
+    set_input_visible(false);
 
     nav_bar().set_icon(0, view::NAV_BACK, back_cb, this);
     nav_bar().set_enabled(1, true);
@@ -370,7 +437,7 @@ void TerminalScreen::submit_sudo_dialog() {
         update_run_label();
         return;
     }
-    cached_password_ = password;
+    model::sudo_remember_password(password);
     const std::string command = pending_command_;
     const bool as_root        = pending_root_;
     pending_command_.clear();
@@ -390,8 +457,8 @@ void TerminalScreen::on_process_update(void* owner, const std::string& text, boo
         // One sudo -S attempt per password: a rejected password must not stay
         // cached, or every later root command fails without ever re-prompting.
         if (self->last_run_used_sudo_password_ &&
-            self->run_output_.find("incorrect password attempt") != std::string::npos) {
-            self->cached_password_.clear();
+            model::sudo_output_rejected_password(self->run_output_)) {
+            model::sudo_forget_password();
             self->append_log("[sudo password rejected - it will be asked again]\n");
         }
         self->run_output_.clear();

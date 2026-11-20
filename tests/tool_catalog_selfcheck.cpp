@@ -95,9 +95,9 @@ int main() {
                        root[3] == "--root-sh" && root[4] == "id -u");
             } else {
                 assert(model::terminal_auth_mode() == model::TerminalAuth::Password);
-                assert(root.size() == 8 && root[1] == "-k" && root[2] == "-S" &&
-                       root[3] == "-p" && root[4] == "" &&
-                       root[5] == self && root[6] == "--root-sh" && root[7] == "id -u");
+                assert(root.size() == 7 && root[1] == "-S" &&
+                       root[2] == "-p" && root[3] == "" &&
+                       root[4] == self && root[5] == "--root-sh" && root[6] == "id -u");
             }
         }
     }
@@ -143,16 +143,16 @@ int main() {
                 if (launched[0] != "sudo") {
                     assert(with_pw == launched); // unflagged row: no escalation either way
                 } else if (launched[3] == "--root-sh") {
-                    assert(with_pw.size() == 8);
-                    assert(with_pw[0] == "sudo" && with_pw[1] == "-k" && with_pw[2] == "-S" &&
-                           with_pw[3] == "-p" && with_pw[4] == "");
-                    assert(with_pw[5] == launched[2] && with_pw[6] == launched[3] &&
-                           with_pw[7] == launched[4]);
+                    assert(with_pw.size() == 7);
+                    assert(with_pw[0] == "sudo" && with_pw[1] == "-S" &&
+                           with_pw[2] == "-p" && with_pw[3] == "");
+                    assert(with_pw[4] == launched[2] && with_pw[5] == launched[3] &&
+                           with_pw[6] == launched[4]);
                 } else {
-                    assert(with_pw.size() == launched.size() + 3);
-                    assert(with_pw[0] == "sudo" && with_pw[1] == "-k" && with_pw[2] == "-S" &&
-                           with_pw[3] == "-p" && with_pw[4] == "");
-                    assert(std::vector<std::string>(with_pw.begin() + 5, with_pw.end()) ==
+                    assert(with_pw.size() == launched.size() + 2);
+                    assert(with_pw[0] == "sudo" && with_pw[1] == "-S" &&
+                           with_pw[2] == "-p" && with_pw[3] == "");
+                    assert(std::vector<std::string>(with_pw.begin() + 4, with_pw.end()) ==
                            std::vector<std::string>(launched.begin() + 2, launched.end()));
                 }
                 assert(model::action_needs_root(action) == (launched[0] == "sudo"));

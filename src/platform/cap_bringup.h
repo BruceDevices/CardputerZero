@@ -13,15 +13,26 @@
  *      m5stack/M5IOE1 driver: PYG13 (P13) high closes the HAT-port 5V load
  *      switch (schematic U23); PYG1 (P1) low muxes HAT_P0/P1 to GPIO instead
  *      of USB4 (they carry the cap's POWER_EN / NFC_IRQ).
- *   2. BCM 26 (HAT_P0) high = the cap's POWER_EN input -> its onboard DC-DC.
+ *   2. BCM 26 (HAT_P0): the current code drives it high as a "POWER_EN". This
+ *      is under review (milestone 5) - G26 is the per-module RST line in the
+ *      CAP profiles, not a confirmed system power-enable. See the RST note below.
  *
- * SPI wiring (from the C154 schematic, HAT port):
- *   SPI0: G11=SCLK G10=MOSI G9=MISO, level-shifted
- *   CC1101_CS = G7  = SPI0_CS1 -> hardware CS -> /dev/spidev0.1
- *   NFC_CS    = G22 (plain GPIO: spidev runs with SPI_NO_CS, CS bit-banged)
- *   NFC_IRQ   = G23 (unused; the driver polls the IRQ registers)
- *   CC1101_G0 = G14, CC1101_RF_SW0 = G15 (RF TX/RX only)
- * Note G8/SPI0_CS0 is the internal LCD - never asserted on purpose.
+ * SPI wiring for the CAP CC1101 (CC1101 + ST25R3916), CONFIRMED ON HARDWARE -
+ * the per-CAP source of truth lives in the BruceModule profiles
+ * (src/hal/bruce_module.*), not here:
+ *   SPI0: G11=SCLK G10=MOSI G9=MISO, level-shifted (global, shared bus)
+ *   CC1101_CS    = G7  = SPI0_CS1 -> hardware CS -> /dev/spidev0.1
+ *   ST25R3916_CS = G22 (plain GPIO: spidev runs SPI_NO_CS, CS bit-banged)
+ *   NFC_IRQ      = G23 (unused; the driver polls the IRQ registers)
+ *   CC1101_GDO0  = G15, CC1101_RF_SW0 = G14 (verified with OOK RX/TX on hardware)
+ * Note G8/SPI0_CS0 is the internal LCD - never asserted on purpose. On the
+ * tested CAP CC1101 only the CC1101 (G7) answered; the ST25R (G22) was silent.
+ *
+ * RST is NOT a fixed system pin: it is per-module (varies by CAP vendor). The
+ * known CAPs happen to wire it to G26, carried as each module's `rst` field in
+ * the BruceModule profile - G26 is a general-purpose GPIO, not "POWER_EN".
+ * (The energy/reset chain itself is milestone 5; this file's role here is the
+ * wiring map, which must match the profiles above.)
  */
 
 #pragma once
@@ -34,8 +45,8 @@ namespace platform {
 
 struct CapBringupReport {
     bool rail_led = false; // ext_5v_out gpio-led closed the HAT 5V rail (primary)
-    bool hat_5v = false;   // M5IOE1 PYG13 closed the HAT 5V load switch (legacy)
-    bool cap_en = false;   // BCM 26 (cap POWER_EN) driven high
+    bool hat_5v = false;   // M5IOE1 PYG13_HAT_EN closed the HAT 5V load switch
+    bool cap_en = false;   // deprecated: there is no system POWER_EN; see note below
     std::string text;      // human-readable log lines (newline-terminated)
 };
 
@@ -67,5 +78,22 @@ bool gpio_claim_output(const char* chip_path, unsigned line, bool initial_high,
 
 // Set a claimed line's level.
 bool gpio_line_set(int handle_fd, bool high);
+
+// Read a GPIO line's current level as an input (claims it as input, reads once,
+// releases). Returns false on any error (and leaves `value` untouched). Used to
+// poll a chip's BUSY line (e.g. SX1262) before an SPI transaction.
+bool gpio_read_line(const char* chip_path, unsigned line, bool& value);
+
+// Set a BCM pin's function select (FSEL, 0-7) directly via /dev/gpiomem. This is
+// the escape hatch for restoring a pin's peripheral ALT function after it was
+// bit-banged as a GPIO: requesting a line through the gpio chardev switches the
+// pin to GPIO and the kernel does NOT revert it on release. Needs the `gpio`
+// group (no root). Returns false if /dev/gpiomem can't be mapped.
+bool gpio_set_function(unsigned line, unsigned fsel);
+
+// Restore the mini-UART (ttyS0) mux on the HAT serial pins G14/G15 (ALT5 =
+// TXD1/RXD1) so the GPS keeps working after those pins were used as a CC1101 CS
+// (Pingequa). Call after any probe that bit-banged G14 or G15. No-op-safe.
+bool gpio_restore_serial_mux();
 
 } // namespace platform

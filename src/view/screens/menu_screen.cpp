@@ -8,6 +8,7 @@
 
 #include "asset_manager.h"
 #include "bindings.h"
+#include "bruce_module.h"
 #include "theme.h"
 #include "tool_catalog.h"
 #include "ui_const.h"
@@ -103,20 +104,35 @@ void MenuScreen::update_carousel() {
 void MenuScreen::build_list(lv_obj_t* content) {
     // Rebuild data-driven categories (e.g. Nmap's host list) before reading them,
     // so a just-finished discovery / host selection shows up on (re)entry.
-    model::refresh_dynamic_categories();
+    model::refresh_dynamic_categories(category_index_);
+    const auto& pre_refresh_catalog = model::tool_catalog();
+    if (category_index_ >= 0 &&
+        category_index_ < static_cast<int>(pre_refresh_catalog.size()) &&
+        std::string(pre_refresh_catalog[static_cast<size_t>(category_index_)].label) ==
+            "Sub-GHz / RF") {
+        hal::redetect();
+        const auto& pins = hal::modules().cc1101;
+        model::refresh_rf_category(hal::has_cc1101(), pins.cs, pins.gdo0);
+    }
     const auto& catalog = model::tool_catalog();
 
     auto* header = lv_label_create(content);
     lv_obj_set_size(header, LV_PCT(100), kHeaderHeight);
     lv_obj_set_style_text_font(header, &lv_font_montserrat_14, 0);
     lv_obj_set_style_pad_left(header, 8, 0);
-    lv_label_set_text(header, catalog[static_cast<size_t>(category_index_)].label);
+    const auto& category = catalog[static_cast<size_t>(category_index_)];
+    if (std::string(category.label) == "Sub-GHz / RF" && !hal::has_cc1101()) {
+        lv_label_set_text(header, "Sub-GHz / RF (CC1101 not detected)");
+    } else {
+        lv_label_set_text(header, category.label);
+    }
 
     auto* list = lv_list_create(content);
     lv_obj_set_size(list, LV_PCT(100), view::kScreenHeight - view::kTitleBarHeight - view::kNavBarHeight - kHeaderHeight);
     lv_obj_align(list, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_row(list, 2, 0); // tighter gap so ~4 rows fit, not 2
 
     const size_t item_count = catalog[static_cast<size_t>(category_index_)].actions.size();
     rows_.reserve(item_count);
@@ -124,6 +140,10 @@ void MenuScreen::build_list(lv_obj_t* content) {
         const char* label = catalog[static_cast<size_t>(category_index_)].actions[i].label;
         auto* row = lv_list_add_button(list, nullptr, label);
         lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        // Compact rows: the default list button is tall enough that only ~2 fit
+        // in the content area; trim the vertical padding so ~4 are visible.
+        lv_obj_set_style_pad_ver(row, 3, 0);
+        lv_obj_set_style_text_font(row, &lv_font_montserrat_14, 0);
         rows_.push_back(row);
     }
 
@@ -196,7 +216,16 @@ void MenuScreen::open_selected() {
 
     // A row with no argv is a navigation row (not a launchable tool).
     const auto& category = model::tool_catalog()[static_cast<size_t>(category_index_)];
-    if (category.actions[selected_index_].argv.empty()) {
+    const auto& action = category.actions[selected_index_];
+    if (action.rf_tool != model::RfTool::None) {
+        view_model().show_rf(category_index_, static_cast<int>(selected_index_));
+        return;
+    }
+    if (action.wifi_view != model::WifiView::None) {
+        view_model().show_wifi_scan(category_index_, static_cast<int>(selected_index_));
+        return;
+    }
+    if (action.argv.empty()) {
         if (std::string(category.label) == "Theme") {
             // Apply the picked accent color and re-theme + rebuild in place.
             view::set_accent(static_cast<int>(selected_index_));

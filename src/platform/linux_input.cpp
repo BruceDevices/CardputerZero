@@ -52,12 +52,17 @@ size_t last_dispatch_index = kNavKeyCount;
 //   Enter / Ok       -> slot 2  (select / run)
 //   X / down, C /right-> slot 3  (next item)
 //   T                -> slot 4  (theme toggle)
+//   4 5 6 7 8        -> slots 0-4, left to right: the number keys sit right
+//                       under the nav-bar labels (same as other CardputerZero
+//                       apps). Slot 0 is Back; the root menu leaves it unbound,
+//                       so 4 can never quit the app.
 // Left/right and up/down both just step the 1-D menu selection, so the carousel
 // (horizontal) and the tool lists (vertical) each feel natural. Back is ESC
-// only - never a letter key - so no keystroke can accidentally quit the app.
+// or 4 in sub-screens; the root menu has no Back, so no keystroke quits the app.
 size_t nav_key_to_index(uint32_t key) {
     switch (key) {
         case LV_KEY_ESC:
+        case '4':
             return 0;
         case 'f':
         case 'F':
@@ -66,8 +71,10 @@ size_t nav_key_to_index(uint32_t key) {
         case LV_KEY_UP:
         case LV_KEY_LEFT:
         case LV_KEY_PREV:
+        case '5':
             return 1;
         case LV_KEY_ENTER:
+        case '6':
             return 2;
         case 'x':
         case 'X':
@@ -76,9 +83,11 @@ size_t nav_key_to_index(uint32_t key) {
         case LV_KEY_DOWN:
         case LV_KEY_RIGHT:
         case LV_KEY_NEXT:
+        case '7':
             return 3;
         case 't':
         case 'T':
+        case '8':
             return 4;
         default:
             return kNavKeyCount;
@@ -86,6 +95,11 @@ size_t nav_key_to_index(uint32_t key) {
 }
 
 void dispatch_nav_key(uint32_t key) {
+    // Text-entry mode: digits are text (a password, a terminal command), never
+    // nav - '6' must not submit the dialog it is being typed into.
+    if (g_text_input_mode && key >= '0' && key <= '9') {
+        return;
+    }
     const auto index = nav_key_to_index(key);
     if (index >= nav_buttons.size()) {
         return;
@@ -164,6 +178,7 @@ struct EvdevKeypad {
     lv_indev_state_t state{LV_INDEV_STATE_RELEASED};
     uint32_t key{0};
     bool shift{false}; // left/right shift held while typing (text mode)
+    bool sym{false};   // sym layer active (held, or latched by the keyboard firmware)
 };
 
 uint32_t map_evdev_key(uint16_t code) {
@@ -175,7 +190,7 @@ uint32_t map_evdev_key(uint16_t code) {
             return LV_KEY_ESC;
         case KEY_BACKSPACE:
             // "Back" in nav mode; delete-a-character while typing (text mode).
-            return g_text_input_mode ? LV_KEY_DEL : LV_KEY_ESC;
+            return g_text_input_mode ? LV_KEY_BACKSPACE : LV_KEY_ESC;
         case KEY_F:
             return 'f';
         case KEY_Z:
@@ -212,8 +227,15 @@ uint32_t map_evdev_key(uint16_t code) {
     }
     // Full keyboard for text entry (sudo password): letters and the number row.
     // KEY_1..KEY_9 are contiguous, KEY_0 trails them.
-    if (code >= KEY_A && code <= KEY_Z) {
-        return static_cast<uint32_t>('a' + (code - KEY_A));
+    // evdev letter codes follow the QWERTY rows, not the alphabet.
+    if (code >= KEY_Q && code <= KEY_P) {
+        return static_cast<uint32_t>("qwertyuiop"[code - KEY_Q]);
+    }
+    if (code >= KEY_A && code <= KEY_L) {
+        return static_cast<uint32_t>("asdfghjkl"[code - KEY_A]);
+    }
+    if (code >= KEY_Z && code <= KEY_M) {
+        return static_cast<uint32_t>("zxcvbnm"[code - KEY_Z]);
     }
     if (code >= KEY_1 && code <= KEY_9) {
         return static_cast<uint32_t>('1' + (code - KEY_1));
@@ -222,6 +244,46 @@ uint32_t map_evdev_key(uint16_t code) {
         return '0';
     }
     return 0;
+}
+
+// The sym key (KEY_CD) switches the matrix to a layer that reports unrelated
+// evdev codes (e.g. sym+1 -> KEY_LEFTBRACE). Decode them to the blue key legends.
+uint32_t map_sym_key(uint16_t code) {
+    switch (code) {
+        case KEY_LEFTBRACE: return '!';           // 1
+        case KEY_RIGHTBRACE: return '@';          // 2
+        case KEY_SEMICOLON: return '#';           // 3
+        case KEY_APOSTROPHE: return '$';          // 4
+        case KEY_GRAVE: return '%';               // 5
+        case KEY_BACKSLASH: return '^';           // 6
+        case KEY_COMMA: return '&';               // 7
+        case KEY_DOT: return '*';                 // 8
+        case KEY_SLASH: return '(';               // 9
+        case KEY_MUHENKAN: return ')';            // 0
+        case KEY_KPASTERISK: return '~';          // Q
+        case KEY_NUMLOCK: return '`';             // W
+        case KEY_SCROLLLOCK: return '_';          // E
+        case KEY_KP7: return '-';                 // R
+        case KEY_KP8: return '+';                 // T
+        case KEY_KP9: return '=';                 // Y
+        case KEY_KPMINUS: return '[';             // U
+        case KEY_KP4: return ']';                 // I
+        case KEY_KP5: return '{';                 // O
+        case KEY_KP6: return '}';                 // P
+        case KEY_KP1: return ';';                 // A
+        case KEY_KP2: return ':';                 // S
+        case KEY_KP3: return '\'';                // D
+        case KEY_KP0: return '"';                 // G
+        case KEY_KPDOT: return '<';               // H
+        case KEY_ZENKAKUHANKAKU: return '>';      // J
+        case KEY_102ND: return '\\';               // K
+        case KEY_RO: return '|';                  // L
+        case KEY_KATAKANA: return ',';            // V
+        case KEY_HIRAGANA: return '.';            // B
+        case KEY_HENKAN: return '/';              // N
+        case KEY_KATAKANAHIRAGANA: return '?';    // M
+        default: return 0;
+    }
 }
 
 // Shift variant of a mapped character: uppercase letters, the shifted number
@@ -287,12 +349,17 @@ void evdev_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
             continue;
         }
 
-        const auto key = map_evdev_key(input.code);
+        if (input.code == KEY_CD) {
+            keypad->sym = input.value != 0;
+            continue;
+        }
+
+        const auto key = keypad->sym ? map_sym_key(input.code) : map_evdev_key(input.code);
         if (!key || input.value == 2) {
             continue;
         }
 
-        keypad->key = shifted_key(key, keypad->shift);
+        keypad->key = keypad->sym ? key : shifted_key(key, keypad->shift);
         keypad->state = input.value ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
         data->continue_reading = true;
         break;

@@ -77,7 +77,7 @@ class ProcessRunner:
     #   user command            -> sh -c <cmd>
     #   root, already root      -> sh -c <cmd>
     #   root, passwordless rule -> sudo -n <self> --root-sh <cmd>
-    #   root, otherwise         -> sudo -k -S -p '' <self> --root-sh <cmd>
+    #   root, otherwise         -> sudo -S -p '' <self> --root-sh <cmd>
     #                             with the password fed on stdin on demand.
     def start_command(self, cmd, root=False):
         if self.running():
@@ -121,7 +121,8 @@ class ProcessRunner:
         try:
             if root and os.geteuid() != 0:
                 passwordless = subprocess.run(
-                    ["sudo", "-n", "true"], capture_output=True).returncode == 0
+                    # Probe the authorized command itself, not `true` (see sudo_passwordless).
+                    ["sudo", "-n", *self._self_argv("true")], capture_output=True).returncode == 0
                 if passwordless:
                     argv = ["sudo", "-n", *self._self_argv(cmd)]
                 else:
@@ -132,7 +133,7 @@ class ProcessRunner:
                         self._emit("sudo: no password entered — aborted")
                         self._finish()
                         return
-                    argv = ["sudo", "-k", "-S", "-p", "", *self._self_argv(cmd)]
+                    argv = ["sudo", "-S", "-p", "", *self._self_argv(cmd)]
                     stdin_line = self._pw + "\n"
             else:
                 argv = ["sh", "-c", cmd]

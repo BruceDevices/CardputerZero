@@ -8,6 +8,7 @@
 
 #include "asset_manager.h"
 #include "boot_anim.h"
+#include "bruce_module.h"
 #include "logger.h"
 #include "linux_input.h"
 #include "screen_manager.h"
@@ -173,6 +174,10 @@ int Application::run() {
     logger::Logger::set_tag("bruce");
 
     lv_init();
+
+    // Detect the connected CAP and fill the BruceModule pin registry (Subjects
+    // need lv_init() done above). Prints the module summary to the terminal.
+    hal::detect_cap();
 
     auto* display = init_display();
     if (!display) {

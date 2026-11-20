@@ -12,6 +12,15 @@
 
 namespace model {
 
+enum class RfTool { None, Scan, ProtocolMonitor, Record, Spectrum, Spectrogram };
+
+// Which structured Wi-Fi scan UI a row opens instead of the raw tool-run log.
+// ScanList  -> "Scan nearby networks": a signal-sorted, selectable network list
+//              on the left with the selected network's details on the right.
+// SsidList  -> "List SSIDs + signal": a selectable "SSID (RSSI)" list; picking
+//              one runs a targeted deeper scan and shows it on a detail screen.
+enum class WifiView { None, ScanList, SsidList };
+
 // A selectable UI accent color. Pure data (no LVGL) so it is the single source
 // of truth shared by the "Theme" menu (model) and the palette (view): `primary`
 // is the main accent, `info` a lighter companion used for secondary styling.
@@ -46,6 +55,14 @@ struct ToolAction {
     // (leading "sudo "), not per row. `argv` is a harmless fallback print used
     // only if the screen is ever dropped.
     bool terminal_view = false;
+    // Run the command automatically on screen entry instead of waiting for the
+    // operator to press Run. Used for the read-only Wi-Fi recon rows so they
+    // behave autonomously; left false for attacks and mode toggles.
+    bool auto_run = false;
+    RfTool rf_tool = RfTool::None;
+    // Non-None opens the dedicated WifiScanScreen (structured list/detail view)
+    // instead of the raw tool-run log. `argv` is still the scan command it runs.
+    WifiView wifi_view = WifiView::None;
 };
 
 // A menu category shown on the root menu (e.g. "Wi-Fi", "Responder").
@@ -67,7 +84,14 @@ const std::vector<ToolCategory>& tool_catalog();
 // whose rows depend on discovered hosts). Call before building a category's menu
 // so freshly discovered hosts / the current selection show up. Cheap; a no-op
 // for static categories.
-void refresh_dynamic_categories();
+// `category_index` lets hardware-backed categories refresh only when entered;
+// pass -1 to refresh all purely data-driven categories without probing hardware.
+void refresh_dynamic_categories(int category_index = -1);
+
+// Rebuild the native CC1101 rows plus the saved-RAW replay list. The view owns
+// hardware probing and passes the resulting availability/pins into the model.
+void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio);
+std::string rf_recordings_dir();
 
 // A ToolAction with an empty argv is a navigation row (not a launchable tool):
 // selecting it mutates dynamic state instead of running a process. Screens route
@@ -85,6 +109,11 @@ void on_navigation_action(int category_index, int item_index);
 // unchanged.
 std::vector<std::string> launch_argv(const ToolAction& action);
 
+// A human-readable one-line form of the command a row runs, for the
+// "Running command: "<...>", wait..." status line. For `sh -c "<script>"` rows
+// it returns the script; otherwise the argv joined by spaces.
+std::string action_command_text(const ToolAction& action);
+
 // True when launching `action` needs root at all (i.e. launch_argv would wrap
 // it with sudo for a non-root app). Screens use it to pick between the
 // passwordless fast path and the on-device sudo password prompt.
@@ -95,19 +124,35 @@ bool action_needs_root(const ToolAction& action);
 // launch is cheap and the rule can appear at any time.
 bool sudo_passwordless();
 
-// Like launch_argv, but for the password-prompt path: `sudo -k -S -p ''` with
+// Like launch_argv, but for the password-prompt path: `sudo -S -p ''` with
 // the same command tail. `-S` reads the password from stdin (ProcessRunner
-// feeds it through a pipe; it never travels in argv or the log), `-k` forces a
-// fresh authentication so the password line is always consumed predictably,
-// `-p ''` keeps sudo's prompt out of the tool log.
+// feeds it through a pipe; it never travels in argv or the log), `-p ''` keeps
+// sudo's prompt out of the tool log. No `-k`: a successful run leaves sudo's
+// timestamp cached, so the next sudo_passwordless() probe passes and later
+// launches take the `sudo -n` path without asking again.
 std::vector<std::string> sudo_argv_with_password(const ToolAction& action);
+
+// App-wide sudo password cache. Needed because sudo's own credential cache
+// does not carry over between our tty-less launches (every child is setsid()ed,
+// and sudo keys tickets per tty/session), so without this every root command
+// asked again. Entered once, reused by every screen; it expires after
+// kSudoCacheIdleSeconds without use (sudo's default timeout) and is wiped
+// as soon as sudo rejects it. Memory only, never written anywhere.
+constexpr int kSudoCacheIdleSeconds = 15 * 60;
+// The cached password, or "" when none/expired. A hit counts as a use and
+// restarts the idle timer.
+std::string sudo_cached_password();
+void sudo_remember_password(const std::string& password);
+void sudo_forget_password();
+// sudo -S output that means the password was wrong.
+bool sudo_output_rejected_password(const std::string& output);
 
 // --- Terminal ("Terminal" category) ------------------------------------------------
 
 // How a root terminal command must be launched right now. NotNeeded: the app
 // itself is root (euid == 0), so commands run directly. Passwordless: the
 // /etc/sudoers.d rule covers this binary, `sudo -n <self> --root-sh` works.
-// Password: no rule - the command needs `sudo -k -S` plus the user's password
+// Password: no rule - the command needs `sudo -S` plus the user's password
 // on stdin (TerminalScreen caches it for the session, ToolRunScreen asks once
 // per run - same split as the catalog rows).
 enum class TerminalAuth { NotNeeded, Passwordless, Password };
