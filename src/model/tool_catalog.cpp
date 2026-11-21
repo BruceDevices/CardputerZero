@@ -9,7 +9,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cctype>
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <dirent.h>
 #include <fcntl.h>
@@ -224,13 +227,60 @@ std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int g
 // --- Nmap guided flow: discover hosts -> pick host -> Fast/Full port scan -----
 //
 // The menu is a flat two-level list, so the drill-down is driven by two tiny
-// state files under /tmp/bruce-nmap: `hosts` (one live IP per line, written by
+// state files under /tmp/bruce-nmap-<uid>: `hosts` (one live IP per line, written by
 // the discovery step) and `selected` (the host the user tapped). The "Nmap"
 // category's action list is rebuilt from this state on every menu entry
 // (refresh_dynamic_categories), and host/"back" rows carry an empty argv so the
 // menu treats them as navigation (on_navigation_action) rather than tools.
 
-std::string nmap_dir() { return "/tmp/bruce-nmap"; }
+// Per-uid so a dir created by another user (or a stale root-owned one from an
+// older build) can't block or spoof the flow. Digits only, so it is safe to
+// embed single-quoted in the discovery script.
+std::string nmap_dir() { return "/tmp/bruce-nmap-" + std::to_string(getuid()); }
+
+// Create the state dir (0700) if missing and vet it: it must be a real
+// directory (not a symlink) owned by us with no group/other access, since it
+// lives in world-writable /tmp and root-run rows write into it. The app (never
+// root scripts) is the only creator of this dir. Returns "" when safe, else the reason
+// (logged to stderr); callers must then not use the dir at all.
+std::string ensure_nmap_dir() {
+    const std::string d = nmap_dir();
+    std::string problem;
+    if (mkdir(d.c_str(), 0700) != 0 && errno != EEXIST) {
+        problem = std::string("mkdir failed: ") + std::strerror(errno);
+    } else {
+        struct stat st {};
+        if (lstat(d.c_str(), &st) != 0) {
+            problem = std::string("lstat failed: ") + std::strerror(errno);
+        } else if (S_ISLNK(st.st_mode)) {
+            problem = "is a symlink";
+        } else if (!S_ISDIR(st.st_mode)) {
+            problem = "not a directory";
+        } else if (st.st_uid != getuid()) {
+            problem = "owned by uid " + std::to_string(st.st_uid) + ", expected " +
+                      std::to_string(getuid());
+        } else if ((st.st_mode & 077) != 0) {
+            char mode[8];
+            std::snprintf(mode, sizeof mode, "%04o", static_cast<unsigned>(st.st_mode & 07777));
+            problem = std::string("permissions ") + mode + ", expected 0700";
+        }
+    }
+    if (!problem.empty()) {
+        std::fprintf(stderr, "nmap: unsafe state dir %s: %s; not using it\n", d.c_str(),
+                     problem.c_str());
+    }
+    return problem;
+}
+
+// Shared by the Nmap discovery row and Wi-Fi "Scan LAN hosts (nmap)": pick the
+// default-route interface's IPv4 network (fallback: first non-lo, non-bridge
+// address) and clamp very wide prefixes (< /24) to /24 so a sweep stays short.
+// Sets $dev (may be empty) and $net (empty if no network).
+constexpr const char* kNmapSubnetSh =
+    "dev=$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i==\"dev\"){print $(i+1); exit}}'); "
+    "net=$(ip -o -f inet addr show ${dev:+dev \"$dev\"} 2>/dev/null | awk '$2!=\"lo\"{print $4; exit}'); "
+    "[ -z \"$net\" ] && net=$(ip -o -f inet addr show 2>/dev/null | awk '$2!=\"lo\" && $2!~/^(docker|veth|br-|virbr)/{print $4; exit}'); "
+    "case \"${net#*/}\" in [0-9]|1[0-9]|2[0-3]) net=\"${net%/*}/24\";; esac; ";
 
 // Evil Portal clone-AP drill-down state: `targets` holds one "channel\tssid"
 // line per scanned AP, `selected` the picked line (same pattern as bruce-nmap).
@@ -270,8 +320,206 @@ std::vector<std::string> read_lines(const std::string& path) {
     return out;
 }
 
-void write_file(const std::string& path, const std::string& content) {
-    std::ofstream(path) << content;
+bool write_file(const std::string& path, const std::string& content) {
+    std::ofstream out(path);
+    out << content;
+    out.flush();
+    return static_cast<bool>(out);
+}
+
+// Shared "nmap missing" guard. Store installs may skip Recommends (nmap), so
+// point at the in-app installer first, then the manual command.
+constexpr const char* kNmapMissingSh =
+    "command -v nmap >/dev/null 2>&1 || { echo 'nmap is not installed - run System / Clock > "
+    "\"Install optional tools (apt)\" or: sudo apt install nmap'; exit 127; }; ";
+
+// Discovery parser: nmap normal output (-oN) -> one host per line,
+// "ip<TAB>mac<TAB>vendor<TAB>flag" (flag: gw | self | empty), gateway first,
+// then numeric IP order. $gw/$me are the default gateway and this device.
+// The sort key is a zero-padded prefix stripped again by cut, so this works
+// with mawk, gawk and busybox awk/sort alike.
+constexpr const char* kNmapHostsAwk = R"SH('
+function flush_host(  f, q, k) {
+    if (ip == "") return
+    f = (ip == gw) ? "gw" : ((ip == me) ? "self" : "")
+    split(ip, q, ".")
+    k = sprintf("%d%03d%03d%03d%03d", (f == "gw") ? 0 : 1, q[1], q[2], q[3], q[4])
+    printf "%s\t%s\t%s\t%s\t%s\n", k, ip, mac, ven, f
+    ip = ""
+}
+/^Nmap scan report for / { flush_host(); ip = $NF; gsub(/[()]/, "", ip); mac = ""; ven = ""; next }
+/^MAC Address: / {
+    mac = $3; ven = $0
+    sub(/^[^(]*\(/, "", ven); sub(/\) *$/, "", ven)
+    if (ven == "Unknown") ven = ""
+}
+END { flush_host() }')SH";
+
+// Port-scan filter for Fast/Full: turns `nmap -v` output into a HOST INFO
+// style log. Open ports stream as nmap discovers them ("+ 80/tcp open"),
+// --stats-every lines condense to "progress N%", heartbeat ticks (no-PTY
+// fallback) become "still scanning... Ns elapsed", nmap's PORT table (with
+// service names) is kept, warnings pass through, and the rest is dropped -
+// but the last 20 dropped lines are replayed if nmap fails, so errors (which
+// share the PTY with stdout) are never hidden. nmap's exit status arrives as
+// a "__nmap_rc=N" marker and becomes awk's (= the script's) exit status.
+// CRs from the PTY are stripped. fflush() after every print, plus
+// `-W interactive` on mawk (which otherwise block-buffers its *input* from a
+// pipe), keeps the log live.
+constexpr const char* kNmapPortsAwk = R"SH('
+{ sub(/\r$/, "") }
+/^__nmap_rc=/ { rc = substr($0, 11) + 0; next }
+/^__tick$/ { t += 15; print "still scanning... " t "s elapsed"; fflush(); next }
+/^Discovered open port / {
+    p = $4
+    if (!(p in seen)) { seen[p] = 1; n++; print "+ " p " open"; fflush() }
+    next
+}
+/Timing: About [0-9.]+% done/ {
+    s = $0; sub(/.*About /, "", s); sub(/% done.*/, "", s)
+    e = ""
+    if (match($0, /\([0-9:]+ remaining\)/)) e = " (" substr($0, RSTART + 1, RLENGTH - 12) " left)"
+    print "progress " int(s) "%" e; fflush(); next
+}
+/^PORT +STATE +SERVICE/ { intable = 1; print; fflush(); next }
+intable && /^[0-9]+\// { print; fflush(); next }
+intable && /^ *$/ { intable = 0; next }
+/^(WARNING|Warning|QUITTING)/ { print; fflush(); next }
+/./ { keep[nk++ % 20] = $0 }
+END {
+    if (rc != 0) {
+        for (i = (nk > 20 ? nk - 20 : 0); i < nk; i++) print keep[i % 20]
+        print "nmap failed (exit " rc ")"; exit rc
+    }
+    if (n == 0) print "No open ports found"
+    else print "Done: " n " open port(s)"
+}')SH";
+
+// Fast/Full scan script (non-root: nmap falls back to a TCP connect scan, like
+// Bruce's HostInfo). Host details arrive as positional parameters
+// ($1 ip, $2 mac, $3 vendor, $4 tag) - never spliced into the script text;
+// $ip is re-checked to be digits/dots before it is used in a command line.
+//
+// Progress: nmap only emits --stats-every output when stdout is a TTY (a pipe
+// gets nothing, and -oX has no <taskprogress> either), so nmap runs under
+// util-linux script(1) (bsdutils: always present on Debian / Raspberry Pi
+// OS), which gives it a PTY and passes its exit status back (-e). Without it
+// (e.g. a busybox-only system) nmap runs directly and a 15s heartbeat stands
+// in for the percentage (fd 3 is closed for it, so a pending `sleep` never
+// holds the log pipe open after nmap ends). No temp files either way
+// (typescript -> /dev/null).
+// Stop kills the whole process group (ProcessRunner setsid()s): sh, script,
+// awk and the heartbeat die directly; nmap, in script's PTY session, gets
+// SIGHUP when script closes the PTY master.
+std::string nmap_port_scan_script(const std::string& extra) {
+    return std::string(
+               "ip=$1; mac=$2; ven=$3; tag=$4; "
+               "case \"$ip\" in ''|*[!0-9.]*) echo \"invalid host: $ip\"; exit 2;; esac; ") +
+           kNmapMissingSh +
+           "echo 'HOST INFO'; echo \"IP: $ip${tag:+ $tag}\"; "
+           "if [ -n \"$mac\" ]; then echo \"MAC: $mac  Vendor: ${ven:-unknown}\"; "
+           "else echo 'MAC: (not available)'; fi; "
+           "echo 'Scanning ports... wait'; "
+           "A=awk; awk -W version 2>/dev/null | grep -q mawk && A='awk -W interactive'; "
+           "c=\"nmap -Pn -n -v " + extra + " $ip\"; "
+           "{ if script -V 2>/dev/null | grep -q util-linux; then "
+           "SHELL=/bin/sh script -qefc \"$c\" /dev/null </dev/null 2>&3; "
+           "else "
+           "( while sleep 15 </dev/null >/dev/null 2>&1; do echo __tick; done ) 3>&- & hb=$!; "
+           "$c </dev/null 2>&3; r=$?; kill \"$hb\" 2>/dev/null; (exit \"$r\"); "
+           "fi; echo \"__nmap_rc=$?\"; } 3>&2 | $A " +
+           kNmapPortsAwk;
+}
+
+struct NmapHost {
+    std::string ip, mac, vendor, flag; // flag: "gw", "self" or ""
+};
+
+bool valid_ipv4(const std::string& s) {
+    int parts = 0;
+    size_t i = 0;
+    while (i <= s.size()) {
+        size_t j = i;
+        while (j < s.size() && s[j] >= '0' && s[j] <= '9') ++j;
+        if (j == i || j - i > 3 || std::stoi(s.substr(i, j - i)) > 255) return false;
+        ++parts;
+        if (j == s.size()) break;
+        if (s[j] != '.') return false;
+        i = j + 1;
+    }
+    return parts == 4;
+}
+
+bool valid_mac(const std::string& s) {
+    if (s.size() != 17) return false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        if (i % 3 == 2 ? c != ':' : !std::isxdigit(static_cast<unsigned char>(c))) return false;
+    }
+    return true;
+}
+
+// Parse one `hosts` line ("ip\tmac\tvendor\tflag"; a bare IP from older builds
+// also parses). The file is root-written, so every field is validated or
+// sanitized before it reaches a label or argv; invalid IP => rejected.
+bool parse_nmap_host(const std::string& line, NmapHost& out) {
+    std::vector<std::string> f;
+    size_t start = 0;
+    for (;;) {
+        const size_t tab = line.find('\t', start);
+        f.push_back(line.substr(start, tab == std::string::npos ? std::string::npos : tab - start));
+        if (tab == std::string::npos) break;
+        start = tab + 1;
+    }
+    f.resize(4);
+    if (!valid_ipv4(f[0])) return false;
+    out.ip  = f[0];
+    out.mac = valid_mac(f[1]) ? f[1] : "";
+    out.vendor.clear();
+    for (const char c : f[2]) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || std::strchr(" .,&+-/()_", c)) out.vendor += c;
+    }
+    if (out.vendor.size() > 40) out.vendor.resize(40);
+    out.flag = (f[3] == "gw" || f[3] == "self") ? f[3] : "";
+    return true;
+}
+
+std::string serialize_nmap_host(const NmapHost& h) {
+    return h.ip + "\t" + h.mac + "\t" + h.vendor + "\t" + h.flag;
+}
+
+std::vector<NmapHost> read_nmap_hosts(const std::string& dir) {
+    std::vector<NmapHost> out;
+    for (const auto& line : read_lines(dir + "/hosts")) {
+        NmapHost h;
+        if (parse_nmap_host(line, h)) out.push_back(std::move(h));
+    }
+    return out;
+}
+
+// The picked host, or false when nothing (valid) is selected.
+bool read_nmap_selected(const std::string& dir, NmapHost& out) {
+    return parse_nmap_host(read_first_line(dir + "/selected"), out);
+}
+
+std::string nmap_host_tag(const NmapHost& h) {
+    return h.flag == "gw" ? "(GTW)" : (h.flag == "self" ? "(this device)" : "");
+}
+
+// Vendor shortened for the 320px list: whole words up to ~14 chars.
+std::string short_vendor(const std::string& v) {
+    constexpr size_t kMax = 14;
+    if (v.size() <= kMax) return v;
+    const size_t cut = v.rfind(' ', kMax);
+    return v.substr(0, cut == std::string::npos || cut == 0 ? kMax : cut);
+}
+
+std::string nmap_host_label(const NmapHost& h) {
+    std::string s = h.ip;
+    const std::string tag = h.flag == "gw" ? "(GTW)" : (h.flag == "self" ? "(me)" : "");
+    if (!tag.empty()) s += " " + tag;
+    if (!h.vendor.empty()) s += " " + short_vendor(h.vendor);
+    return s;
 }
 
 std::vector<ToolAction> build_nmap_actions() {
@@ -286,26 +534,66 @@ std::vector<ToolAction> build_nmap_actions() {
     };
 
     const std::string dir = nmap_dir();
-    const std::string selected = read_first_line(dir + "/selected");
-
     std::vector<ToolAction> acts;
 
-    if (selected.empty()) {
-        // Step 1: discover hosts on the local subnet.
-        acts.push_back(ToolAction{
-            "1. Scan / refresh hosts",
-            "Ping-sweep the local subnet for live hosts, then go Back and pick one.",
-            {"sh", "-c",
-             "mkdir -p " + dir + "; "
-             "net=$(ip -o -f inet addr show | awk '$2!=\"lo\"{print $4; exit}'); "
-             "if [ -z \"$net\" ]; then echo 'no network (connect Wi-Fi first)'; exit 1; fi; "
-             "echo \"Discovering hosts on $net ...\"; "
-             "rm -f " + dir + "/selected; "
-             "nmap -sn \"$net\" -oG - 2>/dev/null | awk '/Status: Up/{print $2}' | tee " + dir + "/hosts; "
-             "echo; echo 'Done. Go Back, pick a host, then choose Fast or Full.'"}});
+    const std::string problem = ensure_nmap_dir();
+    if (!problem.empty()) {
+        // Never hand an unvetted dir to root-run rows: a single non-root row
+        // that only explains the problem. Strip quotes so the message can be
+        // single-quoted safely.
+        std::string msg = "unsafe nmap state dir " + dir + ": " + problem;
+        msg.erase(std::remove(msg.begin(), msg.end(), '\''), msg.end());
+        ToolAction err;
+        err.label       = "(Nmap unavailable: unsafe state dir)";
+        err.description = own(msg + ". Remove it and re-open Nmap.");
+        err.argv        = {"sh", "-c", "echo '" + msg + "'; exit 1"};
+        acts.push_back(std::move(err));
+        return acts;
+    }
 
-        // Step 2: one navigation row per discovered host (empty argv).
-        const auto hosts = read_lines(dir + "/hosts");
+    NmapHost sel;
+    const bool have_sel = read_nmap_selected(dir, sel);
+    const std::string uid = std::to_string(getuid());
+
+    if (!have_sel) {
+        // Step 1: discover hosts on the local subnet. Runs as root (nmap -sn
+        // uses ARP/ICMP only as root). The app's uid is baked in as $o. The
+        // script never creates the dir (ensure_nmap_dir, run non-root, is the
+        // only creator - a root mkdir could race a planted dir); it re-vets it
+        // (real dir, owner $o, no group/other bits) before writing, and chowns
+        // (-h, never following links) its results back to $o when it runs as
+        // someone else, so the app can read them later.
+        ToolAction a;
+        a.label       = "1. Scan / refresh hosts";
+        a.description = "Ping/ARP-sweep the local subnet (needs root): IP, MAC, vendor, gateway. Then go Back and pick a host.";
+        a.argv        = {"sh", "-c",
+             "d='" + dir + "'; o=" + uid + "; " + std::string(kNmapMissingSh) +
+             "[ -e \"$d\" ] || [ -L \"$d\" ] || "
+             "{ echo 'nmap state dir missing; reopen the Nmap menu'; exit 1; }; "
+             "[ -d \"$d\" ] && [ ! -L \"$d\" ] && [ \"$(stat -c %u \"$d\")\" = \"$o\" ] && "
+             "case \"$(stat -c %a \"$d\")\" in *00) true;; *) false;; esac || "
+             "{ echo \"unsafe nmap state dir $d\"; exit 1; }; "
+             "rm -f \"$d/selected\" \"$d/hosts\" \"$d/scan.nmap\"; " +
+             std::string(kNmapSubnetSh) +
+             "if [ -z \"$net\" ]; then echo 'no network (connect Wi-Fi first)'; exit 1; fi; "
+             "me=${net%/*}; "
+             "gw=$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i==\"via\"){print $(i+1); exit}}'); "
+             "echo \"Discovering hosts on $net${dev:+ ($dev)} ...\"; "
+             "nmap -sn -n \"$net\" -oN \"$d/scan.nmap\" 2>&1; rc=$?; "
+             "{ [ -f \"$d/scan.nmap\" ] && awk -v gw=\"$gw\" -v me=\"$me\" " + std::string(kNmapHostsAwk) +
+             " \"$d/scan.nmap\" | LC_ALL=C sort | cut -f2- > \"$d/hosts.tmp\" && mv -f \"$d/hosts.tmp\" \"$d/hosts\"; } "
+             "|| rm -f \"$d/hosts.tmp\"; "
+             "[ \"$(id -u)\" != \"$o\" ] && chown -h \"$o\" \"$d/hosts\" \"$d/scan.nmap\" 2>/dev/null; "
+             "if [ \"$rc\" -ne 0 ]; then echo \"nmap failed (exit $rc)\"; exit \"$rc\"; fi; "
+             "n=$(grep -c . \"$d/hosts\" 2>/dev/null); echo; "
+             "if [ \"${n:-0}\" -eq 0 ]; then echo 'No hosts found'; else "
+             "echo \"Done: $n host(s) found${gw:+ (gateway $gw)}. Go Back, pick a host, then choose Fast or Full.\"; fi"};
+        a.needs_root  = true;
+        acts.push_back(std::move(a));
+
+        // Step 2: one navigation row per discovered host (empty argv), labelled
+        // like Bruce's ARP scanner list: "192.168.3.1 (GTW) TP-LINK".
+        const auto hosts = read_nmap_hosts(dir);
         if (hosts.empty()) {
             acts.push_back(ToolAction{
                 "(no hosts yet - run Scan above)",
@@ -313,26 +601,35 @@ std::vector<ToolAction> build_nmap_actions() {
                 {"sh", "-c", "echo 'Run Scan / refresh hosts first.'"}});
         } else {
             for (const auto& h : hosts) {
+                std::string desc = "Pick " + h.ip;
+                if (!h.mac.empty()) desc += " (" + h.mac + (h.vendor.empty() ? "" : ", " + h.vendor) + ")";
                 acts.push_back(ToolAction{
-                    own("Host " + h + "  >  choose scan"),
-                    "Select this host, then pick Fast or Full port scan.",
+                    own(nmap_host_label(h)),
+                    own(desc + ", then choose Fast or Full port scan."),
                     {}}); // empty argv => navigation row
             }
         }
     } else {
         // Step 3: a host is selected - offer Fast / Full, plus a way back.
+        // Both run non-root (TCP connect scan, no password prompt on store
+        // installs without the sudoers rule) and print a HOST INFO block.
         acts.push_back(ToolAction{
             "< Back to host list",
             "Clear the selected host and choose another.",
             {}}); // navigation row
-        acts.push_back(ToolAction{
-            own("Fast scan " + selected + "  (top 100 ports)"),
-            "nmap -F -T4: quick scan of the most common ports.",
-            {"nmap", "-F", "-T4", selected}});
-        acts.push_back(ToolAction{
-            own("Full scan " + selected + "  (all 65535 ports)"),
-            "nmap -p- -T4: every TCP port - thorough but slower.",
-            {"nmap", "-p-", "-T4", selected}});
+        const std::string tag = nmap_host_tag(sel);
+        ToolAction fast;
+        fast.label       = own("Fast scan " + sel.ip + "  (top 100 ports)");
+        fast.description = "nmap -Pn -F -T4 (TCP connect, no root): the most common ports, shown as they are found.";
+        fast.argv        = {"sh", "-c", nmap_port_scan_script("-F -T4"),
+                            "nmap-fast", sel.ip, sel.mac, sel.vendor, tag};
+        acts.push_back(std::move(fast));
+        ToolAction full;
+        full.label       = own("Full scan " + sel.ip + "  (all 65535 ports)");
+        full.description = "nmap -Pn -p- -T4 (TCP connect, no root): every TCP port - slower; progress every 15s.";
+        full.argv        = {"sh", "-c", nmap_port_scan_script("-p- -T4 --stats-every 15s"),
+                            "nmap-full", sel.ip, sel.mac, sel.vendor, tag};
+        acts.push_back(std::move(full));
     }
 
     return acts;
@@ -378,11 +675,13 @@ std::vector<ToolAction> build_wifi_static_actions() {
         {"Scan LAN hosts (arp-scan)", "arp-scan --localnet",
          {"sh", "-c", "arp-scan --localnet 2>&1 || echo 'needs arp-scan (apt install arp-scan)'"},
          true, false, false, true},
-        {"Scan LAN hosts (nmap)", "nmap -sn <subnet>",
+        {"Scan LAN hosts (nmap)", "nmap -sn <subnet> (needs root)",
          {"sh", "-c",
-          "nmap -sn \"$(ip -o -f inet addr show wlan0 | awk '{print $4}')\" 2>&1 || "
-          "echo 'needs nmap; is wlan0 connected?'"},
-         false, false, false, true},
+          std::string(kNmapMissingSh) + kNmapSubnetSh +
+          "if [ -z \"$net\" ]; then echo 'no network (connect Wi-Fi first)'; exit 1; fi; "
+          "echo \"Scanning $net${dev:+ ($dev)} ...\"; "
+          "nmap -sn -n \"$net\" 2>&1"},
+         true, false, false, true},
 
         // --- monitor mode (prerequisite for the attacks below) ---
         // airmon-ng frequently produces no wlan0mon on this Wi-Fi chip, so fall
@@ -671,12 +970,12 @@ std::vector<ToolAction> build_system_clock_actions() {
           "echo; echo 'Time up!'"}},
         {"Uptime + load", "uptime", {"uptime"}},
         {"Install optional tools (apt)",
-         "apt-get install the Suggests set (aircrack-ng, mdk4, hostapd, "
-         "arp-scan, dnsmasq, ...). Passwordless via the installed sudoers rule.",
+         "apt-get install nmap + the Suggests set (aircrack-ng, mdk4, hostapd, arp-scan, "
+         "dnsmasq, ...). Needs root: passwordless with the sudoers rule, else asks for the sudo password.",
          {"sh", "-c",
           "export DEBIAN_FRONTEND=noninteractive; "
           "apt-get update 2>&1; "
-          "apt-get install -y aircrack-ng mdk4 hostapd arp-scan dnsmasq "
+          "apt-get install -y nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq "
           "v4l-utils lirc alsa-utils dsniff 2>&1; echo; echo 'done.'"},
          true},
         {"QR code (this device URL)", "qrencode -t UTF8",
@@ -1057,6 +1356,8 @@ const std::vector<ToolCategory>& tool_catalog() {
     return mutable_catalog();
 }
 
+std::string nmap_state_dir() { return nmap_dir(); }
+
 void refresh_dynamic_categories(int category_index) {
     auto& catalog = mutable_catalog();
     for (size_t i = 0; i < catalog.size(); ++i) {
@@ -1093,18 +1394,26 @@ void on_navigation_action(int category_index, int item_index) {
 
     if (label == "Nmap") {
         // Mirror build_nmap_actions()'s row layout to map the tapped row to an action.
+        if (!ensure_nmap_dir().empty()) {
+            return; // unsafe dir: don't read or write state there
+        }
         const std::string dir = nmap_dir();
-        const std::string selected = read_first_line(dir + "/selected");
-        if (selected.empty()) {
+        NmapHost sel;
+        if (!read_nmap_selected(dir, sel)) {
             // Row 0 is "Scan" (runnable); rows >= 1 are discovered hosts.
-            const auto hosts = read_lines(dir + "/hosts");
+            const auto hosts = read_nmap_hosts(dir);
             const int host = item_index - 1;
             if (host >= 0 && host < static_cast<int>(hosts.size())) {
-                write_file(dir + "/selected", hosts[static_cast<size_t>(host)]);
+                if (!write_file(dir + "/selected", serialize_nmap_host(hosts[static_cast<size_t>(host)]))) {
+                    std::fprintf(stderr, "nmap: cannot write %s/selected\n", dir.c_str());
+                }
             }
         } else if (item_index == 0) {
             // Row 0 is "Back to host list".
-            std::remove((dir + "/selected").c_str());
+            const std::string sel = dir + "/selected";
+            if (std::remove(sel.c_str()) != 0 && errno != ENOENT) {
+                std::fprintf(stderr, "nmap: cannot remove %s: %s\n", sel.c_str(), std::strerror(errno));
+            }
         }
         return;
     }
@@ -1146,6 +1455,44 @@ void on_navigation_action(int category_index, int item_index) {
         }
         return;
     }
+}
+
+bool on_category_back(int category_index) {
+    const auto& catalog = mutable_catalog();
+    if (category_index < 0 || category_index >= static_cast<int>(catalog.size())) {
+        return false;
+    }
+    const std::string label = catalog[static_cast<size_t>(category_index)].label;
+    // Each case does exactly what that category's "< Back ..." row does.
+    auto clear_selected = [](const std::string& dir) {
+        const std::string sel = dir + "/selected";
+        if (std::remove(sel.c_str()) != 0 && errno != ENOENT) {
+            std::fprintf(stderr, "cannot remove %s: %s\n", sel.c_str(), std::strerror(errno));
+        }
+    };
+    if (label == "Nmap") {
+        NmapHost sel;
+        if (!ensure_nmap_dir().empty() || !read_nmap_selected(nmap_dir(), sel)) {
+            return false; // host list (or unusable dir): leave the category
+        }
+        clear_selected(nmap_dir());
+        return true;
+    }
+    if (label == "Wi-Fi") {
+        if (read_first_line(portal_dir() + "/selected").empty()) {
+            return false;
+        }
+        clear_selected(portal_dir());
+        return true;
+    }
+    if (label == "System / Clock") {
+        if (!tz_picker_open()) {
+            return false;
+        }
+        tz_picker_open() = false;
+        return true;
+    }
+    return false;
 }
 
 namespace {
