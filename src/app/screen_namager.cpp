@@ -7,6 +7,7 @@
 #include "screen_manager.h"
 
 #include "about_screen.h"
+#include "ble_scan_screen.h"
 #include "clock_screen.h"
 #include "menu_screen.h"
 #include "rf_screen.h"
@@ -88,6 +89,9 @@ void ScreenManager::flush_requested_refresh() {
             break;
         case model::AppPage::WifiScan:
             load_screen(std::make_unique<screen::WifiScanScreen>(view_model_, assets_));
+            break;
+        case model::AppPage::BleScan:
+            load_screen(std::make_unique<screen::BleScanScreen>(view_model_, assets_));
             break;
         case model::AppPage::Menu:
         default:
