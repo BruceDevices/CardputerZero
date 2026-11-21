@@ -1457,6 +1457,44 @@ void on_navigation_action(int category_index, int item_index) {
     }
 }
 
+bool on_category_back(int category_index) {
+    const auto& catalog = mutable_catalog();
+    if (category_index < 0 || category_index >= static_cast<int>(catalog.size())) {
+        return false;
+    }
+    const std::string label = catalog[static_cast<size_t>(category_index)].label;
+    // Each case does exactly what that category's "< Back ..." row does.
+    auto clear_selected = [](const std::string& dir) {
+        const std::string sel = dir + "/selected";
+        if (std::remove(sel.c_str()) != 0 && errno != ENOENT) {
+            std::fprintf(stderr, "cannot remove %s: %s\n", sel.c_str(), std::strerror(errno));
+        }
+    };
+    if (label == "Nmap") {
+        NmapHost sel;
+        if (!ensure_nmap_dir().empty() || !read_nmap_selected(nmap_dir(), sel)) {
+            return false; // host list (or unusable dir): leave the category
+        }
+        clear_selected(nmap_dir());
+        return true;
+    }
+    if (label == "Wi-Fi") {
+        if (read_first_line(portal_dir() + "/selected").empty()) {
+            return false;
+        }
+        clear_selected(portal_dir());
+        return true;
+    }
+    if (label == "System / Clock") {
+        if (!tz_picker_open()) {
+            return false;
+        }
+        tz_picker_open() = false;
+        return true;
+    }
+    return false;
+}
+
 namespace {
 
 // Shared sudo escalation for a non-root app: `sudo <flags> <command>`, where

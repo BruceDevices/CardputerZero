@@ -673,6 +673,46 @@ int main() {
         assert(c.actions[2].argv.empty());
     }
 
+    // --- Back key (model::on_category_back): host view -> host list, like
+    //     the "< Back to host list" row; on the host list it leaves Nmap ---
+    assert(!model::on_category_back(nmap_idx));      // host list: nothing to undo
+    model::on_navigation_action(nmap_idx, 1);        // pick a host
+    assert(nmap_category().actions.size() == 3);     // Back + Fast + Full
+    assert(model::on_category_back(nmap_idx));
+    {
+        struct stat st {};
+        assert(stat((dir + "/selected").c_str(), &st) != 0);
+        assert(nmap_category().actions.size() == 1 + 3);
+    }
+    assert(!model::on_category_back(nmap_idx));
+    assert(!model::on_category_back(-1) && !model::on_category_back(9999));
+
+    // --- the System / Clock timezone picker closes on Back the same way ---
+    {
+        int sys_idx = -1;
+        const auto& cat = model::tool_catalog();
+        for (size_t i = 0; i < cat.size(); ++i) {
+            if (std::string(cat[i].label) == "System / Clock") sys_idx = (int)i;
+        }
+        assert(sys_idx >= 0);
+        auto sys_rows = [&] {
+            model::refresh_dynamic_categories();
+            return model::tool_catalog()[static_cast<size_t>(sys_idx)].actions;
+        };
+        const auto base = sys_rows();
+        int tz_row = -1;
+        for (size_t i = 0; i < base.size(); ++i) {
+            if (std::string(base[i].label).rfind("Set timezone", 0) == 0) tz_row = (int)i;
+        }
+        assert(tz_row >= 0);
+        assert(!model::on_category_back(sys_idx));
+        model::on_navigation_action(sys_idx, tz_row);
+        assert(sys_rows().size() != base.size());    // picker open
+        assert(model::on_category_back(sys_idx));
+        assert(sys_rows().size() == base.size());    // utilities again
+        assert(!model::on_category_back(sys_idx));
+    }
+
     // --- a corrupt `selected` is ignored (host list shown again) ---
     { std::ofstream o(dir + "/selected"); o << "999.1.1.1\n"; }
     assert(nmap_category().actions.size() == 1 + 3);

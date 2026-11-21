@@ -103,6 +103,14 @@ std::string rf_recordings_dir();
 // Safe no-op for categories/items that are not navigation rows.
 void on_navigation_action(int category_index, int item_index);
 
+// Back key (nav slot 0 / key 4 / ESC) pressed on a category's tool list.
+// Data-driven categories with an in-place drill-down undo one level here,
+// like Bruce's ESC in a sub-menu: Nmap host view -> host list, Wi-Fi Evil
+// Portal clone view -> AP list, System / Clock timezone picker -> utilities.
+// Returns true if it changed state (the screen should rebuild the same
+// category), false if there is nothing to undo (leave the category as usual).
+bool on_category_back(int category_index);
+
 // The command a screen should actually spawn for `action`. Normally this is
 // just `action.argv`, but root-needing rows must run as root while the app is
 // launched non-root by APPLaunch. Those are wrapped in `sudo -n` re-invoking
