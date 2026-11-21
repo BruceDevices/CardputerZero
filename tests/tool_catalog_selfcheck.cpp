@@ -69,6 +69,19 @@ int main() {
         assert(!action.argv.empty()); // harmless fallback print, never launched by MenuScreen
     }
 
+    // BLE Scan opens the dedicated firmware-style list/detail screen, and its
+    // fallback argv is the shell scan script (the screen builds its own 5s
+    // bluetoothctl command, but the row must still be a runnable root row).
+    for (const auto& category : catalog) {
+        if (std::string(category.label) != "Bluetooth LE") continue;
+        assert(!category.actions.empty());
+        assert(category.actions[0].ble_scan_view);
+        assert(category.actions[0].needs_root);
+        assert(category.actions[0].argv.size() == 3);
+        assert(category.actions[0].argv[0] == "sh");
+        assert(category.actions[0].argv[1] == "-c");
+    }
+
     // Terminal command routing (what TerminalScreen spawns). User commands -
     // and root commands when the app itself is root - run as plain `sh -c`.
     // Root commands for a non-root app ride the sudoers-authorized binary's

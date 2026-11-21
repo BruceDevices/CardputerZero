@@ -201,6 +201,11 @@ auto-installed on first run if missing), plus
 **Theme** and **About**. Add or edit tools by editing one file —
 `src/model/tool_catalog.cpp` — then rebuild.
 
+**Bluetooth LE → BLE Scan** opens a firmware-style 5-second scan: a selectable
+device list (name, or address when the device is unnamed) and an information
+view with Name / Adresse / Signal, matching the Bruce firmware's `ble_scan()`.
+RSSI is shown in the information view, not in the list.
+
 **Terminal** (the "execute root commands" entry point): pick **Terminal (user)**
 or **Root terminal (sudo)**, press `8` (Type), and type a command — Enter runs
 it, Up/Down recall history, ESC leaves the input, `4`/ESC goes back. Every

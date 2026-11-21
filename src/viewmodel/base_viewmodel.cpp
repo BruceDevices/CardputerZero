@@ -112,6 +112,13 @@ void BaseViewModel::show_wifi_scan(int category_index, int item_index) {
     publish_all();
 }
 
+void BaseViewModel::show_ble_scan(int category_index, int item_index) {
+    model_.set_current_page(model::AppPage::BleScan);
+    model_.set_active_category(category_index);
+    model_.set_active_item(item_index);
+    publish_all();
+}
+
 void BaseViewModel::show_about() {
     model_.set_current_page(model::AppPage::About);
     publish_all();
@@ -124,6 +131,7 @@ void BaseViewModel::go_back() {
         case model::AppPage::Terminal:
         case model::AppPage::Rf:
         case model::AppPage::WifiScan:
+        case model::AppPage::BleScan:
             show_menu(model_.active_category());
             break;
         case model::AppPage::About:

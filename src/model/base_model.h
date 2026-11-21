@@ -16,6 +16,7 @@ enum class AppPage {
     Terminal = 4,
     Rf       = 5,
     WifiScan = 6,
+    BleScan  = 7,
 };
 
 class BaseModel {
