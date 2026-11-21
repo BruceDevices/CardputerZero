@@ -16,6 +16,8 @@ Icons are the real Phosphor-Fill codepoints from ui_const.h, rendered through
 the bundled assets/fonts/Phosphor-Fill.ttf.
 """
 
+import os
+
 import theme
 
 # ── Phosphor-Fill glyph codepoints (ui_const.h :: icon::) ──────────────────
@@ -41,7 +43,7 @@ class Item:
 
 class Action:
     def __init__(self, label, desc, argv, sim, needs_root=False, nav=False,
-                 items=None, view=None):
+                 items=None, view=None, sim_only=False):
         self.label = label
         self.desc = desc
         self.argv = argv          # real command (unused in sim unless --real)
@@ -54,6 +56,9 @@ class Action:
         # A dedicated full-screen widget to show instead of the tool log,
         # e.g. "clock" draws a themed clock face. None = normal run log.
         self.view = view
+        # Always stream `sim`, even with --real (see ProcessRunner.start): for
+        # rows whose real command only makes sense with device-side state.
+        self.sim_only = sim_only
 
 
 class Category:
@@ -63,6 +68,132 @@ class Category:
         self.icon = icon
         self.actions = list(actions)
         self.info_only = info_only
+
+
+# ── Nmap shell commands, mirrored verbatim from src/model/tool_catalog.cpp ──
+# (kNmapMissingSh, kNmapSubnetSh, kNmapHostsAwk, kNmapPortsAwk,
+# build_nmap_actions, Wi-Fi "Scan LAN hosts (nmap)") so --real mode never
+# spawns a half-formed command. The guided Nmap rows are sim_only: the
+# discovery script needs the per-uid state dir that only the C++ app creates,
+# and Fast/Full target the canned host 192.168.1.1, so running them for real on
+# a desktop could only fail or scan the wrong host. (The discovery row also
+# gets the _HOSTS drill-down below, so selecting it opens that list.)
+_NMAP_UID = os.getuid() if hasattr(os, "getuid") else 0
+_NMAP_DIR = f"/tmp/bruce-nmap-{_NMAP_UID}"
+_NMAP_MISSING = ("command -v nmap >/dev/null 2>&1 || { echo 'nmap is not installed - run System / Clock > "
+                 "\"Install optional tools (apt)\" or: sudo apt install nmap'; exit 127; }; ")
+_NMAP_SUBNET_SH = (
+    "dev=$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i==\"dev\"){print $(i+1); exit}}'); "
+    "net=$(ip -o -f inet addr show ${dev:+dev \"$dev\"} 2>/dev/null | awk '$2!=\"lo\"{print $4; exit}'); "
+    "[ -z \"$net\" ] && net=$(ip -o -f inet addr show 2>/dev/null | awk '$2!=\"lo\" && $2!~/^(docker|veth|br-|virbr)/{print $4; exit}'); "
+    "case \"${net#*/}\" in [0-9]|1[0-9]|2[0-3]) net=\"${net%/*}/24\";; esac; ")
+_NMAP_NO_NET = "if [ -z \"$net\" ]; then echo 'no network (connect Wi-Fi first)'; exit 1; fi; "
+_NMAP_HOSTS_AWK = r"""'
+function flush_host(  f, q, k) {
+    if (ip == "") return
+    f = (ip == gw) ? "gw" : ((ip == me) ? "self" : "")
+    split(ip, q, ".")
+    k = sprintf("%d%03d%03d%03d%03d", (f == "gw") ? 0 : 1, q[1], q[2], q[3], q[4])
+    printf "%s\t%s\t%s\t%s\t%s\n", k, ip, mac, ven, f
+    ip = ""
+}
+/^Nmap scan report for / { flush_host(); ip = $NF; gsub(/[()]/, "", ip); mac = ""; ven = ""; next }
+/^MAC Address: / {
+    mac = $3; ven = $0
+    sub(/^[^(]*\(/, "", ven); sub(/\) *$/, "", ven)
+    if (ven == "Unknown") ven = ""
+}
+END { flush_host() }'"""
+_NMAP_PORTS_AWK = r"""'
+{ sub(/\r$/, "") }
+/^__nmap_rc=/ { rc = substr($0, 11) + 0; next }
+/^__tick$/ { t += 15; print "still scanning... " t "s elapsed"; fflush(); next }
+/^Discovered open port / {
+    p = $4
+    if (!(p in seen)) { seen[p] = 1; n++; print "+ " p " open"; fflush() }
+    next
+}
+/Timing: About [0-9.]+% done/ {
+    s = $0; sub(/.*About /, "", s); sub(/% done.*/, "", s)
+    e = ""
+    if (match($0, /\([0-9:]+ remaining\)/)) e = " (" substr($0, RSTART + 1, RLENGTH - 12) " left)"
+    print "progress " int(s) "%" e; fflush(); next
+}
+/^PORT +STATE +SERVICE/ { intable = 1; print; fflush(); next }
+intable && /^[0-9]+\// { print; fflush(); next }
+intable && /^ *$/ { intable = 0; next }
+/^(WARNING|Warning|QUITTING)/ { print; fflush(); next }
+/./ { keep[nk++ % 20] = $0 }
+END {
+    if (rc != 0) {
+        for (i = (nk > 20 ? nk - 20 : 0); i < nk; i++) print keep[i % 20]
+        print "nmap failed (exit " rc ")"; exit rc
+    }
+    if (n == 0) print "No open ports found"
+    else print "Done: " n " open port(s)"
+}'"""
+_NMAP_DISCOVER_SH = (
+    f"d='{_NMAP_DIR}'; o={_NMAP_UID}; " + _NMAP_MISSING +
+    "[ -e \"$d\" ] || [ -L \"$d\" ] || { echo 'nmap state dir missing; reopen the Nmap menu'; exit 1; }; "
+    "[ -d \"$d\" ] && [ ! -L \"$d\" ] && [ \"$(stat -c %u \"$d\")\" = \"$o\" ] && "
+    "case \"$(stat -c %a \"$d\")\" in *00) true;; *) false;; esac || "
+    "{ echo \"unsafe nmap state dir $d\"; exit 1; }; "
+    "rm -f \"$d/selected\" \"$d/hosts\" \"$d/scan.nmap\"; " + _NMAP_SUBNET_SH + _NMAP_NO_NET +
+    "me=${net%/*}; "
+    "gw=$(ip -o route show default 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i==\"via\"){print $(i+1); exit}}'); "
+    "echo \"Discovering hosts on $net${dev:+ ($dev)} ...\"; "
+    "nmap -sn -n \"$net\" -oN \"$d/scan.nmap\" 2>&1; rc=$?; "
+    "{ [ -f \"$d/scan.nmap\" ] && awk -v gw=\"$gw\" -v me=\"$me\" " + _NMAP_HOSTS_AWK +
+    " \"$d/scan.nmap\" | LC_ALL=C sort | cut -f2- > \"$d/hosts.tmp\" && mv -f \"$d/hosts.tmp\" \"$d/hosts\"; } "
+    "|| rm -f \"$d/hosts.tmp\"; "
+    "[ \"$(id -u)\" != \"$o\" ] && chown -h \"$o\" \"$d/hosts\" \"$d/scan.nmap\" 2>/dev/null; "
+    "if [ \"$rc\" -ne 0 ]; then echo \"nmap failed (exit $rc)\"; exit \"$rc\"; fi; "
+    "n=$(grep -c . \"$d/hosts\" 2>/dev/null); echo; "
+    "if [ \"${n:-0}\" -eq 0 ]; then echo 'No hosts found'; else "
+    "echo \"Done: $n host(s) found${gw:+ (gateway $gw)}. Go Back, pick a host, then choose Fast or Full.\"; fi")
+_NMAP_LAN_SH = (_NMAP_MISSING + _NMAP_SUBNET_SH + _NMAP_NO_NET +
+                "echo \"Scanning $net${dev:+ ($dev)} ...\"; nmap -sn -n \"$net\" 2>&1")
+
+
+def _nmap_port_scan_sh(extra):
+    """nmap_port_scan_script(): HOST INFO block + streamed open ports.
+    Host details are positional args ($1 ip, $2 mac, $3 vendor, $4 tag).
+    nmap runs under util-linux script(1) so --stats-every progress (TTY-only in
+    nmap) still reaches the log; without it a 15s heartbeat stands in."""
+    return ("ip=$1; mac=$2; ven=$3; tag=$4; "
+            "case \"$ip\" in ''|*[!0-9.]*) echo \"invalid host: $ip\"; exit 2;; esac; " + _NMAP_MISSING +
+            "echo 'HOST INFO'; echo \"IP: $ip${tag:+ $tag}\"; "
+            "if [ -n \"$mac\" ]; then echo \"MAC: $mac  Vendor: ${ven:-unknown}\"; "
+            "else echo 'MAC: (not available)'; fi; "
+            "echo 'Scanning ports... wait'; "
+            "A=awk; awk -W version 2>/dev/null | grep -q mawk && A='awk -W interactive'; "
+            "c=\"nmap -Pn -n -v " + extra + " $ip\"; "
+            "{ if script -V 2>/dev/null | grep -q util-linux; then "
+            "SHELL=/bin/sh script -qefc \"$c\" /dev/null </dev/null 2>&3; "
+            "else "
+            "( while sleep 15 </dev/null >/dev/null 2>&1; do echo __tick; done ) 3>&- & hb=$!; "
+            "$c </dev/null 2>&3; r=$?; kill \"$hb\" 2>/dev/null; (exit \"$r\"); "
+            "fi; echo \"__nmap_rc=$?\"; } 3>&2 | $A " +
+            _NMAP_PORTS_AWK)
+
+
+def _host_info(ip, tag, mac, vendor, ports, progress=False):
+    """Canned Fast/Full output in the device's HOST INFO format."""
+    lines = ["HOST INFO", f"IP: {ip}" + (f" {tag}" if tag else ""),
+             f"MAC: {mac}  Vendor: {vendor}" if mac else "MAC: (not available)",
+             "Scanning ports... wait"]
+    for i, (port, _svc) in enumerate(ports):
+        lines.append(f"+ {port} open")
+        if progress and i == 1:
+            lines.append("progress 42% (0:01:10 left)")
+    if ports:
+        w = max(len(p) for p, _ in ports) + 1
+        lines.append("PORT".ljust(w) + "STATE SERVICE")
+        lines += [p.ljust(w) + "open  " + svc for p, svc in ports]
+        lines.append(f"Done: {len(ports)} open port(s)")
+    else:
+        lines.append("No open ports found")
+    return lines
 
 
 def _ok(*lines):
@@ -109,10 +240,12 @@ CATALOG = [
                _ok("192.168.1.1    3c:84:6a:aa:bb:cc   TP-LINK",
                    "192.168.1.42   b8:27:eb:00:11:22   Raspberry Pi",
                    "2 hosts scanned."), needs_root=True),
-        Action("Scan LAN hosts (nmap)", "nmap -sn <subnet>", ["sh", "-c", "nmap -sn ..."],
-               _ok("Nmap scan report for 192.168.1.1", "Host is up (0.0021s latency).",
+        Action("Scan LAN hosts (nmap)", "nmap -sn <subnet> (needs root)",
+               ["sh", "-c", _NMAP_LAN_SH],
+               _ok("Scanning 192.168.1.0/24 (wlan0) ...",
+                   "Nmap scan report for 192.168.1.1", "Host is up (0.0021s latency).",
                    "Nmap scan report for 192.168.1.42", "Host is up.",
-                   "Nmap done: 256 IP addresses (2 hosts up)")),
+                   "Nmap done: 256 IP addresses (2 hosts up)"), needs_root=True),
         Action("Monitor mode ON (airmon-ng)", "airmon-ng; fallback: manual mon0 VIF",
                ["sh", "-c", "airmon-ng start wlan0 ..."],
                _ok("Killing interfering processes...",
@@ -264,16 +397,30 @@ CATALOG = [
 
     # ── Nmap (guided flow, flattened for the sim) ─────────────────────────────
     Category("Nmap", "Guided scan: discover hosts, pick one, then Fast or Full port scan", IC["scan"], [
-        Action("1. Scan / refresh hosts", "ping-sweep the local subnet for live hosts",
-               ["sh", "-c", "nmap -sn $net -oG -"],
-               _ok("Discovering hosts on 192.168.1.0/24 ...", "192.168.1.1", "192.168.1.42",
-                   "Done. Pick a host, then Fast or Full.")),
-        Action("Fast scan 192.168.1.1 (top 100)", "nmap -F -T4", ["nmap", "-F", "-T4", "192.168.1.1"],
-               _ok("PORT    STATE SERVICE", "22/tcp  open  ssh", "80/tcp  open  http",
-                   "443/tcp open  https", "Nmap done: 1 host up")),
-        Action("Full scan 192.168.1.1 (all 65535)", "nmap -p- -T4", ["nmap", "-p-", "-T4", "192.168.1.1"],
-               _ok("PORT     STATE SERVICE", "22/tcp   open  ssh", "80/tcp   open  http",
-                   "443/tcp  open  https", "8080/tcp open  http-proxy", "Nmap done: 1 host up")),
+        Action("1. Scan / refresh hosts",
+               "Ping/ARP-sweep the local subnet (needs root): IP, MAC, vendor, gateway. Then go Back and pick a host.",
+               ["sh", "-c", _NMAP_DISCOVER_SH],
+               _ok("Discovering hosts on 192.168.1.0/24 (wlan0) ...",
+                   "Nmap scan report for 192.168.1.1", "Host is up (0.0020s latency).",
+                   "MAC Address: 3C:84:6A:AA:BB:CC (TP-LINK Technologies)",
+                   "Nmap done: 256 IP addresses (4 hosts up) scanned in 3.10 seconds", "",
+                   "Done: 4 host(s) found (gateway 192.168.1.1). Go Back, pick a host, then choose Fast or Full."),
+               needs_root=True, sim_only=True),
+        Action("Fast scan 192.168.1.1  (top 100 ports)",
+               "nmap -Pn -F -T4 (TCP connect, no root): the most common ports, shown as they are found.",
+               ["sh", "-c", _nmap_port_scan_sh("-F -T4"),
+                "nmap-fast", "192.168.1.1", "3C:84:6A:AA:BB:CC", "TP-LINK Technologies", "(GTW)"],
+               _ok(*_host_info("192.168.1.1", "(GTW)", "3C:84:6A:AA:BB:CC", "TP-LINK Technologies",
+                               [("22/tcp", "ssh"), ("80/tcp", "http"), ("443/tcp", "https")])),
+               sim_only=True),
+        Action("Full scan 192.168.1.1  (all 65535 ports)",
+               "nmap -Pn -p- -T4 (TCP connect, no root): every TCP port - slower; progress every 15s.",
+               ["sh", "-c", _nmap_port_scan_sh("-p- -T4 --stats-every 15s"),
+                "nmap-full", "192.168.1.1", "3C:84:6A:AA:BB:CC", "TP-LINK Technologies", "(GTW)"],
+               _ok(*_host_info("192.168.1.1", "(GTW)", "3C:84:6A:AA:BB:CC", "TP-LINK Technologies",
+                               [("22/tcp", "ssh"), ("80/tcp", "http"), ("443/tcp", "https"),
+                                ("8080/tcp", "http-proxy")], progress=True)),
+               sim_only=True),
     ]),
 
     # ── SMB Client ────────────────────────────────────────────────────────────
@@ -421,13 +568,14 @@ CATALOG = [
         Action("Uptime + load", "uptime", ["uptime"],
                _ok(" 14:32:07 up 2 days,  3:11,  load average: 0.08, 0.12, 0.10")),
         Action("Install optional tools (apt)",
-               "apt-get the Suggests set — passwordless via the package's sudoers rule",
-               ["sh", "-c", "apt-get install -y aircrack-ng mdk4 hostapd arp-scan dnsmasq ..."],
-               _ok("[sim] on the device this runs 'sudo -n ... --root-sh apt-get install -y ...'",
-                   "[sim] no password prompt (sudoers rule installed by the .deb postinst)",
+               "apt-get install nmap + the Suggests set (aircrack-ng, mdk4, hostapd, arp-scan, "
+               "dnsmasq, ...). Needs root: passwordless with the sudoers rule, else asks for the sudo password.",
+               ["sh", "-c", "apt-get install -y nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq ..."],
+               _ok("[sim] on the device this runs via sudo ... --root-sh apt-get install -y ...",
+                   "[sim] passwordless with the sudoers rule (deploy.sh); store installs ask for the sudo password",
                    "Reading package lists... Done",
                    "The following NEW packages will be installed:",
-                   "  aircrack-ng mdk4 hostapd arp-scan dnsmasq",
+                   "  nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq",
                    "Setting up aircrack-ng ... done.", "done."), needs_root=True),
         Action("QR code (this device URL)", "qrencode -t UTF8", ["sh", "-c", "qrencode -t UTF8 http://ip:8080"],
                _ok("█████████████████████", "████ ▄▄▄▄▄ █▀ █ ████", "████ █   █ █▀▀▀█ ████",
@@ -503,22 +651,37 @@ _BLE = [
 ]
 
 
-def _host_item(ip, mac, vendor):
-    base = [f"Host   : {ip}", f"MAC    : {mac}", f"Vendor : {vendor}"]
-    return Item(ip, children=[
+def _short_vendor(v, limit=14):
+    """short_vendor() in tool_catalog.cpp: whole words up to ~14 chars."""
+    if len(v) <= limit:
+        return v
+    cut = v.rfind(" ", 0, limit + 1)
+    return v[:limit] if cut <= 0 else v[:cut]
+
+
+def _host_item(ip, mac, vendor, tag=""):
+    """One host row, labelled like the device ("192.168.1.1 (GTW) TP-LINK"),
+    drilling into the device's HOST INFO style Fast/Full output."""
+    short = {"(GTW)": "(GTW)", "(this device)": "(me)"}.get(tag, "")
+    label = " ".join(x for x in (ip, short, _short_vendor(vendor)) if x)
+    base = [f"Host   : {ip}", f"MAC    : {mac or '(not available)'}", f"Vendor : {vendor or 'unknown'}"]
+    return Item(label, children=[
         Item("Show details", base),
-        Item("Fast scan (top 100)", _ok(f"nmap -F {ip}", "PORT    STATE SERVICE",
-             "22/tcp  open  ssh", "80/tcp  open  http", "443/tcp open  https")),
-        Item("Full scan (all ports)", _ok(f"nmap -p- {ip}", "22/tcp   open ssh",
-             "80/tcp   open http", "443/tcp  open https", "8080/tcp open http-proxy")),
+        Item("Fast scan (top 100)", _host_info(ip, tag, mac, vendor,
+             [("22/tcp", "ssh"), ("80/tcp", "http"), ("443/tcp", "https")])),
+        Item("Full scan (all ports)", _host_info(ip, tag, mac, vendor,
+             [("22/tcp", "ssh"), ("80/tcp", "http"), ("443/tcp", "https"), ("8080/tcp", "http-proxy")],
+             progress=True)),
         Item("Ping x4", _ok(f"64 bytes from {ip}: icmp_seq=0 time=1.9 ms",
              f"64 bytes from {ip}: icmp_seq=1 time=2.1 ms", "0% packet loss")),
     ])
 
 
-_HOSTS = [_host_item("192.168.1.1", "3c:84:6a:aa:bb:cc", "TP-LINK"),
-          _host_item("192.168.1.42", "b8:27:eb:00:11:22", "Raspberry Pi"),
-          _host_item("192.168.1.77", "a4:5e:60:de:ad:be", "Apple")]
+# Gateway first, then numeric IP order - the same order the device's hosts file uses.
+_HOSTS = [_host_item("192.168.1.1", "3C:84:6A:AA:BB:CC", "TP-LINK Technologies", "(GTW)"),
+          _host_item("192.168.1.7", "", "", "(this device)"),
+          _host_item("192.168.1.42", "B8:27:EB:00:11:22", "Raspberry Pi Trading"),
+          _host_item("192.168.1.77", "A4:5E:60:DE:AD:BE", "Apple")]
 
 
 def _share_item(name, kind, comment):

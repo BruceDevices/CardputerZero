@@ -88,6 +88,10 @@ const std::vector<ToolCategory>& tool_catalog();
 // pass -1 to refresh all purely data-driven categories without probing hardware.
 void refresh_dynamic_categories(int category_index = -1);
 
+// Per-user state dir of the Nmap guided flow (/tmp/bruce-nmap-<uid>), holding
+// `hosts` (discovered IPs) and `selected` (the picked host).
+std::string nmap_state_dir();
+
 // Rebuild the native CC1101 rows plus the saved-RAW replay list. The view owns
 // hardware probing and passes the resulting availability/pins into the model.
 void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio);
