@@ -198,6 +198,24 @@ int main() {
             if (label.rfind("Raw NMEA", 0) == 0) raw = &action;
         }
         assert(fix && raw);
+
+        // Bruce firmware's "GPS Tracker" opens GpsAppScreen (in-app serial
+        // reader); it comes after Wardriving, as in the firmware's GPS menu.
+        size_t wardrive_index = gps->actions.size(), tracker_index = gps->actions.size();
+        for (size_t i = 0; i < gps->actions.size(); ++i) {
+            const std::string label(gps->actions[i].label);
+            if (label.rfind("Wardriving", 0) == 0) wardrive_index = i;
+            if (label == "GPS Tracker") tracker_index = i;
+        }
+        assert(tracker_index < gps->actions.size() && wardrive_index < tracker_index);
+        const model::ToolAction& tracker = gps->actions[tracker_index];
+        assert(tracker.gps_app == model::GpsApp::Tracker);
+        assert(!tracker.needs_root && !model::action_needs_root(tracker)); // user-owned GPX files
+        assert(tracker.argv.size() == 3 && tracker.argv[0] == "sh");
+        for (const auto& action : gps->actions) {
+            if (&action != &tracker) assert(action.gps_app == model::GpsApp::None);
+        }
+
         assert(fix->argv.size() == 3 && fix->argv[0] == "sh");
         assert(fix->argv[2].rfind("command -v gpspipe ", 0) == 0); // guard runs first
         assert(fix->argv[2].find("sudo apt install gpsd gpsd-clients") != std::string::npos);

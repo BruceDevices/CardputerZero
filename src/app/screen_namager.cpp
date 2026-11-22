@@ -9,6 +9,7 @@
 #include "about_screen.h"
 #include "ble_scan_screen.h"
 #include "clock_screen.h"
+#include "gps_app_screen.h"
 #include "menu_screen.h"
 #include "rf_screen.h"
 #include "terminal_screen.h"
@@ -92,6 +93,9 @@ void ScreenManager::flush_requested_refresh() {
             break;
         case model::AppPage::BleScan:
             load_screen(std::make_unique<screen::BleScanScreen>(view_model_, assets_));
+            break;
+        case model::AppPage::GpsApp:
+            load_screen(std::make_unique<screen::GpsAppScreen>(view_model_, assets_));
             break;
         case model::AppPage::Menu:
         default:

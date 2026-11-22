@@ -241,6 +241,10 @@ void MenuScreen::open_selected() {
         view_model().show_ble_scan(category_index_, static_cast<int>(selected_index_));
         return;
     }
+    if (action.gps_app != model::GpsApp::None) {
+        view_model().show_gps_app(category_index_, static_cast<int>(selected_index_));
+        return;
+    }
     if (action.wifi_view != model::WifiView::None) {
         view_model().show_wifi_scan(category_index_, static_cast<int>(selected_index_));
         return;

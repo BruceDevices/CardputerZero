@@ -1037,6 +1037,16 @@ awk '
 
 namespace {
 
+// Bruce firmware "GPS Tracker" (src/modules/gps/gps_tracker.cpp): reads the GPS
+// UART in-app and logs a GPX track to ~/BruceGPS. Opens GpsAppScreen.
+ToolAction gps_tracker_action() {
+    ToolAction action{"GPS Tracker",
+                      "Log your route as GPX to ~/BruceGPS (Bruce firmware GPS Tracker)",
+                      {"sh", "-c", "echo 'GPS Tracker runs on its own screen: open it from the GPS menu.'"}};
+    action.gps_app = GpsApp::Tracker;
+    return action;
+}
+
 ToolAction ble_scan_action() {
     ToolAction action{"BLE Scan", "Scan nearby BLE devices (5s)",
                       {"sh", "-c", kBluetoothLeScanScript}, true};
@@ -1339,6 +1349,7 @@ std::vector<ToolCategory>& mutable_catalog() {
                  "Scan Wi-Fi + GPS fix and log APs in WiGLE format (upload to wigle.net). "
                  "Needs gpsd running (Cap: sudo gpsd -n -s 115200 /dev/serial0) and wlan0 up.",
                  {self_exe_path(), "--wardrive", "wlan0"}},
+                gps_tracker_action(),
             },
         },
         {
