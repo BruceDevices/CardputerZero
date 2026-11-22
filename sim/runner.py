@@ -48,7 +48,10 @@ class ProcessRunner:
         with self._lock:
             self._pending = []
             self._exited = False
-        real = self.real and action.argv and action.argv[0] not in _DEVICE_ONLY
+        # sim_only rows (e.g. the guided Nmap flow, which needs the device app's
+        # state dir and real hosts) stay simulated even in --real mode.
+        real = (self.real and action.argv and not getattr(action, "sim_only", False)
+                and action.argv[0] not in _DEVICE_ONLY)
         target = self._run_real if real else self._run_sim
         self._thread = threading.Thread(target=target, args=(action,), daemon=True)
         self._thread.start()

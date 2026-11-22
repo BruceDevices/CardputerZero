@@ -303,6 +303,14 @@ int main() {
         assert(wifi.actions[wifi_static + 1].argv.empty());
         assert(wifi.actions[wifi_static + 2].argv.empty());
     }
+    // Back key: on the AP list there is nothing to undo (leave Wi-Fi); in the
+    // clone view it acts like the "< Back to AP list" row.
+    assert(!model::on_category_back(wifi_idx));
+    model::on_navigation_action(wifi_idx, static_cast<int>(wifi_static) + 1);
+    assert(wifi_category().actions.size() == wifi_static + 2);   // clone view
+    assert(model::on_category_back(wifi_idx));
+    assert(wifi_category().actions.size() == wifi_static + 3);   // AP list again
+    assert(!model::on_category_back(wifi_idx));
 
     // --- --root-sh: the sudo'd re-exec target runs the script verbatim ------
     {

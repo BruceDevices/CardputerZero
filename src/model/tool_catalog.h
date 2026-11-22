@@ -91,6 +91,10 @@ const std::vector<ToolCategory>& tool_catalog();
 // pass -1 to refresh all purely data-driven categories without probing hardware.
 void refresh_dynamic_categories(int category_index = -1);
 
+// Per-user state dir of the Nmap guided flow (/tmp/bruce-nmap-<uid>), holding
+// `hosts` (discovered IPs) and `selected` (the picked host).
+std::string nmap_state_dir();
+
 // Rebuild the native CC1101 rows plus the saved-RAW replay list. The view owns
 // hardware probing and passes the resulting availability/pins into the model.
 void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio);
@@ -101,6 +105,14 @@ std::string rf_recordings_dir();
 // such a row here, then re-enter the same category to show the updated list.
 // Safe no-op for categories/items that are not navigation rows.
 void on_navigation_action(int category_index, int item_index);
+
+// Back key (nav slot 0 / key 4 / ESC) pressed on a category's tool list.
+// Data-driven categories with an in-place drill-down undo one level here,
+// like Bruce's ESC in a sub-menu: Nmap host view -> host list, Wi-Fi Evil
+// Portal clone view -> AP list, System / Clock timezone picker -> utilities.
+// Returns true if it changed state (the screen should rebuild the same
+// category), false if there is nothing to undo (leave the category as usual).
+bool on_category_back(int category_index);
 
 // The command a screen should actually spawn for `action`. Normally this is
 // just `action.argv`, but root-needing rows must run as root while the app is

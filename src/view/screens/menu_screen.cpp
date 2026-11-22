@@ -152,7 +152,23 @@ void MenuScreen::build_list(lv_obj_t* content) {
     nav_bar().set_icon(1, view::NAV_UP, move_up_cb, this);
     nav_bar().set_icon(2, view::NAV_SELECT, select_cb, this);
     nav_bar().set_icon(3, view::NAV_DOWN, move_down_cb, this);
-    configure_common_nav(view::NAV_BACK, back_cb);
+    // Back first undoes a category's in-place drill-down (Nmap host view,
+    // Evil Portal clone view, timezone picker) - same as its "< Back" row -
+    // and only leaves the category when there is nothing left to undo.
+    configure_common_nav(
+        view::NAV_BACK,
+        [](lv_event_t* event) {
+            auto* self = static_cast<MenuScreen*>(lv_event_get_user_data(event));
+            if (!self) {
+                return;
+            }
+            if (model::on_category_back(self->category_index_)) {
+                self->view_model().show_menu(self->category_index_);
+            } else {
+                self->view_model().go_back();
+            }
+        },
+        this);
 }
 
 void MenuScreen::move_selection(int delta) {
