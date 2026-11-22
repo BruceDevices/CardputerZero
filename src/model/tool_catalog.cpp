@@ -221,6 +221,17 @@ std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int g
     return actions;
 }
 
+// --- GPS rows ----------------------------------------------------------------
+//
+// "gpspipe missing" guard (same style as the RTL-SDR rows). Store installs may
+// skip Recommends (gpsd, gpsd-clients), so point at the in-app installer first.
+constexpr const char* kGpspipeMissingSh =
+    "command -v gpspipe >/dev/null 2>&1 || { echo 'gpspipe is not installed - run System / Clock > "
+    "\"Install optional tools (apt)\" or: sudo apt install gpsd gpsd-clients'; exit 127; }; ";
+
+// The LoRa+GNSS Cap's receiver (ATGM336H) is on the HAT UART (/dev/serial0) at
+// 115200 8N1. The Raw NMEA row honours $GPS_UART like `--gps-detect` does.
+
 // --- Nmap guided flow: discover hosts -> pick host -> Fast/Full port scan -----
 //
 // The menu is a flat two-level list, so the drill-down is driven by two tiny
@@ -677,7 +688,7 @@ std::vector<ToolAction> build_system_clock_actions() {
           "export DEBIAN_FRONTEND=noninteractive; "
           "apt-get update 2>&1; "
           "apt-get install -y aircrack-ng mdk4 hostapd arp-scan dnsmasq "
-          "v4l-utils lirc alsa-utils dsniff 2>&1; echo; echo 'done.'"},
+          "v4l-utils lirc alsa-utils dsniff gpsd gpsd-clients 2>&1; echo; echo 'done.'"},
          true},
         {"QR code (this device URL)", "qrencode -t UTF8",
          {"sh", "-c", "ip=$(hostname -I 2>/dev/null | awk '{print $1}'); "
@@ -964,14 +975,27 @@ std::vector<ToolCategory>& mutable_catalog() {
             false,
             {
                 {"GPS fix (gpspipe)", "gpspipe -w (gpsd)",
-                 {"sh", "-c", "timeout 20 gpspipe -w 2>&1 || echo 'needs gpsd + a GPS (gpsd-clients). "
-                  "Start: sudo gpsd /dev/ttyUSB0 -F /var/run/gpsd.sock'"}},
-                {"Raw NMEA (ttyUSB0 @9600)", "stty 9600; cat /dev/ttyUSB0",
-                 {"sh", "-c", "stty -F /dev/ttyUSB0 9600 raw -echo 2>/dev/null; timeout 15 cat /dev/ttyUSB0 "
-                  "2>&1 || echo 'no GPS on ttyUSB0 (try ttyS0/ttyACM0)'"}},
+                 {"sh", "-c", std::string(kGpspipeMissingSh) +
+                  "timeout 20 gpspipe -w 2>&1; rc=$?; "
+                  // 124 = coreutils timeout, 143 = BusyBox (SIGTERM): normal end.
+                  "case \"$rc\" in 0|124|143) exit 0;; esac; "
+                  "echo \"gpspipe failed (status $rc) - is gpsd running? For the LoRa+GNSS Cap: "
+                  "sudo gpsd -n -s 115200 /dev/serial0\"; exit \"$rc\""}},
+                {"Raw NMEA (serial0 @115200)", "stty 115200; cat /dev/serial0 ($GPS_UART overrides)",
+                 {"sh", "-c",
+                  "dev=\"${GPS_UART:-/dev/serial0}\"; "
+                  "[ -e \"$dev\" ] || { echo \"$dev not found - is the LoRa+GNSS Cap attached? "
+                  "(a USB GPS: set GPS_UART, e.g. /dev/ttyUSB0)\"; exit 1; }; "
+                  "[ -r \"$dev\" ] || { echo \"cannot read $dev - add this user to the dialout group: "
+                  "sudo usermod -aG dialout $(id -un) (then log in again)\"; exit 1; }; "
+                  "stty -F \"$dev\" 115200 raw -echo 2>&1 || { rc=$?; echo \"cannot configure $dev (status $rc)\"; exit \"$rc\"; }; "
+                  "echo \"reading $dev @115200 for 15s...\"; "
+                  "timeout 15 cat \"$dev\" 2>&1; rc=$?; "
+                  "case \"$rc\" in 0|124|143) ;; *) echo \"read failed on $dev (status $rc)\"; exit \"$rc\";; esac; "
+                  "echo '(no $G... lines above = no NMEA: check the Cap seating / antenna)'"}},
                 {"Wardriving -> WiGLE CSV",
                  "Scan Wi-Fi + GPS fix and log APs in WiGLE format (upload to wigle.net). "
-                 "Needs gpsd running and wlan0 up.",
+                 "Needs gpsd running (Cap: sudo gpsd -n -s 115200 /dev/serial0) and wlan0 up.",
                  {self_exe_path(), "--wardrive", "wlan0"}},
             },
         },

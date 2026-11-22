@@ -5,6 +5,7 @@
  */
 
 #include "gps.h"
+#include "uart_speed.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -13,7 +14,6 @@
 #if defined(__linux__)
 #include <cerrno>
 #include <fcntl.h>
-#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 #endif
@@ -28,19 +28,6 @@ namespace {
 constexpr int kDefaultBauds[] = {115200, 9600, 38400, 57600};
 
 #if defined(__linux__)
-
-speed_t baud_const(int baud) {
-    switch (baud) {
-        case 4800:   return B4800;
-        case 9600:   return B9600;
-        case 19200:  return B19200;
-        case 38400:  return B38400;
-        case 57600:  return B57600;
-        case 115200: return B115200;
-        case 230400: return B230400;
-        default:     return B0;
-    }
-}
 
 long now_ms() {
     timespec ts{};
@@ -69,27 +56,21 @@ bool find_nmea(const std::string& buf, std::string& out) {
 
 // Read a UART at one baud for up to `ms` ms; true if NMEA seen.
 bool scan_one_baud(const char* uart, int baud, int ms, std::string& sample) {
-    const speed_t sp = baud_const(baud);
-    if (sp == B0) {
+    if (baud <= 0) {
         return false;
     }
     const int fd = open(uart, O_RDONLY | O_NOCTTY);
     if (fd < 0) {
+        std::fprintf(stderr, "gps: cannot open %s: %s\n", uart, std::strerror(errno));
         return false;
     }
-    termios tio{};
-    if (tcgetattr(fd, &tio) != 0) {
+    // termios2/BOTHER: independent of the glibc B* constants (see uart_speed.h).
+    std::string err;
+    if (!uart_set_raw(fd, baud, /*vtime_ds=*/2, &err)) { // 200ms read timeout
+        std::fprintf(stderr, "gps: cannot set %s to %d baud: %s\n", uart, baud, err.c_str());
         close(fd);
         return false;
     }
-    cfmakeraw(&tio);
-    cfsetispeed(&tio, sp);
-    cfsetospeed(&tio, sp);
-    tio.c_cflag |= (CLOCAL | CREAD);
-    tio.c_cc[VMIN] = 0;
-    tio.c_cc[VTIME] = 2; // 200ms read timeout
-    tcsetattr(fd, TCSANOW, &tio);
-    tcflush(fd, TCIFLUSH); // drop stale bytes captured at the wrong baud
 
     std::string buf;
     const long deadline = now_ms() + ms;
