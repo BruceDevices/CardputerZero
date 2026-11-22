@@ -10,6 +10,8 @@
 #include "cc1101.h"
 #include "evil_portal.h"
 #include "gps.h"
+#include "gps_tracker.h"
+#include "gpx_writer.h"
 #include "root_sh.h"
 #include "rfid_st25r.h"
 #include "wardrive.h"
@@ -87,6 +89,13 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "--rfid-clone") == 0) {
         return platform::rfid_clone_main(argc - 2, argv + 2);
     }
+    // Bruce GPS Tracker on the console (same core as the GPS Tracker screen):
+    // `--gps-tracker [port] [baud]`, GPX to ~/BruceGPS. For SSH testing.
+    if (argc >= 2 && std::strcmp(argv[1], "--gps-tracker") == 0) {
+        // Shutdown (incl. the bounded storage drain) is handled inside, under
+        // the one process-wide deadline.
+        return platform::gps::gps_tracker_main(argc - 2, argv + 2);
+    }
     // Wi-Fi wardriving: scan + gpsd fix -> WiGLE CSV for wigle.net upload.
     if (argc >= 2 && std::strcmp(argv[1], "--wardrive") == 0) {
         return platform::wardrive_main(argc - 2, argv + 2);
@@ -103,6 +112,16 @@ int main(int argc, char** argv) {
         return platform::root_sh_main(argc - 2, argv + 2);
     }
 
-    app::Application application;
-    return application.run();
+    int rc = 0;
+    {
+        app::Application application;
+        rc = application.run(); // screens (and their GPS trackers) are gone after this
+    }
+    // Orderly shutdown: finish and join pending GPX writes (Back on slow storage
+    // leaves the storage worker running past its screen), bounded by the one
+    // process-wide deadline. Unfinished writes are logged and fail the exit.
+    if (platform::gps::drain_writers() > 0) {
+        return rc != 0 ? rc : 1;
+    }
+    return rc;
 }
