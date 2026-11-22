@@ -17,7 +17,10 @@
 #include "screenshot_service.h"
 #include "toast.h"
 
+#include <algorithm>
+#include <chrono>
 #include <memory>
+#include <thread>
 
 #if !USE_DESKTOP
 #if APP_USE_DRM
@@ -175,6 +178,13 @@ int Application::run() {
 
     lv_init();
 
+    // LVGL's lv_delay_ms() busy-waits unless a delay callback is registered.
+    // The fbdev/DRM drivers don't set one (SDL later overrides this with
+    // SDL_Delay), so provide a real sleep for the device build.
+    lv_delay_set_cb([](uint32_t ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds{ms});
+    });
+
     // Detect the connected CAP and fill the BruceModule pin registry (Subjects
     // need lv_init() done above). Prints the module summary to the terminal.
     hal::detect_cap();
@@ -220,8 +230,13 @@ int Application::run() {
     LOG_INFO("LVGL app started at {}x{}", lv_display_get_horizontal_resolution(display),
              lv_display_get_vertical_resolution(display));
     while (running) {
-        lv_timer_handler();
-        lv_delay_ms(5);
+        // Sleep until the next LVGL timer is due, clamped to 1..5 ms so input
+        // latency stays as before while the idle loop no longer spins a core.
+        uint32_t idle_ms = lv_timer_handler();
+        if (idle_ms == LV_NO_TIMER_READY) {
+            idle_ms = 5;
+        }
+        lv_delay_ms(std::clamp<uint32_t>(idle_ms, 1, 5));
     }
 
     if (quit_observer) {

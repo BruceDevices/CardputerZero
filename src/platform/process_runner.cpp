@@ -49,9 +49,15 @@ bool ProcessRunner::start(const std::vector<std::string>& argv, UpdateCallback o
         return false;
     }
 
-    // Optional stdin feed (sudo -S password): the child reads it, then EOF.
-    int stdin_fds[2] = {-1, -1};
-    if (!stdin_payload.empty() && pipe(stdin_fds) != 0) {
+    // Always give the child a stdin pipe. Without a payload it is closed right
+    // away, so the child sees an immediate EOF just like /dev/null - but a pipe
+    // is pollable, while /dev/null is not. Some tools (BlueZ's btmgmt) call
+    // epoll_ctl() on stdin while starting up; when the app is launched by
+    // APPLaunch its stdin is /dev/null, epoll_ctl fails with EPERM, bt_shell
+    // never executes the command, and the tool exits silently with no log at
+    // all. A pipe makes the launch look like an ssh/terminal one.
+    int stdin_fds[2];
+    if (pipe(stdin_fds) != 0) {
         close(pipe_fds[0]);
         close(pipe_fds[1]);
         return false;
@@ -61,10 +67,8 @@ bool ProcessRunner::start(const std::vector<std::string>& argv, UpdateCallback o
     if (pid < 0) {
         close(pipe_fds[0]);
         close(pipe_fds[1]);
-        if (stdin_fds[0] >= 0) {
-            close(stdin_fds[0]);
-            close(stdin_fds[1]);
-        }
+        close(stdin_fds[0]);
+        close(stdin_fds[1]);
         return false;
     }
 
@@ -77,11 +81,9 @@ bool ProcessRunner::start(const std::vector<std::string>& argv, UpdateCallback o
         dup2(pipe_fds[1], STDOUT_FILENO);
         dup2(pipe_fds[1], STDERR_FILENO);
         close(pipe_fds[1]);
-        if (stdin_fds[0] >= 0) {
-            dup2(stdin_fds[0], STDIN_FILENO);
-            close(stdin_fds[0]);
-            close(stdin_fds[1]);
-        }
+        dup2(stdin_fds[0], STDIN_FILENO);
+        close(stdin_fds[0]);
+        close(stdin_fds[1]);
 
         std::vector<char*> exec_argv;
         exec_argv.reserve(argv.size() + 1);
@@ -105,11 +107,11 @@ bool ProcessRunner::start(const std::vector<std::string>& argv, UpdateCallback o
     }
 
     close(pipe_fds[1]);
-    if (stdin_fds[0] >= 0) {
-        // Feed the payload (e.g. the sudo password line) and close: the child
-        // sees EOF after it, so `sudo -S` makes exactly one attempt. A short
-        // blocking write cannot happen for password-sized payloads (64K pipe).
-        close(stdin_fds[0]);
+    // Parent never reads the child's stdin: close the read end and feed the
+    // optional payload (sudo -S password) through the write end, then close it.
+    // No payload -> EOF immediately; the child never inherits the app's stdin.
+    close(stdin_fds[0]);
+    if (!stdin_payload.empty()) {
         size_t off = 0;
         const std::string payload = stdin_payload + "\n";
         while (off < payload.size()) {
@@ -120,8 +122,8 @@ bool ProcessRunner::start(const std::vector<std::string>& argv, UpdateCallback o
             }
             off += static_cast<size_t>(n);
         }
-        close(stdin_fds[1]);
     }
+    close(stdin_fds[1]);
     child_pid_ = pid;
     read_fd_ = pipe_fds[0];
     on_update_ = on_update;

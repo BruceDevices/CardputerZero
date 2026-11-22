@@ -195,6 +195,24 @@ def _host_info(ip, tag, mac, vendor, ports, progress=False):
         lines.append("No open ports found")
     return lines
 
+# Mirrors kGpspipeMissingSh in src/model/tool_catalog.cpp.
+_GPSPIPE_MISSING_SH = ("command -v gpspipe >/dev/null 2>&1 || { echo 'gpspipe is not installed - run System / Clock > "
+                       "\"Install optional tools (apt)\" or: sudo apt install gpsd gpsd-clients'; exit 127; }; ")
+
+
+# Mirrors the "Raw NMEA (serial0 @115200)" row in src/model/tool_catalog.cpp.
+_GPS_RAW_NMEA_SH = (
+    "dev=\"${GPS_UART:-/dev/serial0}\"; "
+    "[ -e \"$dev\" ] || { echo \"$dev not found - is the LoRa+GNSS Cap attached? "
+    "(a USB GPS: set GPS_UART, e.g. /dev/ttyUSB0)\"; exit 1; }; "
+    "[ -r \"$dev\" ] || { echo \"cannot read $dev - add this user to the dialout group: "
+    "sudo usermod -aG dialout $(id -un) (then log in again)\"; exit 1; }; "
+    "stty -F \"$dev\" 115200 raw -echo 2>&1 || { rc=$?; echo \"cannot configure $dev (status $rc)\"; exit \"$rc\"; }; "
+    "echo \"reading $dev @115200 for 15s...\"; "
+    "timeout 15 cat \"$dev\" 2>&1; rc=$?; "
+    "case \"$rc\" in 0|124|143) ;; *) echo \"read failed on $dev (status $rc)\"; exit \"$rc\";; esac; "
+    "echo '(no $G... lines above = no NMEA: check the Cap seating / antenna)'")
+
 
 def _ok(*lines):
     return list(lines) + ["", "[process exited 0]"]
@@ -295,10 +313,15 @@ CATALOG = [
 
     # ── Bluetooth LE ──────────────────────────────────────────────────────────
     Category("Bluetooth LE", "Discover and manage nearby BLE devices", IC["bluetooth"], [
-        Action("Scan for BLE devices (15s)", "timeout 15 hcitool lescan",
-               ["timeout", "15", "hcitool", "lescan"],
-               _ok("LE Scan ...", "4C:87:5D:11:22:33 (unknown)",
-                   "E0:9D:31:aa:bb:cc Mi Band 7", "7C:2E:0D:00:11:22 (unknown)")),
+        # The C++ row opens BleScanScreen (firmware-style device list +
+        # information view); the simulator uses the generic interactive items
+        # assigned below.
+        Action("BLE Scan", "Scan nearby BLE devices (5s)",
+               ["bluetoothctl", "--timeout", "5", "scan", "le"],
+               _ok("SetDiscoveryFilter success", "Discovery started",
+                   "[NEW] Device E0:9D:31:AA:BB:CC Mi Band 7",
+                   "[CHG] Device E0:9D:31:AA:BB:CC RSSI: 0xffffffc6 (-58)"),
+               needs_root=True),
         Action("Show adapter info", "bluetoothctl show", ["bluetoothctl", "show"],
                _ok("Controller 00:1A:7D:DA:71:13", "    Name: cardputer", "    Powered: yes")),
         Action("BLE Spam: Apple pairing", "Broadcast Apple Continuity pairing popups",
@@ -314,9 +337,9 @@ CATALOG = [
         Action("BLE Spam: All (rotate)", "Rotate through all BLE spam families",
                ["self", "--ble-spam", "all"], _stub("would rotate through all BLE spam families")),
         Action("Enable Bluetooth radio", "rfkill unblock bluetooth", ["rfkill", "unblock", "bluetooth"],
-               _ok("[sim] bluetooth unblocked")),
+               _ok("[sim] bluetooth unblocked"), needs_root=True),
         Action("Disable Bluetooth radio", "rfkill block bluetooth", ["rfkill", "block", "bluetooth"],
-               _ok("[sim] bluetooth blocked")),
+               _ok("[sim] bluetooth blocked"), needs_root=True),
     ]),
 
     # ── RFID ──────────────────────────────────────────────────────────────────
@@ -520,12 +543,18 @@ CATALOG = [
 
     # ── GPS ───────────────────────────────────────────────────────────────────
     Category("GPS", "Read a GPS on serial/USB via gpsd; feed wardriving", IC["gps"], [
-        Action("GPS fix (gpspipe)", "gpspipe -w (gpsd)", ["sh", "-c", "timeout 20 gpspipe -w"],
+        Action("GPS fix (gpspipe)", "gpspipe -w (gpsd)",
+               ["sh", "-c", _GPSPIPE_MISSING_SH + "timeout 20 gpspipe -w 2>&1; rc=$?; "
+                "case \"$rc\" in 0|124|143) exit 0;; esac; "
+                "echo \"gpspipe failed (status $rc) - is gpsd running? For the LoRa+GNSS Cap: "
+                "sudo gpsd -n -s 115200 /dev/serial0\"; exit \"$rc\""],
                _ok('{"class":"TPV","lat":37.7749,"lon":-122.4194,"alt":15.2,"mode":3}')),
-        Action("Raw NMEA (ttyUSB0 @9600)", "stty 9600; cat /dev/ttyUSB0",
-               ["sh", "-c", "stty -F /dev/ttyUSB0 9600 raw -echo; timeout 15 cat /dev/ttyUSB0"],
-               _ok("$GPGGA,123519,3747.49,N,12225.16,W,1,08,0.9,15.2,M,,,,*47",
-                   "$GPRMC,123519,A,3747.49,N,12225.16,W,0.0,0.0,270926,,*62")),
+        Action("Raw NMEA (serial0 @115200)", "stty 115200; cat /dev/serial0 ($GPS_UART overrides)",
+               ["sh", "-c", _GPS_RAW_NMEA_SH],
+               _ok("reading /dev/serial0 @115200 for 15s...",
+                   "$GNRMC,123519,A,3747.49,N,12225.16,W,0.0,0.0,270926,,,A,V*2C",
+                   "$GNGGA,123519,3747.49,N,12225.16,W,1,08,0.9,15.2,M,,M,,*55",
+                   "(no $G... lines above = no NMEA: check the Cap seating / antenna)")),
         Action("Wardriving -> WiGLE CSV", "scan Wi-Fi + GPS fix -> WiGLE CSV (upload to wigle.net)",
                ["self", "--wardrive", "wlan0"],
                _stub("would scan Wi-Fi + read a GPS fix and append WiGLE rows to ~/.bruce/wardrive.csv")),
@@ -569,13 +598,13 @@ CATALOG = [
                _ok(" 14:32:07 up 2 days,  3:11,  load average: 0.08, 0.12, 0.10")),
         Action("Install optional tools (apt)",
                "apt-get install nmap + the Suggests set (aircrack-ng, mdk4, hostapd, arp-scan, "
-               "dnsmasq, ...). Needs root: passwordless with the sudoers rule, else asks for the sudo password.",
-               ["sh", "-c", "apt-get install -y nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq ..."],
+               "dnsmasq, gpsd, ...). Needs root: passwordless with the sudoers rule, else asks for the sudo password.",
+               ["sh", "-c", "apt-get install -y nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq ... gpsd gpsd-clients"],
                _ok("[sim] on the device this runs via sudo ... --root-sh apt-get install -y ...",
                    "[sim] passwordless with the sudoers rule (deploy.sh); store installs ask for the sudo password",
                    "Reading package lists... Done",
                    "The following NEW packages will be installed:",
-                   "  nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq",
+                   "  nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq gpsd gpsd-clients",
                    "Setting up aircrack-ng ... done.", "done."), needs_root=True),
         Action("QR code (this device URL)", "qrencode -t UTF8", ["sh", "-c", "qrencode -t UTF8 http://ip:8080"],
                _ok("█████████████████████", "████ ▄▄▄▄▄ █▀ █ ████", "████ █   █ █▀▀▀█ ████",
@@ -636,18 +665,22 @@ _SSIDS = [
 ]
 
 
-def _ble_item(name, mac, rssi, kind):
-    detail = [f"Name : {name}", f"MAC  : {mac}", f"RSSI : {rssi} dBm", f"Type : {kind}"]
-    return Item(f"{name}   {rssi}dBm", children=[
-        Item("Show details", detail),
-        Item("Connect (GATT enum)", _stub(f"would connect to {mac} and enumerate GATT services")),
-    ])
+def _ble_item(name, mac, rssi):
+    # Firmware ble_scan()/ble_info(): list label is the name (or address), and
+    # the details screen has exactly Name / Adresse / Signal.
+    label = name if name else mac
+    detail = ["-=Information=-", "",
+              f"Name: {name if name else '<no name>'}",
+              f"Adresse: {mac}",
+              f"Signal: {rssi} dBm", "",
+              "Press [Sel] to act"]
+    return Item(label, lines=detail)
 
 
 _BLE = [
-    _ble_item("Mi Band 7", "e0:9d:31:aa:bb:cc", -58, "LE / wearable"),
-    _ble_item("(unknown)", "4c:87:5d:11:22:33", -72, "LE"),
-    _ble_item("Galaxy Buds", "7c:2e:0d:00:11:22", -64, "LE / audio"),
+    _ble_item("Mi Band 7", "E0:9D:31:AA:BB:CC", -58),
+    _ble_item("", "B0:E9:FE:63:EE:55", -63),
+    _ble_item("Galaxy Buds", "7C:2E:0D:00:11:22", -64),
 ]
 
 
@@ -705,7 +738,7 @@ def _find(cat_label, act_label):
 
 for _lbl in ("Scan nearby networks", "List SSIDs + signal"):
     _find("Wi-Fi", _lbl).items = _SSIDS
-_find("Bluetooth LE", "Scan for BLE devices (15s)").items = _BLE
+_find("Bluetooth LE", "BLE Scan").items = _BLE
 _find("Nmap", "1. Scan / refresh hosts").items = _HOSTS
 _find("SMB Client", "List shares on default gateway").items = _SHARES
 

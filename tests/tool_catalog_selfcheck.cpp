@@ -12,6 +12,8 @@
 
 #include "tool_catalog.h"
 
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cassert>
@@ -67,6 +69,19 @@ int main() {
         assert(action.terminal_view);
         assert(!action.needs_root);
         assert(!action.argv.empty()); // harmless fallback print, never launched by MenuScreen
+    }
+
+    // BLE Scan opens the dedicated firmware-style list/detail screen, and its
+    // fallback argv is the shell scan script (the screen builds its own 5s
+    // bluetoothctl command, but the row must still be a runnable root row).
+    for (const auto& category : catalog) {
+        if (std::string(category.label) != "Bluetooth LE") continue;
+        assert(!category.actions.empty());
+        assert(category.actions[0].ble_scan_view);
+        assert(category.actions[0].needs_root);
+        assert(category.actions[0].argv.size() == 3);
+        assert(category.actions[0].argv[0] == "sh");
+        assert(category.actions[0].argv[1] == "-c");
     }
 
     // Terminal command routing (what TerminalScreen spawns). User commands -
@@ -158,6 +173,119 @@ int main() {
                 assert(model::action_needs_root(action) == (launched[0] == "sudo"));
             }
         }
+    }
+
+    // GPS rows: gpspipe guard, LoRa+GNSS Cap port/baud, and the in-app installer
+    // carrying gpsd + gpsd-clients.
+    {
+        const model::ToolCategory* gps = nullptr;
+        const model::ToolAction* install = nullptr;
+        for (const auto& category : catalog) {
+            if (std::string(category.label) == "GPS") gps = &category;
+            for (const auto& action : category.actions) {
+                if (std::string(action.label) == "Install optional tools (apt)") install = &action;
+            }
+        }
+        assert(gps && install);
+        assert(install->needs_root && install->argv.size() == 3);
+        assert(install->argv[2].find(" gpsd gpsd-clients ") != std::string::npos);
+
+        const model::ToolAction* fix = nullptr;
+        const model::ToolAction* raw = nullptr;
+        for (const auto& action : gps->actions) {
+            const std::string label(action.label);
+            if (label == "GPS fix (gpspipe)") fix = &action;
+            if (label.rfind("Raw NMEA", 0) == 0) raw = &action;
+        }
+        assert(fix && raw);
+        assert(fix->argv.size() == 3 && fix->argv[0] == "sh");
+        assert(fix->argv[2].rfind("command -v gpspipe ", 0) == 0); // guard runs first
+        assert(fix->argv[2].find("sudo apt install gpsd gpsd-clients") != std::string::npos);
+        assert(fix->argv[2].find("\"Install optional tools (apt)\"") != std::string::npos);
+        assert(fix->argv[2].find("-s 115200 /dev/serial0") != std::string::npos);
+        assert(raw->argv.size() == 3 && raw->argv[0] == "sh");
+        assert(raw->argv[2].find("${GPS_UART:-/dev/serial0}") != std::string::npos);
+        assert(raw->argv[2].find("115200") != std::string::npos);
+        assert(raw->argv[2].find("ttyUSB0 9600") == std::string::npos);
+
+        // Run the scripts for real where nothing GPS-related exists: an empty
+        // PATH hides gpspipe (command/echo are shell builtins), and a bogus
+        // GPS_UART exercises the missing-device branch.
+        auto run_script = [](const std::string& env, const std::string& script, int& rc) {
+            const std::string path = "/tmp/bruce_gps_selfcheck_" + std::to_string(::getpid()) + ".sh";
+            FILE* f = std::fopen(path.c_str(), "w");
+            assert(f);
+            std::fputs(script.c_str(), f);
+            std::fclose(f);
+            FILE* p = ::popen((env + " /bin/sh " + path + " 2>&1").c_str(), "r");
+            assert(p);
+            std::string out;
+            char buf[512];
+            size_t n;
+            while ((n = std::fread(buf, 1, sizeof(buf), p)) > 0) out.append(buf, n);
+            const int st = ::pclose(p);
+            rc = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+            std::remove(path.c_str());
+            return out;
+        };
+        int rc = 0;
+        std::string out = run_script("PATH=/nonexistent", fix->argv[2], rc);
+        assert(rc == 127);
+        assert(out.find("gpspipe is not installed - run System / Clock > \"Install optional tools (apt)\" "
+                        "or: sudo apt install gpsd gpsd-clients") != std::string::npos);
+        assert(out.find("timeout:") == std::string::npos);
+
+        out = run_script("GPS_UART=/nonexistent/gps0", raw->argv[2], rc);
+        assert(rc == 1);
+        assert(out.find("/nonexistent/gps0 not found") != std::string::npos);
+
+        // Exit-status handling with mock tools first on PATH: a normal timeout
+        // (coreutils 124, BusyBox 143) is success; any other failure prints the
+        // diagnostic AND keeps the original status.
+        const std::string mock = "/tmp/bruce_gps_mock_" + std::to_string(::getpid());
+        assert(::mkdir(mock.c_str(), 0700) == 0);
+        auto write_tool = [&](const char* name, const std::string& body) {
+            const std::string p = mock + "/" + name;
+            FILE* f = std::fopen(p.c_str(), "w");
+            assert(f);
+            std::fprintf(f, "#!/bin/sh\n%s\n", body.c_str());
+            std::fclose(f);
+            assert(::chmod(p.c_str(), 0755) == 0);
+        };
+        const std::string env = "PATH=" + mock + ":/usr/bin:/bin";
+        write_tool("gpspipe", "exit 42");
+        write_tool("stty", "exit 0");
+
+        write_tool("timeout", "shift; \"$@\""); // pass-through: gpspipe's 42 propagates
+        out = run_script(env, fix->argv[2], rc);
+        assert(rc == 42);
+        assert(out.find("gpspipe failed (status 42)") != std::string::npos);
+        assert(out.find("sudo gpsd -n -s 115200 /dev/serial0") != std::string::npos);
+
+        for (const char* normal : {"exit 124", "exit 143", "exit 0"}) {
+            write_tool("timeout", normal);
+            out = run_script(env, fix->argv[2], rc);
+            assert(rc == 0);
+            assert(out.find("gpspipe failed") == std::string::npos);
+            out = run_script(env + " GPS_UART=/dev/null", raw->argv[2], rc);
+            assert(rc == 0);
+            assert(out.find("read failed") == std::string::npos);
+        }
+
+        write_tool("timeout", "exit 1"); // cat failed
+        out = run_script(env + " GPS_UART=/dev/null", raw->argv[2], rc);
+        assert(rc == 1);
+        assert(out.find("read failed on /dev/null (status 1)") != std::string::npos);
+        assert(out.find("(no $G") == std::string::npos); // stops, no trailing echo
+
+        write_tool("stty", "exit 3");
+        out = run_script(env + " GPS_UART=/dev/null", raw->argv[2], rc);
+        assert(rc == 3);
+        assert(out.find("cannot configure /dev/null (status 3)") != std::string::npos);
+        assert(out.find("reading /dev/null") == std::string::npos);
+
+        for (const char* t : {"gpspipe", "stty", "timeout"}) std::remove((mock + "/" + t).c_str());
+        ::rmdir(mock.c_str());
     }
 
     std::printf("tool_catalog self-check passed: %zu categories\n", catalog.size());

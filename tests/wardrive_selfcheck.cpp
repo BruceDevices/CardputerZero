@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
+#include <sys/stat.h>
 #include <string>
 
 int main() {
@@ -82,6 +84,24 @@ int main() {
     assert(std::count(row.begin(), row.end(), ',') == 10);
     assert(row.rfind(",WIFI") == row.size() - 5);
     assert(row.rfind("aa:bb:cc:dd:ee:ff,HomeNet,", 0) == 0);
+
+    // --- missing gpspipe: fail fast with 127, no CSV left behind ---
+#if defined(__linux__)
+    {
+        const char* old_path = std::getenv("PATH");
+        const std::string saved = old_path ? old_path : "";
+        setenv("PATH", "/nonexistent", 1);
+        const std::string csv = "/tmp/wardrive_selfcheck_nogps.csv";
+        std::remove(csv.c_str());
+        char a0[] = "wlan0";
+        std::string csv_arg = csv;
+        char* args[] = {a0, csv_arg.data()};
+        assert(wardrive_main(2, args) == 127);
+        struct stat st {};
+        assert(stat(csv.c_str(), &st) != 0);
+        setenv("PATH", saved.c_str(), 1);
+    }
+#endif
 
     std::puts("wardrive self-check OK");
     return 0;

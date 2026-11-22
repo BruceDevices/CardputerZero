@@ -63,6 +63,9 @@ struct ToolAction {
     // Non-None opens the dedicated WifiScanScreen (structured list/detail view)
     // instead of the raw tool-run log. `argv` is still the scan command it runs.
     WifiView wifi_view = WifiView::None;
+    // Open the dedicated BleScanScreen (firmware-style device list + information
+    // view) instead of the raw tool-run log. `argv` is the fallback scan command.
+    bool ble_scan_view = false;
 };
 
 // A menu category shown on the root menu (e.g. "Wi-Fi", "Responder").
