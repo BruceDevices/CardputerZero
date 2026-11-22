@@ -129,3 +129,119 @@ if(_CP0_GCC_RUNTIME_DIRS)
     set(CMAKE_EXE_LINKER_FLAGS_INIT "${CMAKE_EXE_LINKER_FLAGS_INIT} ${_CP0_SYSROOT_LINK_FLAGS}")
     set(CMAKE_SHARED_LINKER_FLAGS_INIT "${CMAKE_SHARED_LINKER_FLAGS_INIT} ${_CP0_SYSROOT_LINK_FLAGS}")
 endif()
+
+# Libc headers must come from the BSP sysroot, matching the glibc we link and
+# run against. Ubuntu/Debian gcc-cross searches the host package
+# libc6-dev-arm64-cross (/usr/aarch64-linux-gnu/include) BEFORE the sysroot,
+# so a newer host glibc (2.43) silently paired its headers with the sysroot's
+# 2.41 libc. glibc 2.42 changed the termios B* values, so every baud change
+# failed at runtime. Rebuild the compiler's include list with -nostdinc, keep
+# its own dirs (libstdc++, gcc builtins), point libc at the sysroot, and drop
+# the host libc dir. src/platform/sysroot_abi_guard.cpp static_asserts the
+# result via CP0_SYSROOT_GLIBC_MINOR.
+option(CP0_ISOLATE_SYSROOT_HEADERS "Use only the BSP sysroot libc headers (drop the host cross libc include dir)" ON)
+
+# try_compile() projects re-read this file in a fresh cache: forward every
+# user-settable variable it reads so nested probes match the parent build
+# (e.g. CP0_ISOLATE_SYSROOT_HEADERS=OFF, a custom CM0_SDK_ROOT).
+list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
+    CP0_ISOLATE_SYSROOT_HEADERS
+    CM0_SDK_ROOT
+    CM0_SDK_VERSION
+    CM0_SDK_URL
+    CM0_ALLOW_FETCH_DEPS
+    CM0_MULTIARCH
+)
+list(REMOVE_DUPLICATES CMAKE_TRY_COMPILE_PLATFORM_VARIABLES)
+
+file(STRINGS "${CMAKE_SYSROOT}/usr/include/features.h" _CP0_GLIBC_MINOR_LINE
+     REGEX "^#define[ \t]+__GLIBC_MINOR__[ \t]+[0-9]+")
+if(_CP0_GLIBC_MINOR_LINE)
+    string(REGEX REPLACE ".*__GLIBC_MINOR__[ \t]+([0-9]+).*" "\\1" CP0_SYSROOT_GLIBC_MINOR "${_CP0_GLIBC_MINOR_LINE}")
+endif()
+
+# Echo the compiler's default <...> search list for `lang` (c / c++) into `out`.
+function(_cp0_default_include_dirs compiler lang out)
+    execute_process(
+        COMMAND "${compiler}" "--sysroot=${CMAKE_SYSROOT}" -E -Wp,-v -x ${lang} /dev/null
+        OUTPUT_QUIET
+        ERROR_VARIABLE _err
+        RESULT_VARIABLE _rc
+    )
+    set(_dirs "")
+    if(_rc EQUAL 0)
+        string(REPLACE "\n" ";" _lines "${_err}")
+        set(_in FALSE)
+        foreach(_line IN LISTS _lines)
+            if(_line MATCHES "^#include <\\.\\.\\.> search starts here:")
+                set(_in TRUE)
+            elseif(_line MATCHES "^End of search list\\.")
+                set(_in FALSE)
+            elseif(_in)
+                string(STRIP "${_line}" _d)
+                if(_d)
+                    list(APPEND _dirs "${_d}")
+                endif()
+            endif()
+        endforeach()
+    endif()
+    set(${out} "${_dirs}" PARENT_SCOPE)
+endfunction()
+
+# Build the list "-nostdinc;-isystem<dir>;..." for `lang`, keeping the default order minus any
+# dir that is neither inside the sysroot nor the compiler's own (libstdc++ /
+# gcc builtin) headers - i.e. the host libc headers.
+function(_cp0_isolated_include_flags compiler lang out)
+    _cp0_default_include_dirs("${compiler}" ${lang} _dirs)
+    execute_process(COMMAND "${compiler}" -print-file-name=include
+                    OUTPUT_VARIABLE _gcc_inc OUTPUT_STRIP_TRAILING_WHITESPACE)
+    file(REAL_PATH "${_gcc_inc}" _gcc_inc)
+    file(REAL_PATH "${CMAKE_SYSROOT}" _sysroot)
+    set(_flags "")
+    set(_dropped FALSE)
+    set(_have_sysroot FALSE)
+    foreach(_d IN LISTS _dirs)
+        file(REAL_PATH "${_d}" _r)
+        string(FIND "${_r}/" "${_sysroot}/" _pos)
+        if(_pos EQUAL 0)
+            set(_have_sysroot TRUE)
+            list(APPEND _flags "-isystem${_d}")
+        elseif(_r MATCHES "/c\\+\\+/" OR _r STREQUAL _gcc_inc OR _r STREQUAL "${_gcc_inc}-fixed")
+            list(APPEND _flags "-isystem${_d}")
+        else()
+            set(_dropped TRUE)
+            message(STATUS "cp0 toolchain: dropping host include dir for ${lang}: ${_d}")
+        endif()
+    endforeach()
+    # Only rewrite when it fixes something and the sysroot dirs were found.
+    if(_dropped AND _have_sysroot)
+        set(${out} "-nostdinc;${_flags}" PARENT_SCOPE)
+    else()
+        set(${out} "" PARENT_SCOPE)
+    endif()
+endfunction()
+
+# Apply on EVERY configure as directory compile options (inherited by all
+# targets, FetchContent deps and try_compile projects), not via
+# CMAKE_<LANG>_FLAGS_INIT: the INIT values only seed the cache on a fresh build
+# dir, so an existing dir (or toggling CP0_ISOLATE_SYSROOT_HEADERS) would keep
+# stale flags and silently compile against the host headers. User
+# CMAKE_<LANG>_FLAGS are left untouched. The toolchain file is read more than
+# once per configure, hence the marker check.
+get_directory_property(_cp0_dir_defs COMPILE_DEFINITIONS)
+if(NOT _cp0_dir_defs MATCHES "CP0_TOOLCHAIN_MANAGED_FLAGS")
+    add_compile_definitions(CP0_TOOLCHAIN_MANAGED_FLAGS=1)
+    if(DEFINED CP0_SYSROOT_GLIBC_MINOR)
+        add_compile_definitions(CP0_SYSROOT_GLIBC_MINOR=${CP0_SYSROOT_GLIBC_MINOR})
+    endif()
+    if(CP0_ISOLATE_SYSROOT_HEADERS)
+        _cp0_isolated_include_flags("${CMAKE_C_COMPILER}" c _CP0_C_INC_LIST)
+        _cp0_isolated_include_flags("${CMAKE_CXX_COMPILER}" c++ _CP0_CXX_INC_LIST)
+        foreach(_f IN LISTS _CP0_C_INC_LIST)
+            add_compile_options("$<$<COMPILE_LANGUAGE:C>:${_f}>")
+        endforeach()
+        foreach(_f IN LISTS _CP0_CXX_INC_LIST)
+            add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:${_f}>")
+        endforeach()
+    endif()
+endif()
