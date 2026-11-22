@@ -67,7 +67,7 @@ streaming text — pick a result and act on it, with drill-down:
 
 - **Wi-Fi → Scan / List SSIDs** → pick an SSID → *Show details · Clone to Evil
   Portal · Deauth clients · Capture handshake*
-- **Bluetooth → Scan** → pick a device → *Show details · Connect (GATT enum)*
+- **Bluetooth → BLE Scan** → pick a device → *Information (Name / Adresse / Signal)*
 - **Nmap → Scan hosts** → pick a host → *Details · Fast scan · Full scan · Ping*
 - **SMB → List shares** → pick a share → *Details · List contents*
 

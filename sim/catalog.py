@@ -162,10 +162,15 @@ CATALOG = [
 
     # ── Bluetooth LE ──────────────────────────────────────────────────────────
     Category("Bluetooth LE", "Discover and manage nearby BLE devices", IC["bluetooth"], [
-        Action("Scan for BLE devices (15s)", "timeout 15 hcitool lescan",
-               ["timeout", "15", "hcitool", "lescan"],
-               _ok("LE Scan ...", "4C:87:5D:11:22:33 (unknown)",
-                   "E0:9D:31:aa:bb:cc Mi Band 7", "7C:2E:0D:00:11:22 (unknown)")),
+        # The C++ row opens BleScanScreen (firmware-style device list +
+        # information view); the simulator uses the generic interactive items
+        # assigned below.
+        Action("BLE Scan", "Scan nearby BLE devices (5s)",
+               ["bluetoothctl", "--timeout", "5", "scan", "le"],
+               _ok("SetDiscoveryFilter success", "Discovery started",
+                   "[NEW] Device E0:9D:31:AA:BB:CC Mi Band 7",
+                   "[CHG] Device E0:9D:31:AA:BB:CC RSSI: 0xffffffc6 (-58)"),
+               needs_root=True),
         Action("Show adapter info", "bluetoothctl show", ["bluetoothctl", "show"],
                _ok("Controller 00:1A:7D:DA:71:13", "    Name: cardputer", "    Powered: yes")),
         Action("BLE Spam: Apple pairing", "Broadcast Apple Continuity pairing popups",
@@ -181,9 +186,9 @@ CATALOG = [
         Action("BLE Spam: All (rotate)", "Rotate through all BLE spam families",
                ["self", "--ble-spam", "all"], _stub("would rotate through all BLE spam families")),
         Action("Enable Bluetooth radio", "rfkill unblock bluetooth", ["rfkill", "unblock", "bluetooth"],
-               _ok("[sim] bluetooth unblocked")),
+               _ok("[sim] bluetooth unblocked"), needs_root=True),
         Action("Disable Bluetooth radio", "rfkill block bluetooth", ["rfkill", "block", "bluetooth"],
-               _ok("[sim] bluetooth blocked")),
+               _ok("[sim] bluetooth blocked"), needs_root=True),
     ]),
 
     # ── RFID ──────────────────────────────────────────────────────────────────
@@ -488,18 +493,22 @@ _SSIDS = [
 ]
 
 
-def _ble_item(name, mac, rssi, kind):
-    detail = [f"Name : {name}", f"MAC  : {mac}", f"RSSI : {rssi} dBm", f"Type : {kind}"]
-    return Item(f"{name}   {rssi}dBm", children=[
-        Item("Show details", detail),
-        Item("Connect (GATT enum)", _stub(f"would connect to {mac} and enumerate GATT services")),
-    ])
+def _ble_item(name, mac, rssi):
+    # Firmware ble_scan()/ble_info(): list label is the name (or address), and
+    # the details screen has exactly Name / Adresse / Signal.
+    label = name if name else mac
+    detail = ["-=Information=-", "",
+              f"Name: {name if name else '<no name>'}",
+              f"Adresse: {mac}",
+              f"Signal: {rssi} dBm", "",
+              "Press [Sel] to act"]
+    return Item(label, lines=detail)
 
 
 _BLE = [
-    _ble_item("Mi Band 7", "e0:9d:31:aa:bb:cc", -58, "LE / wearable"),
-    _ble_item("(unknown)", "4c:87:5d:11:22:33", -72, "LE"),
-    _ble_item("Galaxy Buds", "7c:2e:0d:00:11:22", -64, "LE / audio"),
+    _ble_item("Mi Band 7", "E0:9D:31:AA:BB:CC", -58),
+    _ble_item("", "B0:E9:FE:63:EE:55", -63),
+    _ble_item("Galaxy Buds", "7C:2E:0D:00:11:22", -64),
 ]
 
 
@@ -542,7 +551,7 @@ def _find(cat_label, act_label):
 
 for _lbl in ("Scan nearby networks", "List SSIDs + signal"):
     _find("Wi-Fi", _lbl).items = _SSIDS
-_find("Bluetooth LE", "Scan for BLE devices (15s)").items = _BLE
+_find("Bluetooth LE", "BLE Scan").items = _BLE
 _find("Nmap", "1. Scan / refresh hosts").items = _HOSTS
 _find("SMB Client", "List shares on default gateway").items = _SHARES
 

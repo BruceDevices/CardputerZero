@@ -692,6 +692,50 @@ std::vector<ToolAction> build_system_clock_actions() {
     };
 }
 
+// Fallback raw-log script for the BLE Scan row. The row normally opens
+// BleScanScreen, which runs bluetoothctl without this awk filter so it can
+// parse device names/RSSI. bluetoothctl is the supported D-Bus client (it
+// coexists with bluetoothd, unlike hcitool) and stops discovery on exit
+// (unlike btmgmt); this pipeline is only the log fallback if that screen is
+// ever dropped. It strips BlueZ's ANSI/readline markers and collapses the
+// RSSI/property flood to one entry per device.
+constexpr const char* kBluetoothLeScanScript = R"BLE(timeout 8 bluetoothctl --timeout 5 scan le 2>&1 |
+sed -u -e 's/\x1b\[[0-9;]*m//g' -e 's/[\x01\x02]//g' |
+awk '
+    $0 == "SetDiscoveryFilter success" || $0 == "Discovery started" { print; fflush(); next }
+    $1 == "[CHG]" && $2 == "Controller" && /Discovering:/ { print; fflush(); next }
+    $1 == "[NEW]" && $2 == "Device" {
+        mac = $3
+        if (!(mac in seen)) { seen[mac] = 1; want_rssi[mac] = 1; print; fflush() }
+        next
+    }
+    $1 == "[CHG]" && $2 == "Device" && /RSSI:/ {
+        mac = $3
+        if (!(mac in seen)) { seen[mac] = 1; print; fflush() }
+        else if (want_rssi[mac] && !got_rssi[mac]) { got_rssi[mac] = 1; print; fflush() }
+        next
+    }
+    $1 == "[CHG]" && $2 == "Device" {
+        mac = $3
+        if (!(mac in seen)) { seen[mac] = 1; print; fflush() }
+        next
+    }
+    $0 !~ /^[[:space:]]/ && $0 !~ /^\[(NEW|CHG|DEL)\]/ && $0 !~ /^hci[0-9]/ {
+        print; fflush()
+    }
+')BLE";
+
+namespace {
+
+ToolAction ble_scan_action() {
+    ToolAction action{"BLE Scan", "Scan nearby BLE devices (5s)",
+                      {"sh", "-c", kBluetoothLeScanScript}, true};
+    action.ble_scan_view = true;
+    return action;
+}
+
+} // namespace
+
 // Mutable backing store so data-driven categories (Nmap) can be rebuilt in
 // place; tool_catalog() hands out a const view of it.
 std::vector<ToolCategory>& mutable_catalog() {
@@ -709,8 +753,7 @@ std::vector<ToolCategory>& mutable_catalog() {
             icon::kBluetooth,
             false,
             {
-                {"Scan for BLE devices (15s)", "timeout 15 hcitool lescan",
-                 {"timeout", "15", "hcitool", "lescan"}},
+                ble_scan_action(),
                 {"Show adapter info", "bluetoothctl show", {"bluetoothctl", "show"}},
                 {"BLE Spam: Apple pairing", "Broadcast Apple Continuity pairing popups",
                  {self_exe_path(), "--ble-spam", "apple"}},
@@ -724,8 +767,8 @@ std::vector<ToolCategory>& mutable_catalog() {
                  {self_exe_path(), "--ble-spam", "microsoft"}},
                 {"BLE Spam: All (rotate)", "Rotate through all BLE spam families",
                  {self_exe_path(), "--ble-spam", "all"}},
-                {"Enable Bluetooth radio", "rfkill unblock bluetooth", {"rfkill", "unblock", "bluetooth"}},
-                {"Disable Bluetooth radio", "rfkill block bluetooth", {"rfkill", "block", "bluetooth"}},
+                {"Enable Bluetooth radio", "rfkill unblock bluetooth", {"rfkill", "unblock", "bluetooth"}, true},
+                {"Disable Bluetooth radio", "rfkill block bluetooth", {"rfkill", "block", "bluetooth"}, true},
             },
         },
         {
