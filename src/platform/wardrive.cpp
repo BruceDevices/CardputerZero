@@ -176,6 +176,13 @@ int wardrive_main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
 
     const std::string iface = (argc >= 1 && argv[0] && argv[0][0]) ? argv[0] : "wlan0";
+    // The fix comes from gpsd via gpspipe; say so up front instead of looping
+    // forever on "waiting for a GPS fix" (or leaving an empty CSV behind).
+    if (run("command -v gpspipe 2>/dev/null").empty()) {
+        std::printf("gpspipe is not installed - run System / Clock > \"Install optional tools (apt)\" "
+                    "or: sudo apt install gpsd gpsd-clients\n");
+        return 127;
+    }
     std::string outfile;
     if (argc >= 2 && argv[1] && argv[1][0]) {
         outfile = argv[1];
@@ -208,7 +215,8 @@ int wardrive_main(int argc, char** argv) {
         double lat = 0, lon = 0, alt = 0;
         if (!get_fix(lat, lon, alt)) {
             if (!warned_gps) {
-                std::printf("waiting for a GPS fix (is gpsd running with a GPS attached?)...\n");
+                std::printf("waiting for a GPS fix (is gpsd running? LoRa+GNSS Cap: "
+                            "sudo gpsd -n -s 115200 /dev/serial0)...\n");
                 warned_gps = true;
             }
             for (int i = 0; i < 20 && !g_stop; ++i) usleep(100000); // ~2s

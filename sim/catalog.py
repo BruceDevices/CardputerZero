@@ -65,6 +65,25 @@ class Category:
         self.info_only = info_only
 
 
+# Mirrors kGpspipeMissingSh in src/model/tool_catalog.cpp.
+_GPSPIPE_MISSING_SH = ("command -v gpspipe >/dev/null 2>&1 || { echo 'gpspipe is not installed - run System / Clock > "
+                       "\"Install optional tools (apt)\" or: sudo apt install gpsd gpsd-clients'; exit 127; }; ")
+
+
+# Mirrors the "Raw NMEA (serial0 @115200)" row in src/model/tool_catalog.cpp.
+_GPS_RAW_NMEA_SH = (
+    "dev=\"${GPS_UART:-/dev/serial0}\"; "
+    "[ -e \"$dev\" ] || { echo \"$dev not found - is the LoRa+GNSS Cap attached? "
+    "(a USB GPS: set GPS_UART, e.g. /dev/ttyUSB0)\"; exit 1; }; "
+    "[ -r \"$dev\" ] || { echo \"cannot read $dev - add this user to the dialout group: "
+    "sudo usermod -aG dialout $(id -un) (then log in again)\"; exit 1; }; "
+    "stty -F \"$dev\" 115200 raw -echo 2>&1 || { rc=$?; echo \"cannot configure $dev (status $rc)\"; exit \"$rc\"; }; "
+    "echo \"reading $dev @115200 for 15s...\"; "
+    "timeout 15 cat \"$dev\" 2>&1; rc=$?; "
+    "case \"$rc\" in 0|124|143) ;; *) echo \"read failed on $dev (status $rc)\"; exit \"$rc\";; esac; "
+    "echo '(no $G... lines above = no NMEA: check the Cap seating / antenna)'")
+
+
 def _ok(*lines):
     return list(lines) + ["", "[process exited 0]"]
 
@@ -378,12 +397,18 @@ CATALOG = [
 
     # ── GPS ───────────────────────────────────────────────────────────────────
     Category("GPS", "Read a GPS on serial/USB via gpsd; feed wardriving", IC["gps"], [
-        Action("GPS fix (gpspipe)", "gpspipe -w (gpsd)", ["sh", "-c", "timeout 20 gpspipe -w"],
+        Action("GPS fix (gpspipe)", "gpspipe -w (gpsd)",
+               ["sh", "-c", _GPSPIPE_MISSING_SH + "timeout 20 gpspipe -w 2>&1; rc=$?; "
+                "case \"$rc\" in 0|124|143) exit 0;; esac; "
+                "echo \"gpspipe failed (status $rc) - is gpsd running? For the LoRa+GNSS Cap: "
+                "sudo gpsd -n -s 115200 /dev/serial0\"; exit \"$rc\""],
                _ok('{"class":"TPV","lat":37.7749,"lon":-122.4194,"alt":15.2,"mode":3}')),
-        Action("Raw NMEA (ttyUSB0 @9600)", "stty 9600; cat /dev/ttyUSB0",
-               ["sh", "-c", "stty -F /dev/ttyUSB0 9600 raw -echo; timeout 15 cat /dev/ttyUSB0"],
-               _ok("$GPGGA,123519,3747.49,N,12225.16,W,1,08,0.9,15.2,M,,,,*47",
-                   "$GPRMC,123519,A,3747.49,N,12225.16,W,0.0,0.0,270926,,*62")),
+        Action("Raw NMEA (serial0 @115200)", "stty 115200; cat /dev/serial0 ($GPS_UART overrides)",
+               ["sh", "-c", _GPS_RAW_NMEA_SH],
+               _ok("reading /dev/serial0 @115200 for 15s...",
+                   "$GNRMC,123519,A,3747.49,N,12225.16,W,0.0,0.0,270926,,,A,V*2C",
+                   "$GNGGA,123519,3747.49,N,12225.16,W,1,08,0.9,15.2,M,,M,,*55",
+                   "(no $G... lines above = no NMEA: check the Cap seating / antenna)")),
         Action("Wardriving -> WiGLE CSV", "scan Wi-Fi + GPS fix -> WiGLE CSV (upload to wigle.net)",
                ["self", "--wardrive", "wlan0"],
                _stub("would scan Wi-Fi + read a GPS fix and append WiGLE rows to ~/.bruce/wardrive.csv")),
@@ -427,12 +452,12 @@ CATALOG = [
                _ok(" 14:32:07 up 2 days,  3:11,  load average: 0.08, 0.12, 0.10")),
         Action("Install optional tools (apt)",
                "apt-get the Suggests set — passwordless via the package's sudoers rule",
-               ["sh", "-c", "apt-get install -y aircrack-ng mdk4 hostapd arp-scan dnsmasq ..."],
+               ["sh", "-c", "apt-get install -y aircrack-ng mdk4 hostapd arp-scan dnsmasq ... gpsd gpsd-clients"],
                _ok("[sim] on the device this runs 'sudo -n ... --root-sh apt-get install -y ...'",
                    "[sim] no password prompt (sudoers rule installed by the .deb postinst)",
                    "Reading package lists... Done",
                    "The following NEW packages will be installed:",
-                   "  aircrack-ng mdk4 hostapd arp-scan dnsmasq",
+                   "  aircrack-ng mdk4 hostapd arp-scan dnsmasq gpsd gpsd-clients",
                    "Setting up aircrack-ng ... done.", "done."), needs_root=True),
         Action("QR code (this device URL)", "qrencode -t UTF8", ["sh", "-c", "qrencode -t UTF8 http://ip:8080"],
                _ok("█████████████████████", "████ ▄▄▄▄▄ █▀ █ ████", "████ █   █ █▀▀▀█ ████",
