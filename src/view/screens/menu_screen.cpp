@@ -13,6 +13,8 @@
 #include "tool_catalog.h"
 #include "ui_const.h"
 
+#include <unordered_map>
+
 namespace screen {
 namespace {
 
@@ -25,6 +27,23 @@ inline lv_color_t bruce_accent() {
     return view::palette(true).primary;
 }
 
+// Last highlighted row per menu level (-1 = root carousel, otherwise the
+// category index). The MenuScreen is rebuilt on every navigation, so without
+// this, Back from a category or tool always landed on the first item.
+std::unordered_map<int, size_t>& remembered_selection() {
+    static std::unordered_map<int, size_t> sel;
+    return sel;
+}
+
+size_t restore_selection(int level, size_t count) {
+    const auto& sel = remembered_selection();
+    const auto it = sel.find(level);
+    if (it == sel.end() || count == 0) {
+        return 0;
+    }
+    return it->second < count ? it->second : count - 1; // dynamic lists may shrink
+}
+
 } // namespace
 
 MenuScreen::MenuScreen(viewmodel::BaseViewModel& view_model, app::AssetManager& assets)
@@ -35,6 +54,9 @@ MenuScreen::MenuScreen(viewmodel::BaseViewModel& view_model, app::AssetManager& 
 void MenuScreen::build_content(lv_obj_t* content) {
     category_index_ = view_model().active_category();
     carousel_ = category_index_ == -1;
+    if (carousel_) {
+        selected_index_ = restore_selection(-1, model::tool_catalog().size());
+    }
 
     if (carousel_) {
         build_carousel(content);
@@ -135,6 +157,7 @@ void MenuScreen::build_list(lv_obj_t* content) {
     lv_obj_set_style_pad_row(list, 2, 0); // tighter gap so ~4 rows fit, not 2
 
     const size_t item_count = catalog[static_cast<size_t>(category_index_)].actions.size();
+    selected_index_ = restore_selection(category_index_, item_count);
     rows_.reserve(item_count);
     for (size_t i = 0; i < item_count; ++i) {
         const char* label = catalog[static_cast<size_t>(category_index_)].actions[i].label;
@@ -147,6 +170,9 @@ void MenuScreen::build_list(lv_obj_t* content) {
         rows_.push_back(row);
     }
 
+    // Lay the rows out now so scroll_to_view can reach a remembered row
+    // further down the list.
+    lv_obj_update_layout(list);
     apply_selection_highlight();
 
     nav_bar().set_icon(1, view::NAV_UP, move_up_cb, this);
@@ -163,6 +189,7 @@ void MenuScreen::build_list(lv_obj_t* content) {
                 return;
             }
             if (model::on_category_back(self->category_index_)) {
+                remembered_selection().erase(self->category_index_); // list contents changed
                 self->view_model().show_menu(self->category_index_);
             } else {
                 self->view_model().go_back();
@@ -184,6 +211,7 @@ void MenuScreen::move_selection(int delta) {
     }
 
     selected_index_ = static_cast<size_t>(next);
+    remembered_selection()[category_index_] = selected_index_;
     if (carousel_) {
         update_carousel();
     }
@@ -257,6 +285,7 @@ void MenuScreen::open_selected() {
         } else {
             // e.g. Nmap's "pick host" / "back": mutate state, re-enter category.
             model::on_navigation_action(category_index_, static_cast<int>(selected_index_));
+            remembered_selection().erase(category_index_); // list contents changed
             view_model().show_menu(category_index_);
         }
         return;
