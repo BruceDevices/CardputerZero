@@ -204,12 +204,6 @@ void BleScanScreen::start_scan(const model::ToolAction& action) {
     const bool passwordless = needs_root && model::sudo_passwordless();
 
     if (needs_root && !passwordless) {
-        const std::string cached = model::sudo_cached_password();
-        if (!cached.empty()) {
-            used_password_ = true;
-            launch_scan(pending_argv_, cached + "\n");
-            return;
-        }
         show_sudo_dialog();
         return;
     }
@@ -242,15 +236,14 @@ void BleScanScreen::on_scan_output(const std::string& text) {
 void BleScanScreen::on_scan_exit() {
     log_line("scan exited, %zu bytes", scan_buffer_.size());
 
-    // sudo refused (no passwordless rule) or rejected the cached password:
+    // sudo refused (no passwordless rule) or rejected the entered password:
     // show the same on-device prompt as ToolRunScreen/WifiScanScreen.
     const bool refused = scan_buffer_.find("a password is required") != std::string::npos ||
                          scan_buffer_.find("a terminal is required") != std::string::npos;
-    const bool rejected = used_password_ && model::sudo_output_rejected_password(scan_buffer_);
+    const bool rejected = used_password_ &&
+                          (scan_buffer_.find("incorrect password") != std::string::npos ||
+                           scan_buffer_.find("Sorry, try again") != std::string::npos);
     if (rejected || (!used_password_ && refused)) {
-        if (used_password_) {
-            model::sudo_forget_password();
-        }
         show_sudo_dialog();
         return;
     }
@@ -700,7 +693,6 @@ void BleScanScreen::submit_sudo_dialog() {
         return;
     }
     close_sudo_dialog();
-    model::sudo_remember_password(password);
     used_password_ = true;
     launch_scan(pending_argv_, password + "\n");
 }
