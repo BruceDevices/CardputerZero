@@ -22,10 +22,12 @@ public:
 
 private:
     void refresh_device_status();
+    void refresh_gps();
     void update_clock();
     static void refresh_timer_cb(lv_timer_t* timer);
 
     viewmodel::BaseViewModel& view_model_;
+    lv_obj_t* gps_label_{nullptr};
     lv_obj_t* wifi_label_{nullptr};
     lv_obj_t* clock_label_{nullptr};
     lv_obj_t* wifi_percent_label_{nullptr};

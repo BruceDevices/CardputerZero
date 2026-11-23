@@ -47,6 +47,7 @@ public:
     void show_rf(int category_index, int item_index);
     void show_wifi_scan(int category_index, int item_index);
     void show_ble_scan(int category_index, int item_index);
+    void show_gps_app(int category_index, int item_index);
     void show_about();
     void go_back();
     void request_quit();

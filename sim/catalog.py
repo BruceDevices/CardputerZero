@@ -558,6 +558,19 @@ CATALOG = [
         Action("Wardriving -> WiGLE CSV", "scan Wi-Fi + GPS fix -> WiGLE CSV (upload to wigle.net)",
                ["self", "--wardrive", "wlan0"],
                _stub("would scan Wi-Fi + read a GPS fix and append WiGLE rows to ~/.bruce/wardrive.csv")),
+        # The C++ row opens GpsAppScreen (Bruce firmware GPS Tracker, in-app
+        # serial NMEA reader); the simulator plays the screens it shows.
+        Action("GPS Tracker", "Log your route as GPX to ~/BruceGPS (Bruce firmware GPS Tracker)",
+               ["sh", "-c", "echo 'GPS Tracker runs on its own screen: open it from the GPS menu.'"],
+               _ok("GPS TRACKER", "Initializing...", "Waiting for GPS data",
+                   "[ Waiting GPS: 0s ]",
+                   "GPS location not updated",
+                   "  Date: 2026-11-22", "  Time: 15:20:02", "  Sat:  0", "  HDOP: 25.50",
+                   "GPS location updated",
+                   "  Coord: 35.681236, 139.767125",
+                   "  File: 261122_152002_gps_tracker",
+                   "  GPS Coordinates: 1", "  Distance: 0.00km",
+                   "(simulated: no GPS on the desktop, nothing written to ~/BruceGPS)")),
     ]),
 
     # ── Ethernet ──────────────────────────────────────────────────────────────

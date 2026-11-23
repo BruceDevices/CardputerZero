@@ -21,6 +21,10 @@ enum class RfTool { None, Scan, ProtocolMonitor, Record, Spectrum, Spectrogram }
 //              one runs a targeted deeper scan and shows it on a detail screen.
 enum class WifiView { None, ScanList, SsidList };
 
+// Which Bruce-firmware GPS feature a row opens on the shared GpsAppScreen
+// (in-app serial NMEA reader, no gpsd). Tracker = Bruce's "GPS Tracker" (GPX).
+enum class GpsApp { None, Tracker };
+
 // A selectable UI accent color. Pure data (no LVGL) so it is the single source
 // of truth shared by the "Theme" menu (model) and the palette (view): `primary`
 // is the main accent, `info` a lighter companion used for secondary styling.
@@ -66,6 +70,9 @@ struct ToolAction {
     // Open the dedicated BleScanScreen (firmware-style device list + information
     // view) instead of the raw tool-run log. `argv` is the fallback scan command.
     bool ble_scan_view = false;
+    // Non-None opens the shared GpsAppScreen running that Bruce GPS feature
+    // instead of the tool-run log. `argv` is only a harmless fallback print.
+    GpsApp gps_app = GpsApp::None;
 };
 
 // A menu category shown on the root menu (e.g. "Wi-Fi", "Responder").

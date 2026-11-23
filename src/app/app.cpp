@@ -6,6 +6,9 @@
 
 #include "app.h"
 
+#include <csignal>
+#include <unistd.h>
+
 #include "asset_manager.h"
 #include "boot_anim.h"
 #include "bruce_module.h"
@@ -44,6 +47,19 @@
 
 namespace app {
 namespace {
+
+// SIGTERM/SIGINT end the main loop like a quit request, so the screens are torn
+// down and main() can drain pending storage work (GPX writes). Any second
+// SIGINT/SIGTERM - same or different signal - forces the exit at once, exactly
+// like --gps-tracker.
+volatile std::sig_atomic_t g_terminate = 0;
+
+void on_terminate(int sig) {
+    if (g_terminate) {
+        _exit(128 + sig);
+    }
+    g_terminate = 1;
+}
 
 void quit_requested_observer(lv_observer_t* observer, lv_subject_t* subject) {
     auto* running = static_cast<bool*>(lv_observer_get_user_data(observer));
@@ -229,7 +245,12 @@ int Application::run() {
 
     LOG_INFO("LVGL app started at {}x{}", lv_display_get_horizontal_resolution(display),
              lv_display_get_vertical_resolution(display));
-    while (running) {
+    struct sigaction sa{};
+    sa.sa_handler = on_terminate;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGINT, &sa, nullptr);
+    while (running && !g_terminate) {
         // Sleep until the next LVGL timer is due, clamped to 1..5 ms so input
         // latency stays as before while the idle loop no longer spins a core.
         uint32_t idle_ms = lv_timer_handler();

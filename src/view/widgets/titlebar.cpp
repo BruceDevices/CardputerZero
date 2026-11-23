@@ -19,6 +19,7 @@
 
 #include "bindings.h"
 #include "device_status.h"
+#include "gps_session.h"
 #include "theme.h"
 
 // Injected by CMake (target_compile_definitions) from the project() version.
@@ -32,8 +33,8 @@ namespace {
 // Sysfs polling is cheap but pointless at 1 Hz; one status refresh every 5th tick.
 constexpr uint32_t kDeviceRefreshTicks = 5;
 
-// Status cluster width; wifi/battery pin to the right edge inside it.
-constexpr int32_t kStatusClusterWidth = 120;
+// Status cluster width; gps/wifi/battery pin to the right edge inside it.
+constexpr int32_t kStatusClusterWidth = 140;
 constexpr int32_t kClusterEdgeGap = 5;
 
 // LVGL ships one wifi glyph; strength is conveyed by the percent label instead.
@@ -160,6 +161,12 @@ void TitleBar::build() {
     lv_obj_clear_flag(status, LV_OBJ_FLAG_SCROLLABLE);
 
     auto* dark_mode_subject = view_model_.dark_mode_subject();
+    // Bruce's status bar draws the GPS icon left of Wi-Fi, only while a GPS
+    // feature runs and has received data (gpsConnected).
+    gps_label_ = lv_label_create(status);
+    configure_label(gps_label_, dark_mode_subject, 16);
+    lv_label_set_text(gps_label_, LV_SYMBOL_GPS);
+    refresh_gps();
     wifi_label_ = lv_label_create(status);
     configure_label(wifi_label_, dark_mode_subject, 16);
     lv_label_set_text(wifi_label_, kWifiIcon);
@@ -190,6 +197,12 @@ void TitleBar::update_clock() {
         lv_label_set_text(clock_label_, buf);
     } else {
         lv_label_set_text(clock_label_, APP_VERSION);
+    }
+}
+
+void TitleBar::refresh_gps() {
+    if (gps_label_) {
+        set_visible(gps_label_, platform::gps::connected());
     }
 }
 
@@ -226,6 +239,7 @@ void TitleBar::refresh_timer_cb(lv_timer_t* timer) {
         return;
     }
     title_bar->update_clock(); // cheap; keep the minute digit fresh every tick
+    title_bar->refresh_gps();  // an atomic load; no extra timer or wake-up
     if (++title_bar->refresh_tick_ >= kDeviceRefreshTicks) {
         title_bar->refresh_tick_ = 0;
         title_bar->refresh_device_status();
