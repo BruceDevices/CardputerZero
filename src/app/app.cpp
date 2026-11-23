@@ -25,6 +25,10 @@
 #include <memory>
 #include <thread>
 
+#if USE_DESKTOP
+#include <SDL.h>
+#endif
+
 #if !USE_DESKTOP
 #if APP_USE_DRM
 #include "src/drivers/display/drm/lv_linux_drm.h"
@@ -60,6 +64,24 @@ void on_terminate(int sig) {
     }
     g_terminate = 1;
 }
+
+#if USE_DESKTOP
+// Closing the SDL window: LVGL's SDL driver answers SDL_QUIT with lv_deinit() +
+// exit(0) (and SDL_WINDOWEVENT_CLOSE with lv_display_delete), tearing FreeType
+// down while AssetManager still holds its fonts ("drop_all_cb: entry ... is
+// still referenced") and skipping our own shutdown. Drop both events before
+// the driver polls them and end the main loop like SIGTERM instead.
+int sdl_quit_filter(void*, SDL_Event* event) {
+    const bool close = event->type == SDL_QUIT ||
+                       (event->type == SDL_WINDOWEVENT &&
+                        event->window.event == SDL_WINDOWEVENT_CLOSE);
+    if (close) {
+        g_terminate = 1;
+        return 0; // drop it
+    }
+    return 1;
+}
+#endif
 
 void quit_requested_observer(lv_observer_t* observer, lv_subject_t* subject) {
     auto* running = static_cast<bool*>(lv_observer_get_user_data(observer));
@@ -151,6 +173,7 @@ lv_display_t* init_display() {
 
     lv_sdl_window_set_title(display, "Bruce CardputerZero");
     lv_sdl_window_set_resizeable(display, false);
+    SDL_SetEventFilter(sdl_quit_filter, nullptr);
     lv_sdl_mouse_create();
     lv_sdl_mousewheel_create();
     auto* keyboard = lv_sdl_keyboard_create();
