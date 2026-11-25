@@ -12,6 +12,7 @@
 #include "asset_manager.h"
 #include "boot_anim.h"
 #include "bruce_module.h"
+#include "gps_config.h"
 #include "logger.h"
 #include "linux_input.h"
 #include "screen_manager.h"
@@ -227,6 +228,11 @@ int Application::run() {
     // Detect the connected CAP and fill the BruceModule pin registry (Subjects
     // need lv_init() done above). Prints the module summary to the terminal.
     hal::detect_cap();
+    // GPS board default (Bruce: per-board gpsBaudrate): the LoRa+GNSS Cap's
+    // receiver runs at 115200, anything else gets Bruce's 9600. Used until
+    // the user saves GPS > Config (~/.bruce/gps.conf).
+    model::gps_config::set_board_default(
+        model::gps_config::board_default(hal::modules().kind == hal::CapKind::CapLora));
 
     auto* display = init_display();
     if (!display) {

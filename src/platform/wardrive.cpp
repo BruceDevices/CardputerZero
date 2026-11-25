@@ -6,6 +6,10 @@
 
 #include "wardrive.h"
 
+#include "gps_port.h"
+#include "gps_session.h"
+
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -102,22 +106,6 @@ std::vector<ScanAp> parse_iw_scan(const std::string& text) {
     return aps;
 }
 
-bool parse_gps_tpv(const std::string& json, double& lat, double& lon, double& alt) {
-    if (json.find("\"class\":\"TPV\"") == std::string::npos) return false;
-    auto num = [&](const char* key, double& out) {
-        size_t p = json.find(key);
-        if (p == std::string::npos) return false;
-        p += std::strlen(key);
-        out = std::atof(json.c_str() + p);
-        return true;
-    };
-    double la = 0, lo = 0, al = 0;
-    if (!num("\"lat\":", la) || !num("\"lon\":", lo)) return false;
-    num("\"alt\":", al); // altitude optional (2D fix)
-    lat = la; lon = lo; alt = al;
-    return true;
-}
-
 std::string wigle_header() {
     return "WigleWifi-1.4,appRelease=bruce-cp0,model=CardputerZero,release=0,"
            "device=CardputerZero,display=,board=,brand=Bruce\n"
@@ -135,8 +123,13 @@ std::string wigle_row(const ScanAp& ap, double lat, double lon, double alt, cons
 
 #if defined(__linux__)
 namespace {
-volatile sig_atomic_t g_stop = 0;
-void on_signal(int) { g_stop = 1; }
+namespace gps = platform::gps;
+// Set by SIGTERM (Back in the menu: ProcessRunner::stop()) / SIGINT. An
+// atomic so the Auto probe can watch it as its cancel flag; lock-free, hence
+// safe to store from the handler.
+std::atomic<bool> g_stop{false};
+static_assert(std::atomic<bool>::is_always_lock_free, "g_stop is set from a signal handler");
+void on_signal(int) { g_stop.store(true); }
 
 std::string run(const std::string& cmd) {
     std::string out;
@@ -158,15 +151,31 @@ std::string now_utc() {
     return b;
 }
 
-// Read a gpsd fix via gpspipe (bounded by `timeout`). Returns false if no fix.
-bool get_fix(double& lat, double& lon, double& alt) {
-    const std::string js = run("timeout 6 gpspipe -w -n 40 2>/dev/null");
-    std::istringstream in(js);
-    std::string line;
-    while (std::getline(in, line)) {
-        if (parse_gps_tpv(line, lat, lon, alt)) return true;
+// Wait up to ~6 s (Ctrl-C aware) for a fresh position from the in-app GPS
+// reader (TinyGPS++ location.isUpdated()). Returns false without a fix;
+// `lost` is set when the port hung up (USB GPS unplugged).
+bool get_fix(gps::Session& session, double& lat, double& lon, double& alt, bool& lost) {
+    for (int i = 0; i < 60 && !g_stop; ++i) {
+        bool got = false;
+        session.snapshot([&](size_t, bool hung_up, gps::Parser& p) {
+            lost = hung_up;
+            if (p.location.isValid() && p.location.isUpdated()) {
+                lat = p.location.lat();
+                lon = p.location.lng();
+                alt = p.altitude.isValid() ? p.altitude.meters() : 0.0;
+                got = true;
+            }
+        });
+        if (got) return true;
+        if (lost) return false;
+        usleep(100000);
     }
     return false;
+}
+
+void usage() {
+    std::printf("usage: --wardrive [--wifi|--ble|--both] [--port <node>|Auto] [--baud <bps>] "
+                "[iface] [outfile]\n");
 }
 } // namespace
 
@@ -175,17 +184,78 @@ int wardrive_main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     setvbuf(stdout, nullptr, _IOLBF, 0);
 
-    const std::string iface = (argc >= 1 && argv[0] && argv[0][0]) ? argv[0] : "wlan0";
-    // The fix comes from gpsd via gpspipe; say so up front instead of looping
-    // forever on "waiting for a GPS fix" (or leaving an empty CSV behind).
-    if (run("command -v gpspipe 2>/dev/null").empty()) {
-        std::printf("gpspipe is not installed - run System / Clock > \"Install optional tools (apt)\" "
-                    "or: sudo apt install gpsd gpsd-clients\n");
-        return 127;
+    // Options first (the GPS menu passes the configured port/baud), then the
+    // historical positionals: [iface] [outfile].
+    std::string mode = "wifi";
+    std::string port = "/dev/serial0";
+    int baud = 115200;
+    if (const char* env = std::getenv("GPS_UART"); env && env[0]) port = env;
+    if (const char* env = std::getenv("GPS_BAUD"); env && std::atoi(env) > 0) baud = std::atoi(env);
+    std::vector<std::string> pos;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i] ? argv[i] : "";
+        if (a == "--wifi" || a == "--ble" || a == "--both") {
+            mode = a.substr(2);
+        } else if ((a == "--port" || a == "--baud") && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if (a == "--port") port = v;
+            else baud = std::atoi(v.c_str());
+        } else if (a.rfind("--", 0) == 0) {
+            usage();
+            return 2;
+        } else {
+            pos.push_back(a);
+        }
     }
+    if (baud <= 0) {
+        usage();
+        return 2;
+    }
+    // Until the Bruce wardriving port lands, only the Wi-Fi pass exists.
+    if (mode == "ble") {
+        std::printf("BLE wardriving is not available yet on CardputerZero.\n"
+                    "Use \"Scan WiFi Networks\" for now.\n");
+        return 1;
+    }
+    if (mode == "both") {
+        std::printf("BLE wardriving is not available yet: scanning Wi-Fi only.\n");
+    }
+    const std::string iface = (!pos.empty() && !pos[0].empty()) ? pos[0] : "wlan0";
+
+    if (port == "Auto") {
+        const auto ports = gps::auto_order("/dev/serial0", gps::port_candidates());
+        std::printf("Auto: searching GPS on %zu port(s)...\n", ports.size());
+        // g_stop cancels the probe within ~100 ms, so Back (SIGTERM) does not
+        // wait for every port/baud window to run out.
+        const auto res = gps::auto_detect(ports, baud, {9600, 19200, 38400, 57600, 115200}, 1500, &g_stop);
+        if (res.kind == gps::ProbeResult::Kind::Cancelled || g_stop) {
+            std::printf("\nStopped before a GPS was found.\n");
+            return 0;
+        }
+        if (res.kind != gps::ProbeResult::Kind::Found) {
+            std::printf("%s\n", res.message.c_str());
+            return 1;
+        }
+        std::printf("Auto: %s\n", res.message.c_str());
+        port = res.port;
+        baud = res.baud;
+    }
+    // The fix comes from the GPS serial port directly (no gpsd): opened for
+    // the whole run, released on exit.
+    if (g_stop) {
+        return 0;
+    }
+    gps::Session session;
+    gps::OpenResult open_res;
+    if (!session.open(port, baud, open_res)) {
+        std::printf("%s\n", open_res.message.c_str());
+        return 1;
+    }
+    std::printf("GPS on %s @ %d bps\n", port.c_str(), baud);
+
     std::string outfile;
-    if (argc >= 2 && argv[1] && argv[1][0]) {
-        outfile = argv[1];
+    if (pos.size() >= 2 && !pos[1].empty()) {
+        outfile = pos[1];
     } else {
         const char* home = std::getenv("HOME");
         std::string dir = (home && home[0]) ? std::string(home) + "/.bruce" : "/tmp";
@@ -213,13 +283,17 @@ int wardrive_main(int argc, char** argv) {
     bool warned_gps = false;
     while (!g_stop) {
         double lat = 0, lon = 0, alt = 0;
-        if (!get_fix(lat, lon, alt)) {
-            if (!warned_gps) {
-                std::printf("waiting for a GPS fix (is gpsd running? LoRa+GNSS Cap: "
-                            "sudo gpsd -n -s 115200 /dev/serial0)...\n");
+        bool lost = false;
+        if (!get_fix(session, lat, lon, alt, lost)) {
+            if (lost) {
+                std::printf("GPS not Found!\n");
+                break;
+            }
+            if (!warned_gps && !g_stop) {
+                std::printf("waiting for a GPS fix (antenna outdoors; check GPS > Config "
+                            "port/baud if this never ends)...\n");
                 warned_gps = true;
             }
-            for (int i = 0; i < 20 && !g_stop; ++i) usleep(100000); // ~2s
             continue;
         }
         warned_gps = false;
@@ -240,6 +314,7 @@ int wardrive_main(int argc, char** argv) {
         for (int i = 0; i < 20 && !g_stop; ++i) usleep(100000); // ~2s between passes
     }
 
+    session.close();
     fclose(csv);
     std::printf("\nStopped. %zu networks logged to %s\n", seen.size(), outfile.c_str());
     return 0;

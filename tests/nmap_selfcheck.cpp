@@ -6,7 +6,7 @@
  * Standalone self-check for the Nmap guided-flow state machine. Not part of the
  * CMake build. Run manually:
  *
- *   g++ -std=c++17 -Isrc/model src/model/tool_catalog.cpp \
+ *   g++ -std=c++17 -Isrc/model src/model/tool_catalog.cpp src/model/gps_config.cpp \
  *       tests/nmap_selfcheck.cpp -o /tmp/nmap_check && /tmp/nmap_check
  *
  * Verifies the discover -> pick host -> Fast/Full drill-down: row layout in each

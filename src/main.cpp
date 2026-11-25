@@ -10,13 +10,17 @@
 #include "cc1101.h"
 #include "evil_portal.h"
 #include "gps.h"
+#include "gps_config.h"
 #include "gps_tracker.h"
 #include "gpx_writer.h"
 #include "root_sh.h"
 #include "rfid_st25r.h"
 #include "wardrive.h"
 
+#include <algorithm>
 #include <cstring>
+#include <string>
+#include <vector>
 
 int main(int argc, char** argv) {
     // Hidden subcommand used by the "Use CC1101 CAP" menu entry: the app
@@ -92,13 +96,59 @@ int main(int argc, char** argv) {
     // Bruce GPS Tracker on the console (same core as the GPS Tracker screen):
     // `--gps-tracker [port] [baud]`, GPX to ~/BruceGPS. For SSH testing.
     if (argc >= 2 && std::strcmp(argv[1], "--gps-tracker") == 0) {
-        // Shutdown (incl. the bounded storage drain) is handled inside, under
-        // the one process-wide deadline.
-        return platform::gps::gps_tracker_main(argc - 2, argv + 2);
+        // Missing [port] [baud] come from GPS > Config (~/.bruce/gps.conf) with
+        // $GPS_UART / $GPS_BAUD on top; without a saved config the console
+        // keeps its LoRa+GNSS Cap default (/dev/serial0 @ 115200) - no CAP
+        // detection runs on this path. Shutdown (incl. the bounded storage
+        // drain) is handled inside, under the one process-wide deadline.
+        const auto eff = model::gps_config::resolve(
+            model::gps_config::load(model::gps_config::board_default(/*cap_lora=*/true)));
+        std::vector<std::string> args(argv + 2, argv + argc);
+        if (args.empty() || args[0].empty()) {
+            args.resize(std::max<size_t>(args.size(), 1));
+            args[0] = eff.port;
+        }
+        if (args.size() < 2) {
+            args.push_back(std::to_string(eff.baud));
+        }
+        std::vector<char*> cargs;
+        for (auto& a : args) {
+            cargs.push_back(a.data());
+        }
+        cargs.push_back(nullptr);
+        return platform::gps::gps_tracker_main(static_cast<int>(args.size()), cargs.data());
     }
-    // Wi-Fi wardriving: scan + gpsd fix -> WiGLE CSV for wigle.net upload.
+    // Wi-Fi wardriving: scan + in-app GPS fix -> WiGLE CSV for wigle.net upload.
     if (argc >= 2 && std::strcmp(argv[1], "--wardrive") == 0) {
-        return platform::wardrive_main(argc - 2, argv + 2);
+        // A missing --port / --baud comes from GPS > Config, as for
+        // --gps-tracker: explicit options > $GPS_UART / $GPS_BAUD >
+        // ~/.bruce/gps.conf > /dev/serial0 @ 115200. The GPS menu always
+        // passes both, so its root child never reads a config from HOME.
+        std::vector<std::string> args(argv + 2, argv + argc);
+        bool has_port = false;
+        bool has_baud = false;
+        for (const auto& a : args) {
+            has_port = has_port || a == "--port";
+            has_baud = has_baud || a == "--baud";
+        }
+        if (!has_port || !has_baud) {
+            const auto eff = model::gps_config::resolve(
+                model::gps_config::load(model::gps_config::board_default(/*cap_lora=*/true)));
+            std::vector<std::string> opts;
+            if (!has_port) {
+                opts.insert(opts.end(), {"--port", eff.port});
+            }
+            if (!has_baud) {
+                opts.insert(opts.end(), {"--baud", std::to_string(eff.baud)});
+            }
+            args.insert(args.begin(), opts.begin(), opts.end());
+        }
+        std::vector<char*> cargs;
+        for (auto& a : args) {
+            cargs.push_back(a.data());
+        }
+        cargs.push_back(nullptr);
+        return platform::wardrive_main(static_cast<int>(args.size()), cargs.data());
     }
     // Evil Portal: AP + DNS-hijacked captive portal capturing credentials
     // (Linux port of the ESP32 Bruce feature; see platform/evil_portal.h).
