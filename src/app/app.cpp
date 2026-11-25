@@ -16,6 +16,7 @@
 #include "linux_input.h"
 #include "screen_manager.h"
 #include "base_viewmodel.h"
+#include "esc_hold_hint.h"
 #include "theme.h"
 #include "screenshot_service.h"
 #include "toast.h"
@@ -249,6 +250,10 @@ int Application::run() {
     // Global PrintScreen shortcut: owns the toast on lv_layer_top() for the
     // app's lifetime and unregisters its listener when the loop exits.
     ScreenshotController screenshot_shortcuts(view_model);
+
+    // "Hold ESC 3s to return home" banner after 0.5 s of physical ESC, over
+    // every screen. Display only: APPLaunch itself ends the app at 3 s.
+    view::widgets::EscHoldHint esc_hold_hint(lv_layer_top());
 
     // Bruce boot animation: the shark lunges toward the screen over the menu,
     // then fades out. Non-blocking; driven by the LVGL timer loop below.
