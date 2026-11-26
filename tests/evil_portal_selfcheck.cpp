@@ -8,7 +8,7 @@
  *
  *   g++ -std=c++17 -Isrc/platform -Isrc/model tests/evil_portal_selfcheck.cpp \
  *       src/platform/evil_portal.cpp src/platform/root_sh.cpp \
- *       src/model/tool_catalog.cpp \
+ *       src/model/tool_catalog.cpp src/model/gps_config.cpp \
  *       -o /tmp/portal_check && /tmp/portal_check
  *
  * Checks the Bruce-parity web logic (route table, capture format, CSV files,

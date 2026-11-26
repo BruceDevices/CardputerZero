@@ -92,9 +92,10 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, libstdc++6, libgcc-s1, libfreetype6, li
 # never block installation - which a hard Depends does under `dpkg -i` / offline
 # apt. `apt install ./pkg.deb` still pulls these in automatically by default.
 # Tools that back a visible menu feature a user expects to work out of the box
-# (SDR listing/capture, PN532 NFC, wardrive GPS, QR). `apt install ./pkg.deb`
-# pulls Recommends automatically, so these install with zero manual apt.
-set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "iproute2, iw, wireless-tools, rfkill, bluez, curl, netcat-openbsd, nmap, smbclient, i2c-tools, gpiod, flashrom, rtl-sdr, rtl-433, libnfc-bin, libnfc-examples, gpsd, gpsd-clients, qrencode, hostapd, dnsmasq")
+# (SDR listing/capture, PN532 NFC, QR). `apt install ./pkg.deb` pulls
+# Recommends automatically, so these install with zero manual apt. No gpsd: the
+# GPS features read the serial port themselves (and gpsd would hold the port).
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "iproute2, iw, wireless-tools, rfkill, bluez, curl, netcat-openbsd, nmap, smbclient, i2c-tools, gpiod, flashrom, rtl-sdr, rtl-433, libnfc-bin, libnfc-examples, qrencode, hostapd, dnsmasq")
 # Suggests = heavier / offensive tooling the user opts into per feature (not
 # auto-installed). Promote to Recommends above if you want it on by default.
 set(CPACK_DEBIAN_PACKAGE_SUGGESTS "aircrack-ng, mdk4, arp-scan, v4l-utils, lirc, alsa-utils, dsniff, kismet")

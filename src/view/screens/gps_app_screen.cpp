@@ -6,7 +6,8 @@
 
 #include "gps_app_screen.h"
 
-#include "bruce_module.h"
+#include "gps_config.h"
+#include "gps_port.h"
 #include "logger.h"
 #include "theme.h"
 #include "ui_const.h"
@@ -14,6 +15,8 @@
 #include <cctype>
 #include <cstdlib>
 #include <ctime>
+#include <thread>
+#include <unistd.h>
 
 namespace screen {
 namespace {
@@ -50,25 +53,9 @@ std::string upper(std::string s) {
     return s;
 }
 
-// Port: $GPS_UART, else the HAT UART. Baud: $GPS_BAUD, else what the startup
-// NMEA probe found, else the board default - 115200 for the LoRa+GNSS Cap
-// (like Bruce's per-board defaults), Bruce's 9600 otherwise.
-void resolve_port(std::string& port, int& baud) {
-    port = "/dev/serial0";
-    if (const char* env = std::getenv("GPS_UART"); env && env[0]) {
-        port = env;
-    }
-    if (const char* env = std::getenv("GPS_BAUD"); env && std::atoi(env) > 0) {
-        baud = std::atoi(env);
-        return;
-    }
-    const auto& mods = hal::modules();
-    if (mods.gps.baud > 0) {
-        baud = mods.gps.baud;
-    } else {
-        baud = mods.kind == hal::CapKind::CapLora ? 115200 : 9600;
-    }
-}
+// Auto: each candidate x baud gets this long to show one valid sentence (the
+// receivers send a burst at least once a second).
+constexpr int kAutoProbeMs = 1500;
 
 } // namespace
 
@@ -78,6 +65,7 @@ GpsAppScreen::GpsAppScreen(viewmodel::BaseViewModel& view_model, app::AssetManag
 }
 
 GpsAppScreen::~GpsAppScreen() {
+    cancel_probe();
     if (leave_timer_) {
         lv_timer_delete(leave_timer_);
         leave_timer_ = nullptr;
@@ -137,9 +125,72 @@ void GpsAppScreen::build_widgets() {
 }
 
 void GpsAppScreen::start_feature() {
-    resolve_port(port_, baud_);
+    // GPS > Config (~/.bruce/gps.conf, else the board default), with
+    // $GPS_UART / $GPS_BAUD on top.
+    const auto eff = model::gps_config::resolve(model::gps_config::load());
+    port_ = eff.port;
+    baud_ = eff.baud;
     tracker_ = std::make_unique<gps::Tracker>(gps::tracker_options_from_env());
 
+    if (model::gps_config::is_auto(port_) && ::geteuid() != 0) {
+        start_probe();
+        return;
+    }
+    open_port();
+}
+
+// Auto: probe the candidate ports on a worker thread (each one is opened only
+// for its probe window) while the screen shows "Searching GPS..."; the UI
+// thread only polls the job's done flag from the tick timer.
+void GpsAppScreen::start_probe() {
+    phase_ = Phase::Probing;
+    probe_ = std::make_shared<ProbeJob>();
+    const auto ports = gps::auto_order(model::gps_config::current_board_default().port, gps::port_candidates());
+    LOG_INFO("gps: Auto port: probing {} candidate(s) at {} bps first", ports.size(), baud_);
+    auto job = probe_;
+    const int baud = baud_;
+    std::thread([job, ports, baud]() {
+        job->result = gps::auto_detect(ports, baud, model::gps_config::baud_rates(), kAutoProbeMs, &job->cancel);
+        job->done.store(true);
+    }).detach(); // holds its own reference: Back never waits for a probe window
+
+    lv_label_set_text(title_, "GPS TRACKER");
+    lv_obj_set_style_bg_color(popup_, view::palette(view_model().is_dark_mode()).primary, 0);
+    lv_obj_set_style_text_font(popup_label_, &lv_font_montserrat_14, 0);
+    lv_label_set_text(popup_label_, "Searching GPS...");
+    lv_obj_remove_flag(popup_, LV_OBJ_FLAG_HIDDEN);
+    tick_timer_ = lv_timer_create(tick_cb, kTickMs, this);
+}
+
+void GpsAppScreen::cancel_probe() {
+    if (probe_) {
+        probe_->cancel.store(true);
+        probe_.reset();
+    }
+}
+
+void GpsAppScreen::finish_probe() {
+    const gps::ProbeResult result = probe_->result;
+    probe_.reset();
+    if (tick_timer_) {
+        lv_timer_delete(tick_timer_);
+        tick_timer_ = nullptr;
+    }
+    phase_ = Phase::Running;
+    if (result.kind == gps::ProbeResult::Kind::Found) {
+        LOG_INFO("gps: Auto port: {}", result.message);
+        port_ = result.port;
+        baud_ = result.baud;
+        open_port();
+        return;
+    }
+    LOG_INFO("gps: Auto port: {}", result.message);
+    tracker_->fail_open(result.message, /*not_found=*/false); // waits for OK: the text is long
+    render();
+    begin_closing(/*by_back=*/false);
+}
+
+void GpsAppScreen::open_port() {
     // Shared entry with --gps-tracker: refuses root before the UART is opened.
     if (!gps::begin_tracker(session_, *tracker_, port_, baud_, now_ms())) {
         LOG_INFO("gps: GPS Tracker not started on {} @ {}: {}", port_, baud_, tracker_->frame().popup_text);
@@ -155,6 +206,12 @@ void GpsAppScreen::start_feature() {
 
 void GpsAppScreen::tick() {
     if (!tracker_) {
+        return;
+    }
+    if (phase_ == Phase::Probing) {
+        if (probe_ && probe_->done.load()) {
+            finish_probe();
+        }
         return;
     }
     if (phase_ == Phase::Running) {
@@ -289,6 +346,17 @@ void GpsAppScreen::leave() {
         leave_timer_ = nullptr;
     }
     switch (phase_) {
+        case Phase::Probing:
+            // Nothing opened yet: stop the probe (it exits within ~100 ms on
+            // its own thread) and leave at once.
+            cancel_probe();
+            if (tick_timer_) {
+                lv_timer_delete(tick_timer_);
+                tick_timer_ = nullptr;
+            }
+            phase_ = Phase::Done;
+            view_model().go_back();
+            return;
         case Phase::Running:
             begin_closing(/*by_back=*/true); // ESC: end() + ~GPSTracker()
             return;

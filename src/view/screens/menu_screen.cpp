@@ -9,10 +9,12 @@
 #include "asset_manager.h"
 #include "bindings.h"
 #include "bruce_module.h"
+#include "gps_port.h"
 #include "theme.h"
 #include "tool_catalog.h"
 #include "ui_const.h"
 
+#include <string>
 #include <unordered_map>
 
 namespace screen {
@@ -33,6 +35,39 @@ inline lv_color_t bruce_accent() {
 std::unordered_map<int, size_t>& remembered_selection() {
     static std::unordered_map<int, size_t> sel;
     return sel;
+}
+
+// Error from a navigation row (GPS: Config save failed), shown as a popup
+// over the rebuilt list - Bruce's displayError() - then cleared.
+std::string& pending_error() {
+    static std::string text;
+    return text;
+}
+
+// Red popup centred over the list, removed after a few seconds (it goes away
+// with the screen if that is rebuilt first).
+void show_error_popup(lv_obj_t* parent, const std::string& text) {
+    auto* popup = lv_obj_create(parent);
+    lv_obj_remove_style_all(popup);
+    lv_obj_set_width(popup, view::kScreenWidth - 2 * 10);
+    lv_obj_set_height(popup, LV_SIZE_CONTENT);
+    lv_obj_set_style_radius(popup, 7, 0);
+    lv_obj_set_style_bg_opa(popup, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(popup, lv_color_hex(0xd32f2f), 0); // TFT_RED stripe
+    lv_obj_set_style_pad_ver(popup, 6, 0);
+    lv_obj_set_style_pad_hor(popup, 8, 0);
+    lv_obj_add_flag(popup, LV_OBJ_FLAG_FLOATING);
+    lv_obj_align(popup, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(popup, LV_OBJ_FLAG_SCROLLABLE);
+    auto* label = lv_label_create(popup);
+    lv_obj_set_width(label, LV_PCT(100));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(label, text.size() <= 32 ? &lv_font_montserrat_14 : &lv_font_montserrat_12, 0);
+    lv_label_set_text(label, text.c_str());
+    lv_obj_move_foreground(popup);
+    lv_obj_delete_delayed(popup, 3000);
 }
 
 size_t restore_selection(int level, size_t count) {
@@ -136,6 +171,13 @@ void MenuScreen::build_list(lv_obj_t* content) {
         const auto& pins = hal::modules().cc1101;
         model::refresh_rf_category(hal::has_cc1101(), pins.cs, pins.gdo0);
     }
+    if (category_index_ >= 0 &&
+        category_index_ < static_cast<int>(pre_refresh_catalog.size()) &&
+        std::string(pre_refresh_catalog[static_cast<size_t>(category_index_)].label) == "GPS") {
+        // Config > GPS Port's picker lists the serial nodes present right now
+        // (a readdir of /dev; no port is opened here).
+        model::refresh_gps_category(platform::gps::port_candidates());
+    }
     const auto& catalog = model::tool_catalog();
 
     auto* header = lv_label_create(content);
@@ -146,7 +188,7 @@ void MenuScreen::build_list(lv_obj_t* content) {
     if (std::string(category.label) == "Sub-GHz / RF" && !hal::has_cc1101()) {
         lv_label_set_text(header, "Sub-GHz / RF (CC1101 not detected)");
     } else {
-        lv_label_set_text(header, category.label);
+        lv_label_set_text(header, model::category_header(category_index_).c_str());
     }
 
     auto* list = lv_list_create(content);
@@ -158,6 +200,14 @@ void MenuScreen::build_list(lv_obj_t* content) {
 
     const size_t item_count = catalog[static_cast<size_t>(category_index_)].actions.size();
     selected_index_ = restore_selection(category_index_, item_count);
+    if (remembered_selection().count(category_index_) == 0) {
+        // Start on the current value (GPS Baudrate / port picker), like
+        // Bruce's loopOptions(options, index).
+        const int preferred = model::preferred_selection(category_index_);
+        if (preferred >= 0 && static_cast<size_t>(preferred) < item_count) {
+            selected_index_ = static_cast<size_t>(preferred);
+        }
+    }
     rows_.reserve(item_count);
     for (size_t i = 0; i < item_count; ++i) {
         const char* label = catalog[static_cast<size_t>(category_index_)].actions[i].label;
@@ -167,6 +217,9 @@ void MenuScreen::build_list(lv_obj_t* content) {
         // in the content area; trim the vertical padding so ~4 are visible.
         lv_obj_set_style_pad_ver(row, 3, 0);
         lv_obj_set_style_text_font(row, &lv_font_montserrat_14, 0);
+        if (catalog[static_cast<size_t>(category_index_)].actions[i].dimmed) {
+            lv_obj_set_style_text_opa(row, LV_OPA_40, 0); // disabled option
+        }
         rows_.push_back(row);
     }
 
@@ -174,6 +227,11 @@ void MenuScreen::build_list(lv_obj_t* content) {
     // further down the list.
     lv_obj_update_layout(list);
     apply_selection_highlight();
+
+    if (!pending_error().empty()) {
+        show_error_popup(content, pending_error());
+        pending_error().clear();
+    }
 
     nav_bar().set_icon(1, view::NAV_UP, move_up_cb, this);
     nav_bar().set_icon(2, view::NAV_SELECT, select_cb, this);
@@ -261,6 +319,9 @@ void MenuScreen::open_selected() {
     // A row with no argv is a navigation row (not a launchable tool).
     const auto& category = model::tool_catalog()[static_cast<size_t>(category_index_)];
     const auto& action = category.actions[selected_index_];
+    if (action.dimmed) {
+        return; // a disabled option does nothing (GPS Port > "Save Config")
+    }
     if (action.rf_tool != model::RfTool::None) {
         view_model().show_rf(category_index_, static_cast<int>(selected_index_));
         return;
@@ -283,10 +344,23 @@ void MenuScreen::open_selected() {
             view::set_accent(static_cast<int>(selected_index_));
             view_model().refresh_theme();
         } else {
-            // e.g. Nmap's "pick host" / "back": mutate state, re-enter category.
-            model::on_navigation_action(category_index_, static_cast<int>(selected_index_));
+            // e.g. Nmap's "pick host" / "back": mutate state, re-enter category
+            // - or leave it for the root menu (GPS "Main Menu").
+            const bool leave = model::on_navigation_action(category_index_, static_cast<int>(selected_index_));
+            pending_error() = model::take_navigation_error(category_index_);
+            if (!pending_error().empty()) {
+                // Same list again (edited value kept), the row still selected
+                // for a retry, with the error on top.
+                remembered_selection()[category_index_] = selected_index_;
+                view_model().show_menu(category_index_);
+                return;
+            }
             remembered_selection().erase(category_index_); // list contents changed
-            view_model().show_menu(category_index_);
+            if (leave) {
+                view_model().show_menu(-1);
+            } else {
+                view_model().show_menu(category_index_);
+            }
         }
         return;
     }

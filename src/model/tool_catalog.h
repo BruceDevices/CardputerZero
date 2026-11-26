@@ -73,6 +73,9 @@ struct ToolAction {
     // Non-None opens the shared GpsAppScreen running that Bruce GPS feature
     // instead of the tool-run log. `argv` is only a harmless fallback print.
     GpsApp gps_app = GpsApp::None;
+    // Shown greyed out and does nothing when selected (Bruce's disabled
+    // option, e.g. GPS Port > "Save Config" until something changed).
+    bool dimmed = false;
 };
 
 // A menu category shown on the root menu (e.g. "Wi-Fi", "Responder").
@@ -109,9 +112,28 @@ std::string rf_recordings_dir();
 
 // A ToolAction with an empty argv is a navigation row (not a launchable tool):
 // selecting it mutates dynamic state instead of running a process. Screens route
-// such a row here, then re-enter the same category to show the updated list.
-// Safe no-op for categories/items that are not navigation rows.
-void on_navigation_action(int category_index, int item_index);
+// such a row here, then re-enter the same category to show the updated list -
+// or, when this returns true (GPS "Main Menu"), leave the category for the
+// root menu. Safe no-op (false) for categories/items that are not navigation rows.
+bool on_navigation_action(int category_index, int item_index);
+
+// Error text left by the last navigation row of a category (GPS: a failed
+// Config save), for the screen's error popup; "" when none. Clears it.
+std::string take_navigation_error(int category_index);
+
+// The list header for a category: its label, except where the firmware shows
+// a state-dependent title (GPS: "GPS (<baud> bps)", "GPS Config", ...).
+std::string category_header(int category_index);
+
+// Row a freshly (re)built category list should highlight first, like Bruce's
+// loopOptions(options, index) starting on the current value (GPS Baudrate /
+// port picker), or -1 for the default (remembered row / first row).
+int preferred_selection(int category_index);
+
+// GPS category: hand in the existing serial nodes for Config > GPS Port's
+// picker (the view lists /dev via platform::gps::port_candidates()) and
+// rebuild the rows. The model itself never touches /dev.
+void refresh_gps_category(const std::vector<std::string>& port_candidates);
 
 // Back key (nav slot 0 / key 4 / ESC) pressed on a category's tool list.
 // Data-driven categories with an in-place drill-down undo one level here,

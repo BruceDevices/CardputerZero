@@ -7,9 +7,11 @@
 #pragma once
 
 #include "base_screen.h"
+#include "gps_port.h"
 #include "gps_session.h"
 #include "gps_tracker.h"
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -32,7 +34,19 @@ private:
     void build_content(lv_obj_t* content) override;
     void build_widgets();
     void start_feature();
-    enum class Phase { Running, Closing, Done };
+    void start_probe();
+    void cancel_probe();
+    void finish_probe();
+    void open_port();
+    // Probing: GPS Port = Auto, the candidate ports are being probed.
+    enum class Phase { Probing, Running, Closing, Done };
+
+    // Shared with the detached probe thread, which keeps it alive.
+    struct ProbeJob {
+        std::atomic<bool> cancel{false};
+        std::atomic<bool> done{false};
+        platform::gps::ProbeResult result; // written before `done`
+    };
 
     void tick();
     void render();
@@ -61,6 +75,7 @@ private:
     int baud_ = 0;
     platform::gps::Session session_;
     std::unique_ptr<platform::gps::Tracker> tracker_;
+    std::shared_ptr<ProbeJob> probe_;
 };
 
 } // namespace screen

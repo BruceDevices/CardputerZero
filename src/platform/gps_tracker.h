@@ -195,8 +195,10 @@ bool begin_tracker(Session& session, Tracker& tracker, const std::string& port, 
 const char* tracker_root_refusal();
 
 // `<self> --gps-tracker [port] [baud]`: the same tracker on the console (SSH
-// testing on the device). Port/baud default to $GPS_UART / $GPS_BAUD, else
-// /dev/serial0 @ 115200 (LoRa+GNSS Cap). Refuses to run as root.
+// testing on the device). main() fills missing args from GPS > Config
+// (~/.bruce/gps.conf, after $GPS_UART / $GPS_BAUD), else /dev/serial0 @ 115200
+// (LoRa+GNSS Cap). Port "Auto" probes the candidate ports for NMEA first.
+// Refuses to run as root.
 int gps_tracker_main(int argc, char** argv);
 
 } // namespace platform::gps

@@ -9,8 +9,10 @@
 
 #include "gps_tracker.h"
 
+#include "gps_port.h"
 #include "gps_session.h"
 
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdarg>
@@ -57,6 +59,8 @@ bool starts_with(const std::string& s, const char* prefix) {
 
 #if defined(__linux__)
 volatile sig_atomic_t g_stop = 0;
+// Cancels a running Auto port probe (lock-free, so safe in the handler).
+std::atomic<bool> g_cancel_probe{false};
 // First SIGINT/SIGTERM: orderly stop (release the UART, close the track within
 // the shutdown deadline). A second one forces the exit at once.
 void on_signal(int sig) {
@@ -64,6 +68,7 @@ void on_signal(int sig) {
         _exit(128 + sig);
     }
     g_stop = 1;
+    g_cancel_probe.store(true);
 }
 
 uint64_t now_ms() {
@@ -531,6 +536,23 @@ int gps_tracker_main(int argc, char** argv) {
     }
     if (argc >= 2 && argv[1] && std::atoi(argv[1]) > 0) {
         baud = std::atoi(argv[1]);
+    }
+
+    // GPS Port = Auto: probe the candidates first (the root refusal below
+    // still comes before any port is opened).
+    if (port == "Auto" && ::geteuid() != 0) {
+        const auto ports = auto_order("/dev/serial0", port_candidates());
+        std::printf("Auto: searching GPS on %zu port(s)...\n", ports.size());
+        // Bruce's Baudrate list (model::gps_config::baud_rates()).
+        const ProbeResult res =
+            auto_detect(ports, baud, {9600, 19200, 38400, 57600, 115200}, 1500, &g_cancel_probe);
+        if (res.kind != ProbeResult::Kind::Found) {
+            std::printf("[error] %s\n", res.message.c_str());
+            return 1;
+        }
+        std::printf("Auto: %s\n", res.message.c_str());
+        port = res.port;
+        baud = res.baud;
     }
 
     const Tracker::Options options = tracker_options_from_env();

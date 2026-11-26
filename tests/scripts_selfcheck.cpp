@@ -6,7 +6,7 @@
  * Standalone self-check for the Scripts category discovery. Not part of the
  * CMake build. Run manually:
  *
- *   g++ -std=c++17 -Isrc/model src/model/tool_catalog.cpp \
+ *   g++ -std=c++17 -Isrc/model src/model/tool_catalog.cpp src/model/gps_config.cpp \
  *       tests/scripts_selfcheck.cpp -o /tmp/scripts_check && /tmp/scripts_check
  */
 

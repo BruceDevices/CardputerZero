@@ -6,6 +6,7 @@
 
 #include "gps_session.h"
 
+#include "gps_port.h"
 #include "uart_speed.h"
 
 #include <cerrno>
@@ -70,7 +71,7 @@ bool Session::open(const std::string& port, int baud, OpenResult& result) {
             case EACCES:
             case EPERM:
                 result.error = OpenError::Permission;
-                result.message = "Cannot open " + port + ": permission denied (add user to dialout)";
+                result.message = permission_message(port);
                 break;
             case EBUSY:
                 result.error = OpenError::Busy;
