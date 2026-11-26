@@ -8,6 +8,17 @@ CardputerZero. No prior CMake knowledge needed — copy/paste the commands.
 > device, and install it with `apt`. `apt` also pulls in the security tools the
 > app launches (curl, netcat, smbclient, iw, bluez, rfkill, …) automatically.
 
+> **Don't want to build?** A prebuilt beta `.deb` of the latest `main` or `dev` is
+> published on every push. On the CardputerZero, run:
+>
+> ```bash
+> curl -fsSL https://github.com/BruceDevices/CardputerZero/releases/download/beta/install.sh | bash
+> ```
+> after you have it downloaded, simply run the script and wait it download and install.
+>
+> and skip to [Step 5](#step-5--run-it). See the
+> [README](README.md#install-the-beta-build) for the manual download.
+
 ---
 
 ## What you need
