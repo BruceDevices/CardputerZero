@@ -118,7 +118,8 @@ int main(int argc, char** argv) {
         cargs.push_back(nullptr);
         return platform::gps::gps_tracker_main(static_cast<int>(args.size()), cargs.data());
     }
-    // Wi-Fi wardriving: scan + in-app GPS fix -> WiGLE CSV for wigle.net upload.
+    // Bruce Wardriving: `--wardrive wifi|ble|both ...`, Wi-Fi / BLE scans with
+    // the in-app GPS fix -> WiGLE 1.6 CSV in ~/BruceWardriving (wigle.net).
     if (argc >= 2 && std::strcmp(argv[1], "--wardrive") == 0) {
         // A missing --port / --baud comes from GPS > Config, as for
         // --gps-tracker: explicit options > $GPS_UART / $GPS_BAUD >

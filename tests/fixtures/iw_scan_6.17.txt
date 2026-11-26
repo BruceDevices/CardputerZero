@@ -1,0 +1,242 @@
+BSS 02:00:5e:20:00:01(on wlan0) -- associated
+	last seen: 395134.589s [boottime]
+	TSF: 11737554575888 usec (135d, 20:25:54)
+	freq: 2437.0
+	beacon interval: 100 TUs
+	capability: ESS Privacy SpectrumMgmt ShortSlotTime RadioMeasure (0x1511)
+	signal: -36.00 dBm
+	last seen: 122664 ms ago
+	Information elements from Probe Response frame:
+	SSID: TestNet-1
+	Supported rates: 1.0* 2.0* 5.5* 11.0* 18.0 24.0 36.0 54.0 
+	DS Parameter set: channel 6
+		Channels [1 - 13] @ 23 dBm
+	Power constraint: 0 dB
+	TPC report: TX power: 15 dBm
+	ERP: Barker_Preamble_Mode
+	Extended supported rates: 6.0 9.0 12.0 48.0 
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK
+		 * Capabilities: 16-PTKSA-RC 1-GTKSA-RC (0x000c)
+	BSS Load:
+		 * station count: 2
+		 * channel utilisation: 49/255
+		 * available admission capacity: 0 [*32us]
+	RM enabled capabilities:
+		Capabilities: 0x02 0x00 0x00 0x00 0x00
+			Neighbor Report
+		Nonoperating Channel Max Measurement Duration: 0
+		Measurement Pilot Capability: 0
+	Supported operating classes:
+		 * current operating class: 30
+		 * operating class: 30
+		 * operating class: 56
+		 * operating class: 57
+	HT capabilities:
+		Capabilities: 0x11ef
+			RX LDPC
+			HT20/HT40
+			SM Power Save disabled
+			RX HT20 SGI
+			RX HT40 SGI
+			TX STBC
+			RX STBC 1-stream
+			Max AMSDU length: 3839 bytes
+			DSSS/CCK HT40
+		Maximum RX AMPDU length 65535 bytes (exponent: 0x003)
+		Minimum RX AMPDU time spacing: 4 usec (0x05)
+		HT RX MCS rate indexes supported: 0-31
+		HT TX MCS rate indexes are undefined
+	HT operation:
+		 * primary channel: 6
+		 * secondary channel offset: no secondary
+		 * STA channel width: 20 MHz
+		 * RIFS: 1
+		 * HT protection: nonmember
+		 * non-GF present: 1
+		 * OBSS non-GF present: 1
+		 * dual beacon: 0
+		 * dual CTS protection: 0
+		 * STBC beacon: 0
+		 * L-SIG TXOP Prot: 0
+		 * PCO active: 0
+		 * PCO phase: 0
+	Overlapping BSS scan params:
+		 * passive dwell: 20 TUs
+		 * active dwell: 10 TUs
+		 * channel width trigger scan interval: 300 s
+		 * scan passive total per channel: 200 TUs
+		 * scan active total per channel: 20 TUs
+		 * BSS width channel transition delay factor: 5
+		 * OBSS Scan Activity Threshold: 0.25 %
+	Extended capabilities:
+		 * HT Information Exchange Supported
+		 * Extended Channel Switching
+		 * Event
+		 * BSS Transition
+		 * Interworking
+		 * QoS Map
+		 * Operating Mode Notification
+		 * Reserved Reserved Channel Schedule Management
+		 * Reserved Channel Schedule Management
+		 * TWT Responder Support
+	802.11u Interworking:
+		Network Options: 0x0
+			Network Type: 0 (Private)
+	802.11u Advertisement:
+		Query Response Info: 0x7f
+			Query Response Length Limit: 127
+			ANQP
+	HE capabilities:
+		HE MAC Capabilities (0x000512181000):
+			+HTC HE Supported
+			TWT Responder
+			BSR
+			Broadcast TWT
+			OM Control
+			Maximum A-MPDU Length Exponent: 2
+			OM Control UL MU Data Disable RX
+		HE PHY Capabilities: (0x222002c00f43951800cc00):
+			HE40/2.4GHz
+			242 tone RUs/2.4GHz
+			LDPC Coding in Payload
+			NDP with 4x HE-LTF and 3.2us GI
+			Rx HE MU PPDU from Non-AP STA
+			SU Beamformer
+			SU Beamformee
+			MU Beamformer
+			Beamformee STS <= 80MHz: 3
+			Sounding Dimensions <= 80MHz: 3
+			Ng = 16 SU Feedback
+			Codebook Size SU Feedback
+			Triggered SU Beamforming Feedback
+			Triggered CQI Feedback
+			PPE Threshold Present
+			Max NC: 3
+			TX 1024-QAM
+			RX 1024-QAM
+		HE RX MCS and NSS set <= 80 MHz
+			1 streams: MCS 0-11
+			2 streams: MCS 0-11
+			3 streams: MCS 0-11
+			4 streams: MCS 0-11
+			5 streams: not supported
+			6 streams: not supported
+			7 streams: not supported
+			8 streams: not supported
+		HE TX MCS and NSS set <= 80 MHz
+			1 streams: MCS 0-11
+			2 streams: MCS 0-11
+			3 streams: MCS 0-11
+			4 streams: MCS 0-11
+			5 streams: not supported
+			6 streams: not supported
+			7 streams: not supported
+			8 streams: not supported
+		PPE Threshold 0x1b 0x1c 0xc7 0x71 0x1c 0xc7 0x71 
+	HE Operation:
+		HE Operation Parameters: (0x010004)
+			Default PE Duration: 4
+			TXOP Duration RTS Threshold: 0
+			ER SU Disable
+		BSS Color: 22
+		Basic HE-MCS NSS Set: 0xfffc
+			1 streams: MCS 0-7
+			2 streams: not supported
+			3 streams: not supported
+			4 streams: not supported
+			5 streams: not supported
+			6 streams: not supported
+			7 streams: not supported
+			8 streams: not supported
+	WPS:	 * Version: 1.0
+	WPA:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK
+	WMM:	 * Parameter version 1
+		 * u-APSD
+		 * BE: CW 15-1023, AIFSN 3
+		 * BK: CW 15-1023, AIFSN 7
+		 * VI: CW 7-15, AIFSN 2, TXOP 3008 usec
+		 * VO: CW 3-7, AIFSN 2, TXOP 1504 usec
+BSS 02:00:5e:20:00:02(on wlan0)
+	last seen: 120 ms ago
+	freq: 5180.0
+	beacon interval: 100 TUs
+	capability: ESS Privacy SpectrumMgmt (0x0111)
+	signal: -61.00 dBm
+	SSID: Cafe, "Free"
+	DS Parameter set: channel 36
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: SAE
+		 * Capabilities: 1-PTKSA-RC 1-GTKSA-RC MFP-required MFP-capable (0x00cc)
+BSS 02:00:5e:20:00:03(on wlan0)
+	freq: 5745.0
+	capability: ESS Privacy (0x0011)
+	signal: -70.00 dBm
+	SSID: Transition
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK SAE FT/SAE
+		 * Capabilities: 1-PTKSA-RC 1-GTKSA-RC MFP-capable (0x008c)
+BSS 02:00:5e:20:00:04(on wlan0)
+	freq: 2412
+	capability: ESS Privacy ShortSlotTime (0x0411)
+	signal: -80.00 dBm
+	SSID: Corp
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: IEEE 802.1X FT/IEEE 802.1X
+		 * Capabilities: 1-PTKSA-RC 1-GTKSA-RC (0x0000)
+BSS 02:00:5e:20:00:05(on wlan0)
+	freq: 2462
+	capability: ESS Privacy (0x0011)
+	signal: -77.00 dBm
+	SSID: OldWep
+BSS 02:00:5e:20:00:06(on wlan0)
+	freq: 2484
+	capability: ESS ShortSlotTime (0x0401)
+	signal: -55.00 dBm
+	SSID: Open\x20
+BSS 02:00:5e:20:00:07(on wlan0)
+	freq: 5955
+	capability: ESS Privacy (0x0011)
+	signal: -66.00 dBm
+	SSID: EnhancedOpen
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: OWE
+		 * Capabilities: MFP-required MFP-capable (0x00c0)
+BSS 02:00:5e:20:00:08(on wlan0)
+	freq: 2437
+	capability: ESS Privacy (0x0031)
+	signal: -88.00 dBm
+	SSID: \xe3\x83\x86\xe3\x82\xb9\xe3\x83\x88
+	WPA:	 * Version: 1
+		 * Group cipher: TKIP
+		 * Pairwise ciphers: TKIP
+		 * Authentication suites: PSK
+	WPS:	 * Version: 1.0
+		 * Authentication suites: none listed here
+BSS 02:00:5e:20:00:09(on wlan0)
+	freq: 2437
+	capability: ESS Privacy (0x0011)
+	signal: -90.00 dBm
+	SSID: \x00\x00\x00\x00
+	RSN:	 * Version: 1
+		 * Group cipher: CCMP
+		 * Pairwise ciphers: CCMP
+		 * Authentication suites: PSK/SHA-256
+BSS 02:00:5e:20:00:0a(on wlan0)
+	freq: 2422
+	capability: ESS (0x0001)
+	signal: -71.00 dBm
+	SSID: line\x0abreak back\x5cslash

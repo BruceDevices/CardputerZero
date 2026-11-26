@@ -10,6 +10,9 @@
 #include "gps_port.h"
 #include "gps_session.h"
 #include "gps_tracker.h"
+#include "process_runner.h"
+#include "tool_catalog.h"
+#include "wardrive.h"
 
 #include <atomic>
 #include <memory>
@@ -18,13 +21,17 @@
 
 namespace screen {
 
-// Shared screen for Bruce firmware's GPS features (GPS Tracker today). It owns
-// the GPS serial Session for as long as it is shown - the port is opened on
-// entry and released on Back / when the feature ends - and renders the
-// feature's ScreenFrame the way the firmware draws it: the uppercased title,
+// Shared screen for Bruce firmware's GPS features. It renders the feature's
+// ScreenFrame the way the firmware draws it: the uppercased title,
 // padprintln() lines (adapted to ~6 body lines by platform::gps::fit_lines)
 // and the displayTextLine() / displayError() popups. Back stops the feature
 // like ESC on the Cardputer.
+//  - GPS Tracker runs in-app: the screen owns the GPS serial Session for as
+//    long as it is shown (opened on entry, released on Back / at the end).
+//  - Wardriving needs root (iw scan, BLE scan): it runs as the child
+//    `<self> --wardrive <mode> --ui ...` (through sudo, with the same password
+//    prompt as the other root screens), which owns the port and streams its
+//    frames (platform::wardrive::FrameDecoder). Back sends it SIGTERM.
 class GpsAppScreen : public BaseScreen {
 public:
     GpsAppScreen(viewmodel::BaseViewModel& view_model, app::AssetManager& assets);
@@ -38,6 +45,18 @@ private:
     void cancel_probe();
     void finish_probe();
     void open_port();
+    // Wardriving (child process)
+    void start_wardrive(const model::ToolAction& action);
+    void launch_wardrive(const std::vector<std::string>& argv, const std::string& stdin_payload);
+    void on_wardrive_output(const std::string& text);
+    void on_wardrive_exit();
+    void wardrive_failed(const std::string& message);
+    void show_sudo_dialog();
+    void close_sudo_dialog();
+    void submit_sudo_dialog();
+    static void process_cb(void* owner, const std::string& text, bool exited);
+    static void sudo_submit_cb(lv_event_t* event);
+    static void sudo_cancel_cb(lv_event_t* event);
     // Probing: GPS Port = Auto, the candidate ports are being probed.
     enum class Phase { Probing, Running, Closing, Done };
 
@@ -50,6 +69,7 @@ private:
 
     void tick();
     void render();
+    void render_frame(const platform::gps::ScreenFrame& frame);
     void begin_closing(bool by_back);
     void conclude();
     void shutdown();
@@ -76,6 +96,17 @@ private:
     platform::gps::Session session_;
     std::unique_ptr<platform::gps::Tracker> tracker_;
     std::shared_ptr<ProbeJob> probe_;
+
+    bool wardriving_ = false;
+    platform::ProcessRunner runner_;
+    platform::wardrive::FrameDecoder decoder_;
+    platform::gps::ScreenFrame local_frame_; // screen-made frames (launch errors)
+    std::string child_output_;               // raw output, for sudo's messages
+    std::vector<std::string> pending_argv_;
+    bool used_password_ = false;
+    lv_obj_t* sudo_modal_ = nullptr;
+    lv_obj_t* sudo_ta_ = nullptr;
+    lv_group_t* sudo_group_ = nullptr;
 };
 
 } // namespace screen

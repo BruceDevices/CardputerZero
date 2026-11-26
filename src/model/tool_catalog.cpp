@@ -7,6 +7,7 @@
 #include "tool_catalog.h"
 
 #include "gps_config.h"
+#include "id_parse.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -18,6 +19,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
+#include <pwd.h>
 #include <string>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -1110,14 +1112,41 @@ ToolAction gps_nav(const char* label, const char* description) {
     return ToolAction{label, description, {}};
 }
 
-// Wardriving rows point at the existing `--wardrive` subcommand until the
-// Bruce wardriving port lands; the configured port/baud (after $GPS_UART /
-// $GPS_BAUD) travel in argv, so the root child never reads the user's config.
+// The app user's home for ~/BruceWardriving: the wardriving child runs as
+// root, so it gets the directory in argv and never looks at its own $HOME.
+std::string app_user_home() {
+    // The app itself started with plain `sudo` (HOME is then root's): the
+    // invoking user's home, so the wardriving files are theirs. The child
+    // checks the home's owner against $SUDO_UID anyway.
+    if (::geteuid() == 0) {
+        uint32_t id = 0;
+        if (model::parse_id(std::getenv("SUDO_UID"), id)) {
+            if (const passwd* pw = ::getpwuid(static_cast<uid_t>(id)); pw && pw->pw_dir) {
+                return pw->pw_dir;
+            }
+        }
+    }
+    if (const char* home = std::getenv("HOME"); home && home[0]) {
+        return home;
+    }
+    if (const passwd* pw = ::getpwuid(::getuid()); pw && pw->pw_dir) {
+        return pw->pw_dir;
+    }
+    return "/tmp";
+}
+
+// GpsMenu::wardrivingMenu() rows: Bruce's Wardriving(scanWiFi, scanBLE) on
+// GpsAppScreen, run as the root child `--wardrive <mode> --ui`. The
+// configured port/baud (after $GPS_UART / $GPS_BAUD) and the user's home
+// travel in argv, so the root child never reads the user's config or HOME.
 ToolAction wardrive_action(const char* label, const char* mode, const char* description) {
     const auto eff = gpscfg::resolve(gpscfg::load());
-    return ToolAction{label, description,
-                      {self_exe_path(), "--wardrive", mode, "--port", eff.port, "--baud",
-                       std::to_string(eff.baud), wifi_interface()}};
+    ToolAction action{label, description,
+                      {self_exe_path(), "--wardrive", mode, "--ui", "--port", eff.port, "--baud",
+                       std::to_string(eff.baud), "--home", app_user_home(), "--iface", wifi_interface()},
+                      /*needs_root=*/true};
+    action.gps_app = GpsApp::Wardriving;
+    return action;
 }
 
 std::vector<ToolAction> build_gps_actions() {
@@ -1134,12 +1163,12 @@ std::vector<ToolAction> build_gps_actions() {
             break;
         case GpsView::Wardriving:
             // GpsMenu::wardrivingMenu().
-            acts.push_back(wardrive_action("Scan WiFi Networks", "--wifi",
-                                           "Log Wi-Fi networks with GPS positions to a WiGLE CSV (needs root)"));
-            acts.push_back(wardrive_action("Scan BLE Devices", "--ble",
-                                           "BLE wardriving (not available yet on CardputerZero)"));
-            acts.push_back(wardrive_action("Scan Both", "--both",
-                                           "Wi-Fi + BLE wardriving (Wi-Fi only for now; needs root)"));
+            acts.push_back(wardrive_action("Scan WiFi Networks", "wifi",
+                                           "Log Wi-Fi networks with GPS positions to ~/BruceWardriving (WiGLE CSV)"));
+            acts.push_back(wardrive_action("Scan BLE Devices", "ble",
+                                           "Log BLE devices with GPS positions to ~/BruceWardriving (WiGLE CSV)"));
+            acts.push_back(wardrive_action("Scan Both", "both",
+                                           "Log Wi-Fi networks and BLE devices to ~/BruceWardriving (WiGLE CSV)"));
             acts.push_back(gps_nav("Back", "Back to the GPS menu"));
             break;
         case GpsView::Config:

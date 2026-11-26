@@ -96,7 +96,23 @@ std::vector<ScreenLine> fit_lines(const std::vector<ScreenLine>& lines, size_t m
     }
     out.swap(compact);
 
-    // 2. Merge Bruce's paired detail lines, bottom-most pair first.
+    // 2. Wardriving: once "Scan done. ..." is printed, the "Start Scanning..."
+    //    above it is history (the firmware shows both).
+    for (size_t i = 0; out.size() > max_lines && i + 1 < out.size(); ++i) {
+        if (out[i].text != "Start Scanning...") {
+            continue;
+        }
+        bool done = false;
+        for (size_t j = i + 1; j < out.size(); ++j) {
+            done = done || starts_with(out[j].text, "Scan done.");
+        }
+        if (done) {
+            out.erase(out.begin() + static_cast<long>(i));
+        }
+        break;
+    }
+
+    // 3. Merge Bruce's paired detail lines, bottom-most pair first.
     static const char* const kPairs[][2] = {
         {"Sat:", "HDOP:"},
         {"Date:", "Time:"},
@@ -115,7 +131,17 @@ std::vector<ScreenLine> fit_lines(const std::vector<ScreenLine>& lines, size_t m
         }
     }
 
-    // 3. Clip the bottom, as text beyond the firmware's display edge is lost.
+    // 4. Wardriving: "GPS location updated" goes when the "Coord: ..." line
+    //    right after it says the same (a MAC cache clear or an extra line
+    //    would otherwise push "Scan done." off the screen).
+    for (size_t i = 0; out.size() > max_lines && i + 1 < out.size(); ++i) {
+        if (out[i].text == "GPS location updated" && starts_with(out[i + 1].text, "Coord:")) {
+            out.erase(out.begin() + static_cast<long>(i));
+            break;
+        }
+    }
+
+    // 5. Clip the bottom, as text beyond the firmware's display edge is lost.
     if (out.size() > max_lines) {
         out.resize(max_lines);
     }

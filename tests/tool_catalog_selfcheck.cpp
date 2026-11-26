@@ -239,22 +239,39 @@ int main() {
         assert(model::on_navigation_action(gps_idx, 3)); // "Main Menu" leaves too
         assert(labels()[0] == "Wardriving");
 
-        // Wardriving submenu -> the existing --wardrive with the configured port/baud.
+        // Wardriving submenu -> Bruce's Wardriving on GpsAppScreen: the root
+        // child `--wardrive <mode> --ui` with the configured port/baud, the
+        // app user's home (never the root child's own $HOME) and the Wi-Fi
+        // interface in argv.
         assert(!model::on_navigation_action(gps_idx, 0));
         assert(model::category_header(gps_idx) == "Wardriving");
         assert(labels() == (V{"Scan WiFi Networks", "Scan BLE Devices", "Scan Both", "Back"}));
-        const char* modes[] = {"--wifi", "--ble", "--both"};
+        const char* modes[] = {"wifi", "ble", "both"};
+        const std::string home_env = std::getenv("HOME") ? std::getenv("HOME") : "";
         for (size_t i = 0; i < 3; ++i) {
             const auto& a = row(i);
-            assert(a.argv.size() == 8 && a.argv[1] == "--wardrive" && a.argv[2] == modes[i]);
-            assert(a.argv[3] == "--port" && a.argv[4] == "/dev/serial0");
-            assert(a.argv[5] == "--baud" && a.argv[6] == "115200");
-            assert(model::action_needs_root(a) == (::geteuid() != 0));
-            assert(a.gps_app == model::GpsApp::None);
+            assert(a.argv.size() == 12 && a.argv[1] == "--wardrive" && a.argv[2] == modes[i]);
+            assert(a.argv[3] == "--ui");
+            assert(a.argv[4] == "--port" && a.argv[5] == "/dev/serial0");
+            assert(a.argv[6] == "--baud" && a.argv[7] == "115200");
+            assert(a.argv[8] == "--home" && !a.argv[9].empty());
+            assert(home_env.empty() || a.argv[9] == home_env);
+            assert(a.argv[10] == "--iface" && a.argv[11] == model::wifi_interface());
+            assert(a.needs_root && model::action_needs_root(a) == (::geteuid() != 0));
+            assert(a.gps_app == model::GpsApp::Wardriving);
+        }
+        {
+            // HOME unset: the passwd entry of the app user, not "".
+            const std::string saved = home_env;
+            ::unsetenv("HOME");
+            labels();
+            assert(!row(0).argv[9].empty());
+            if (!saved.empty()) ::setenv("HOME", saved.c_str(), 1);
+            labels();
         }
         ::setenv("GPS_UART", "/dev/ttyUSB7", 1); // env override wins over the config
         labels();
-        assert(row(0).argv[4] == "/dev/ttyUSB7");
+        assert(row(0).argv[5] == "/dev/ttyUSB7");
         ::unsetenv("GPS_UART");
         assert(model::on_category_back(gps_idx)); // Back key -> GPS menu
         assert(labels()[0] == "Wardriving");
@@ -281,7 +298,7 @@ int main() {
         assert(model::category_header(gps_idx) == "GPS (9600 bps)"); // back on the GPS menu
         assert(labels()[0] == "Wardriving");
         model::on_navigation_action(gps_idx, 0);
-        assert(row((labels(), 0)).argv[6] == "9600");
+        assert(row((labels(), 0)).argv[7] == "9600");
         model::on_category_back(gps_idx);
 
         // Config > GPS Port: "Port = ...", "Save Config" disabled until changed.
@@ -325,7 +342,7 @@ int main() {
                               "gpsBaudrate=9600\ngpsPort=/dev/ttyACM0\n");
         assert(labels()[0] == "Wardriving"); // saved -> GPS menu
         model::on_navigation_action(gps_idx, 0);
-        assert(row((labels(), 0)).argv[4] == "/dev/ttyACM0");
+        assert(row((labels(), 0)).argv[5] == "/dev/ttyACM0");
         model::on_category_back(gps_idx);
         labels();
 
