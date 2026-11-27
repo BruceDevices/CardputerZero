@@ -101,6 +101,10 @@ std::string last_cred_text(const std::vector<std::pair<std::string, std::string>
 // (Bruce's loadCustomHtml). Empty when absent.
 std::string parse_ap_tag(const std::string& html);
 
+// Custom-HTML capture file name: strip directory and ".html", lowercase, add
+// "_creds.csv" (Bruce's loadCustomHtml, evil_portal.cpp:500-502).
+std::string custom_csv_name(const std::string& path);
+
 // Parse one raw HTTP request head (+ optional body). Query-string args are
 // merged into args after body args; Content-Length bounds the body read.
 HttpRequest parse_http_request(const std::string& raw);

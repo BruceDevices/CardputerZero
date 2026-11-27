@@ -86,6 +86,18 @@ int main() {
     assert(parse_ap_tag("<html>\n<!-- AP=\"nope\" -->") == ""); // first line only
     assert(parse_ap_tag("<!-- AP=\"x\" --><!-- AP=\"y\" -->") == "x");
 
+    // --- custom HTML: output CSV name (Bruce lowercases the basename) --------
+    assert(custom_csv_name("/home/pi/.bruce/MyPortal.html") == "myportal_creds.csv");
+    assert(custom_csv_name("~/portal/Login_Page.html") == "login_page_creds.csv");
+    assert(custom_csv_name("ALLCAPS.html") == "allcaps_creds.csv");
+    assert(custom_csv_name("noext") == "noext_creds.csv"); // no ".html" suffix to strip
+    // ".html" stripped case-insensitively (MyPortal.HTML -> myportal_creds.csv).
+    assert(custom_csv_name("MyPortal.HTML") == "myportal_creds.csv");
+    assert(custom_csv_name("ALLCAPS.HTML") == "allcaps_creds.csv");
+    // ASCII-only lowercasing: A-Z map, the boundary bytes '@' (0x40, before
+    // 'A') and '[' (0x5B, after 'Z') and other non-letters stay unchanged.
+    assert(custom_csv_name("@AZ[-1.html") == "@az[-1_creds.csv");
+
     // --- HTTP request parsing ----------------------------------------------
     {
         const HttpRequest req = parse_http_request(
