@@ -58,6 +58,10 @@ public:
 
     bool running() const;
 
+    // Output the process wrote that the poll timer did not deliver before
+    // stop() (stop() removes the timer). Call on the LVGL thread after stop().
+    std::string take_pending_output();
+
 private:
     static void poll_timer_cb(lv_timer_t* timer);
     void reader_thread_main();

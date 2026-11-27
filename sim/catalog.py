@@ -8,7 +8,7 @@ real device could still shell out to it) AND a `sim` script of output lines the
 *simulator* streams instead. The pygame build has no radios, no wlan0, no CAP,
 so it never runs the real argv — it plays the canned `sim` lines. Offensive /
 credential-capturing rows (Evil Portal, deauth, beacon/BLE spam, Responder, MAC
-flood, DHCP starvation, wardrive) are simulated as STATUS-ONLY stubs that
+flood, DHCP starvation) are simulated as STATUS-ONLY stubs that
 perform nothing; they exist so the menu matches the device, not to carry out an
 attack on a desktop.
 
@@ -532,16 +532,59 @@ CATALOG = [
     # "GPS (<baud> bps)" header, no root "Main Menu" row, nothing is saved,
     # "Save Config" is never greyed, no Auto probe or save-error popup.
     Category("GPS", "Wardriving, GPS Tracker and GPS config", IC["gps"], [
+        # The C++ rows open GpsAppScreen running Bruce's Wardriving as the root
+        # child `--wardrive <mode> --ui`; the simulator plays the screens it
+        # shows (synthetic data).
         Action("Wardriving", "Scan Wi-Fi / BLE and log them with GPS positions",
                [], [], items=[
-                   Item("Scan WiFi Networks", _stub(
-                       "would run --wardrive --wifi --port /dev/serial0 --baud 115200 wlan0",
-                       "(Wi-Fi scan + in-app GPS fix -> WiGLE CSV)")),
+                   Item("Scan WiFi Networks", _ok(
+                       "WARDRIVING",
+                       "Found WiFi: 0",
+                       "Distance: 0.00km  ET: 00:00:00",
+                       "Initializing...",
+                       "Waiting for GPS data",
+                       "[ Waiting GPS: 0s ]",
+                       "GPS location not updated",
+                       "  Date: 2026-11-22   Time: 15:20:02",
+                       "  Sat:  0   HDOP: 25.50",
+                       "GPS location updated",
+                       "Coord: 0.012345, 0.067890",
+                       "Start Scanning...",
+                       "Scan done. WiFi: 3",
+                       "File: 261122_152002_wardriving",
+                       "(simulated: canned screens, no GPS / radio scan, nothing written to ~/BruceWardriving)")),
                    Item("Scan BLE Devices", _ok(
-                       "BLE wardriving is not available yet on CardputerZero.",
-                       "Use \"Scan WiFi Networks\" for now.")),
-                   Item("Scan Both", _stub(
-                       "BLE wardriving is not available yet: scanning Wi-Fi only.")),
+                       "WARDRIVING",
+                       "Found BLE: 0",
+                       "Distance: 0.00km  ET: 00:00:00",
+                       "Initializing...",
+                       "Waiting for GPS data",
+                       "[ Waiting GPS: 0s ]",
+                       "GPS location not updated",
+                       "  Date: 2026-11-22   Time: 15:20:02",
+                       "  Sat:  0   HDOP: 25.50",
+                       "GPS location updated",
+                       "Coord: 0.012345, 0.067890",
+                       "Start Scanning...",
+                       "Scan done. BLE: 5",
+                       "File: 261122_152002_wardriving",
+                       "(simulated: canned screens, no GPS / radio scan, nothing written to ~/BruceWardriving)")),
+                   Item("Scan Both", _ok(
+                       "WARDRIVING",
+                       "Found WiFi: 0 BLE: 0",
+                       "Distance: 0.00km  ET: 00:00:00",
+                       "Initializing...",
+                       "Waiting for GPS data",
+                       "[ Waiting GPS: 0s ]",
+                       "GPS location not updated",
+                       "  Date: 2026-11-22   Time: 15:20:02",
+                       "  Sat:  0   HDOP: 25.50",
+                       "GPS location updated",
+                       "Coord: 0.012345, 0.067890",
+                       "Start Scanning...",
+                       "Scan done. WiFi: 3 BLE: 5",
+                       "File: 261122_152002_wardriving",
+                       "(simulated: canned screens, no GPS / radio scan, nothing written to ~/BruceWardriving)")),
                ]),
         # The C++ row opens GpsAppScreen (Bruce firmware GPS Tracker, in-app
         # serial NMEA reader); the simulator plays the screens it shows.
@@ -552,7 +595,7 @@ CATALOG = [
                    "GPS location not updated",
                    "  Date: 2026-11-22", "  Time: 15:20:02", "  Sat:  0", "  HDOP: 25.50",
                    "GPS location updated",
-                   "  Coord: 35.681236, 139.767125",
+                   "  Coord: 0.012345, 0.067890",
                    "  File: 261122_152002_gps_tracker",
                    "  GPS Coordinates: 1", "  Distance: 0.00km",
                    "(simulated: no GPS on the desktop, nothing written to ~/BruceGPS)")),

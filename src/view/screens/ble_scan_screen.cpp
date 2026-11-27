@@ -7,6 +7,7 @@
 #include "ble_scan_screen.h"
 
 #include "asset_manager.h"
+#include "ble_scan_parser.h"
 #include "linux_input.h"
 #include "theme.h"
 #include "ui_const.h"
@@ -17,8 +18,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <sstream>
-#include <unordered_map>
 
 namespace screen {
 namespace {
@@ -32,118 +31,6 @@ constexpr size_t kMaxDevices = 100; // firmware MAX_DISPLAY_DEVICES
 constexpr const char* kScanScript =
     "timeout 8 bluetoothctl --timeout 5 scan le 2>&1 | "
     "sed -u -e 's/\\x1b\\[[0-9;]*m//g' -e 's/[\\x01\\x02]//g'";
-
-std::string ltrim(const std::string& s) {
-    size_t i = 0;
-    while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) {
-        ++i;
-    }
-    return s.substr(i);
-}
-
-std::string trim(const std::string& s) {
-    size_t b = 0;
-    size_t e = s.size();
-    while (b < e && (s[b] == ' ' || s[b] == '\t')) {
-        ++b;
-    }
-    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r')) {
-        --e;
-    }
-    return s.substr(b, e - b);
-}
-
-bool starts_with(const std::string& s, const char* prefix) {
-    return s.rfind(prefix, 0) == 0;
-}
-
-// Remove CSI/OSC escapes and the non-printing bytes BlueZ puts around its
-// colors. The sed stage already does this, but a strip here keeps the parser
-// correct even if that pipeline is changed or a chunk is split.
-std::string strip_escapes(const std::string& in) {
-    std::string out;
-    out.reserve(in.size());
-    for (size_t i = 0; i < in.size(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(in[i]);
-        if (c == 0x1b) {
-            if (i + 1 < in.size() && in[i + 1] == '[') {
-                i += 2;
-                while (i < in.size() && !(in[i] >= '@' && in[i] <= '~')) {
-                    ++i;
-                }
-            } else if (i + 1 < in.size()) {
-                ++i;
-            }
-            continue;
-        }
-        if (c == 0x01 || c == 0x02 || c == '\r') {
-            continue;
-        }
-        if (c < 0x20 && c != '\n' && c != '\t') {
-            continue;
-        }
-        out += static_cast<char>(c);
-    }
-    return out;
-}
-
-bool valid_mac(const std::string& mac) {
-    if (mac.size() != 17) {
-        return false;
-    }
-    for (size_t i = 0; i < mac.size(); ++i) {
-        if (i % 3 == 2) {
-            if (mac[i] != ':') {
-                return false;
-            }
-        } else if (!std::isxdigit(static_cast<unsigned char>(mac[i]))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// bluetoothctl uses the hyphenated MAC as the "name" when the device has no
-// name; the firmware treats that as no name.
-std::string normalize_name(std::string name, const std::string& mac) {
-    name = trim(name);
-    if (name.empty() || name == "(unknown)") {
-        return {};
-    }
-    std::string hyphen = mac;
-    for (char& c : hyphen) {
-        if (c == ':') {
-            c = '-';
-        }
-    }
-    if (name == mac || name == hyphen) {
-        return {};
-    }
-    return name;
-}
-
-bool error_line(const std::string& line) {
-    return starts_with(line, "Failed ") || starts_with(line, "Unable ") ||
-           starts_with(line, "No default controller") ||
-           starts_with(line, "bluetoothctl:") ||
-           starts_with(line, "sudo:") || starts_with(line, "sh:") ||
-           starts_with(line, "sed:") || starts_with(line, "timeout:") ||
-           line.find("org.bluez.Error") != std::string::npos;
-}
-
-// `[CHG] Device AA:BB:.. RSSI: 0xffffffb4 (-76)` -> -76
-bool parse_rssi(const std::string& rest, int& rssi) {
-    const size_t open = rest.find('(');
-    if (open == std::string::npos) {
-        return false;
-    }
-    const size_t close = rest.find(')', open + 1);
-    if (close == std::string::npos) {
-        return false;
-    }
-    rssi = std::atoi(rest.substr(open + 1, close - open - 1).c_str());
-    return true;
-}
 
 void log_line(const char* fmt, ...) {
     va_list args;
@@ -263,78 +150,14 @@ void BleScanScreen::on_scan_exit() {
 }
 
 void BleScanScreen::parse_scan(const std::string& out) {
+    // The parser is shared with BLE wardriving (platform/ble_scan_parser.h).
+    const platform::ble::ScanResult r = platform::ble::parse_scan(out, {kMaxDevices, false});
     devices_.clear();
-    truncated_ = false;
-    scan_error_.clear();
-
-    std::unordered_map<std::string, size_t> index;
-
-    auto add = [&](const std::string& mac, const std::string& name, int rssi, bool has_rssi) {
-        if (!valid_mac(mac)) {
-            return;
-        }
-        const std::string clean_name = normalize_name(name, mac);
-        auto it = index.find(mac);
-        if (it == index.end()) {
-            if (devices_.size() >= kMaxDevices) {
-                truncated_ = true;
-                return;
-            }
-            index[mac] = devices_.size();
-            devices_.push_back({clean_name, mac, has_rssi ? rssi : 0});
-            return;
-        }
-        Device& dev = devices_[it->second];
-        if (dev.name.empty() && !clean_name.empty()) {
-            dev.name = clean_name;
-        }
-        if (has_rssi) {
-            dev.rssi = rssi;
-        }
-    };
-
-    std::istringstream stream(strip_escapes(out));
-    std::string line;
-    while (std::getline(stream, line)) {
-        line = trim(line);
-        if (line.empty()) {
-            continue;
-        }
-        if (starts_with(line, "[NEW] Device ")) {
-            std::istringstream ls(line);
-            std::string tag, kind, mac;
-            ls >> tag >> kind >> mac;
-            std::string name;
-            std::getline(ls, name);
-            add(mac, name, 0, false);
-            continue;
-        }
-        if (starts_with(line, "[CHG] Device ")) {
-            std::istringstream ls(line);
-            std::string tag, kind, mac;
-            ls >> tag >> kind >> mac;
-            std::string rest;
-            std::getline(ls, rest);
-            rest = ltrim(rest);
-            if (starts_with(rest, "Name: ")) {
-                add(mac, rest.substr(6), 0, false);
-            } else if (starts_with(rest, "Alias: ")) {
-                add(mac, rest.substr(7), 0, false);
-            } else if (starts_with(rest, "RSSI: ")) {
-                int rssi = 0;
-                const bool ok = parse_rssi(rest, rssi);
-                add(mac, {}, rssi, ok);
-            } else {
-                add(mac, {}, 0, false);
-            }
-            continue;
-        }
-        if (error_line(line)) {
-            scan_error_ += line;
-            scan_error_ += '\n';
-        }
-        // Discovery status and property-change noise are intentionally ignored.
+    for (const auto& d : r.devices) {
+        devices_.push_back({d.name, d.mac, d.rssi});
     }
+    truncated_ = r.truncated;
+    scan_error_ = r.error;
 }
 
 // --- views ------------------------------------------------------------------

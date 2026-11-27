@@ -161,11 +161,16 @@ sudo apt install ./BruceCardputerZero_0.1.0_bruce1_arm64.deb
 > (saved to `~/.bruce/gps.conf`); a USB GPS needs the user in the `dialout`
 > group (`sudo usermod -aG dialout $USER`, then log in again). The port/baud
 > actually used are, highest first: the console's explicit arguments
-> (`--gps-tracker <port> <baud>`, `--wardrive --port <node> --baud <bps>`),
+> (`--gps-tracker <port> <baud>`, `--wardrive wifi --port <node> --baud <bps>`),
 > then the `GPS_UART` / `GPS_BAUD` environment variables, then
 > `~/.bruce/gps.conf`, then the board default (`/dev/serial0` at 115200 on the
 > LoRa+GNSS Cap, else 9600 in the app; the console commands assume 115200).
 > The GPS menu header shows the baud in effect.
+> GPS > Wardriving (Bruce's Wardriving) runs as root for the scans and writes
+> WiGLE 1.6 CSVs (upload them on wigle.net) to `~/BruceWardriving`, owned by
+> you; put MACs to watch for in `~/BruceWardriving/alert.txt` (a sample is
+> created on the first run). The Wi-Fi pass uses `iw`, the BLE pass
+> `bluetoothctl` (both preinstalled on Raspberry Pi OS).
 > The RFID menu's **PN532** entries use libnfc (auto-installed above); point it
 > at your reader in `/etc/nfc/libnfc.conf`
 > (e.g. `device.connstring = "pn532_i2c:/dev/i2c-1"`). The ST25R3916 / CC1101

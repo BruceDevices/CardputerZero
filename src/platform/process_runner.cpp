@@ -162,6 +162,14 @@ bool ProcessRunner::running() const {
     return running_;
 }
 
+std::string ProcessRunner::take_pending_output() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string text;
+    text.swap(pending_text_);
+    pending_exit_ = false;
+    return text;
+}
+
 void ProcessRunner::reader_thread_main() {
     std::array<char, kReadChunkSize> buffer{};
 

@@ -22,8 +22,10 @@ enum class RfTool { None, Scan, ProtocolMonitor, Record, Spectrum, Spectrogram }
 enum class WifiView { None, ScanList, SsidList };
 
 // Which Bruce-firmware GPS feature a row opens on the shared GpsAppScreen
-// (in-app serial NMEA reader, no gpsd). Tracker = Bruce's "GPS Tracker" (GPX).
-enum class GpsApp { None, Tracker };
+// (in-app serial NMEA reader, no gpsd). Tracker = Bruce's "GPS Tracker" (GPX),
+// Wardriving = Bruce's Wardriving (WiGLE CSV; `argv` is the root child the
+// screen runs: `<self> --wardrive <mode> --ui ...`).
+enum class GpsApp { None, Tracker, Wardriving };
 
 // A selectable UI accent color. Pure data (no LVGL) so it is the single source
 // of truth shared by the "Theme" menu (model) and the palette (view): `primary`
