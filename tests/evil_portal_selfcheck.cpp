@@ -230,12 +230,17 @@ int main() {
     {
         const auto& wifi = wifi_category();
         const size_t static_count = wifi.actions.size() - 2; // scan + "(no APs yet)"
+        // The catalog builds the scan command from wifi_interface() (real NIC;
+        // "wlan0" on the device, first phy80211 NIC otherwise) - compute the
+        // expected interface the same way instead of hardcoding "wlan0", so
+        // this passes on hosts whose Wi-Fi NIC is not wlan0.
+        const std::string scan_cmd = "iw dev " + model::wifi_interface() + " scan";
         // The static fixes are present.
         bool have_scan_root = false, have_driver = false, have_portal = false;
         for (const auto& a : wifi.actions) {
             const std::string sh = a.argv.size() >= 3 && a.argv[0] == "sh" ? a.argv[2] : "";
             if (std::string(a.label) == "Scan nearby networks") {
-                have_scan_root = a.needs_root && sh.find("iw dev wlan0 scan") != std::string::npos;
+                have_scan_root = a.needs_root && sh.find(scan_cmd) != std::string::npos;
             }
             if (std::string(a.label) == "Rogue open AP (hostapd)") {
                 have_driver = sh.find("driver=nl80211") != std::string::npos &&
@@ -261,7 +266,7 @@ int main() {
                 assert(launched.size() == 5);
                 assert(launched[0] == "sudo" && launched[1] == "-n");
                 assert(launched[3] == "--root-sh");
-                assert(launched[4].find("iw dev wlan0 scan") != std::string::npos);
+                assert(launched[4].find(scan_cmd) != std::string::npos);
                 assert(launched[4].find("id -u") == std::string::npos); // guard superseded
                 break;
             }
