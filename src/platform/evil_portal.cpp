@@ -12,8 +12,10 @@
  *   DNSServer.start(53, "*",)  -> dnsmasq address=/#/<gateway> (captive:
  *                                 every name resolves to us, unknown paths
  *                                 serve the portal)
- *   WiFi.begin() verify        -> stop AP, wpa_supplicant attempt (8 x 500ms
- *                                 like verifyCreds), restart AP - one radio
+ *   WiFi.begin() verify        -> stop AP, wpa_supplicant attempt (12 x 500ms
+ *                                 = 6s, like verifyCreds which loops i=1..12;
+ *                                 Bruce evil_portal.cpp:856-860), restart AP -
+ *                                 one radio
  *                                 cannot do AP+STA concurrently here.
  */
 
@@ -664,14 +666,15 @@ void start_ap_services(const PortalOptions& opts, const std::string& iface) {
 }
 
 // Linux equivalent of Bruce's verifyCreds(): with one radio we must drop the
-// AP for the ~4s the connect attempt takes, then bring the portal back up.
+// AP for the ~6s (12 x 500ms, Bruce verifyCreds:856-860) the connect attempt
+// takes, then bring the portal back up.
 bool verify_live(const PortalOptions& opts, const std::string& password, const std::string& iface) {
     stop_ap_services();
     write_file(std::string(kWorkDir) + "/wpa.conf", wpa_conf(opts.ap_name, password));
     run("wpa_supplicant -B -i " + iface + " -c " + kWorkDir + "/wpa.conf -P " + kWorkDir +
         "/wpa.pid 2>/dev/null");
     bool connected = false;
-    for (int i = 0; i < 8 && !connected; ++i) { // Bruce: 8 x 500ms, 4s max
+    for (int i = 0; i < 12 && !connected; ++i) { // Bruce: 12 x 500ms, 6s max (verifyCreds:856-860)
         usleep(500000);
         FILE* p = popen(("wpa_cli -i " + iface + " status 2>/dev/null").c_str(), "r");
         if (p) {

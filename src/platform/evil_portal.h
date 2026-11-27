@@ -70,7 +70,8 @@ struct PortalHooks {
     // the softAP under the new name). May be null (no-op) in tests.
     std::function<void(const PortalOptions&)> on_ap_restart;
     // Try to connect to ap_name using the submitted password; true = valid.
-    // Bruce: WiFi.begin() + 8 x 500ms wait. May be null -> treated as failed
+    // Bruce: WiFi.begin() + 12 x 500ms wait (6s; verifyCreds:856-860 loops
+    // i=1..12). May be null -> treated as failed
     // verification but still captured.
     std::function<bool(const PortalOptions&, const std::string& password)> verify_password;
 };
