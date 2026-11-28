@@ -70,7 +70,8 @@ struct PortalHooks {
     // the softAP under the new name). May be null (no-op) in tests.
     std::function<void(const PortalOptions&)> on_ap_restart;
     // Try to connect to ap_name using the submitted password; true = valid.
-    // Bruce: WiFi.begin() + 8 x 500ms wait. May be null -> treated as failed
+    // Bruce: WiFi.begin() + 12 x 500ms wait (6s; verifyCreds:856-860 loops
+    // i=1..12). May be null -> treated as failed
     // verification but still captured.
     std::function<bool(const PortalOptions&, const std::string& password)> verify_password;
 };
@@ -99,6 +100,10 @@ std::string last_cred_text(const std::vector<std::pair<std::string, std::string>
 // First line "<!-- AP=\"MyName\" -->" of a custom HTML file -> "MyName"
 // (Bruce's loadCustomHtml). Empty when absent.
 std::string parse_ap_tag(const std::string& html);
+
+// Custom-HTML capture file name: strip directory and ".html", lowercase, add
+// "_creds.csv" (Bruce's loadCustomHtml, evil_portal.cpp:500-502).
+std::string custom_csv_name(const std::string& path);
 
 // Parse one raw HTTP request head (+ optional body). Query-string args are
 // merged into args after body args; Content-Length bounds the body read.
