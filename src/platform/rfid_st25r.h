@@ -3,8 +3,10 @@
  *
  * SPDX-License-Identifier: AGPL-3.0-only
  *
- * Native ISO14443A (NFC-A) RFID driver for the M5 RF+NFC CAP's ST25R3916 over
- * spidev. Register addresses, direct-command opcodes and bitfields are taken
+ * Native ISO14443A (NFC-A) RFID driver for the ST25R3916: the M5 RF+NFC CAP
+ * over spidev, or an I2C NFC unit at 0x50 over i2c-dev (same chip, same mode
+ * bytes; the transport is auto-detected SPI-first). Register addresses,
+ * direct-command opcodes and bitfields are taken
  * verbatim from ST's ST25R3916 definitions (lewisxhe/ST25R3916-fork, the same
  * source the ESP32 Bruce firmware builds on), so the framing is authoritative.
  *
@@ -50,9 +52,16 @@ std::string to_hex(const uint8_t* data, size_t len, bool colons = false);
 
 // ---- Subcommand entry points (re-exec'd by the menu) ------------------------
 //
-// Each takes the args AFTER the flag; argv[0] may override the spidev path
-// (else $ST25R_SPIDEV, else APP_ST25R_SPIDEV). All print a human-readable
-// report and return 0 on success, non-zero otherwise.
+// Each takes the args AFTER the flag; argv[0] (the spec arg below, after the
+// positional args) may override the transport, else $ST25R_BUS / $ST25R_SPIDEV
+// steer it, else full auto-detect. The spec is one of:
+//   "auto"/""             - try SPI (the CAP CC1101's ST25R), then scan every
+//                           I2C bus at 0x50
+//   "spi" / "/dev/spidevX.Y" - force SPI (default node, or that spidev path)
+//   "i2c"                 - scan all I2C buses at 0x50
+//   "i2c:/dev/i2c-1"      - I2C on that bus at 0x50
+//   "i2c:/dev/i2c-1@0x50" - I2C on that bus at that address
+// All print a human-readable report and return 0 on success, non-zero otherwise.
 
 int rfid_read_main(int argc, char** argv);           // --rfid-read [spidev]
 int rfid_dump_main(int argc, char** argv);            // --rfid-dump [spidev]

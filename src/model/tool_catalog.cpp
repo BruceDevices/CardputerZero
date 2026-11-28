@@ -1112,16 +1112,16 @@ std::vector<ToolCategory>& mutable_catalog() {
         },
         {
             "RFID",
-            "13.56MHz NFC - M5 ST25R3916 CAP (native) or a PN532 reader (via libnfc)",
+            "13.56MHz NFC - M5 ST25R3916 (SPI CAP or I2C) / RFID2 (MFRC522 I2C) native, or PN532 (libnfc)",
             icon::kNfc,
             false,
             {
-                // --- M5 RF+NFC CAP: ST25R3916 over HAT SPI (native driver) ---
-                // The app powers the cap chain first (M5IOE1 PYG13 HAT rail +
-                // GPIO26 POWER_EN) and bit-bangs NFC_CS on GPIO22; spidev must
-                // exist (sudo raspi-config nonint do_spi 0, once).
+                // --- M5 RF+NFC CAP: ST25R3916 over HAT SPI, or an I2C NFC unit
+                // at 0x50 (native driver, auto SPI->I2C). The app powers the cap
+                // chain first (M5IOE1 PYG13 HAT rail + GPIO26); for SPI, spidev
+                // must exist (sudo raspi-config nonint do_spi 0, once).
                 {"ST25R: Read tag (UID/ATQA/SAK)",
-                 "Power the field and read a 13.56MHz ISO14443A tag's UID, ATQA and SAK.",
+                 "Auto-detect the ST25R3916 (SPI CAP or I2C @0x50) and read an ISO14443A tag's UID/ATQA/SAK.",
                  {self_exe_path(), "--rfid-read"}},
                 {"ST25R: Dump tag (Type-2 / NTAG)",
                  "Read UID then dump the data pages of a Type-2 tag (NTAG/Ultralight).",
@@ -1130,8 +1130,19 @@ std::vector<ToolCategory>& mutable_catalog() {
                  "Read a tag's UID, then emulate it as an NFC-A target until you go back.",
                  {self_exe_path(), "--rfid-clone"}},
                 {"ST25R: Detect chip",
-                 "Probe the ST25R3916: powers the cap up, then reads IC_IDENTITY.",
+                 "Probe the ST25R3916 on SPI then every I2C bus at 0x50; reads IC_IDENTITY.",
                  {self_exe_path(), "--st25r-detect"}},
+
+                // --- M5 RFID2 unit: MFRC522 / WS1850S over I2C (native driver) ---
+                {"RFID2: Read tag (UID/ATQA/SAK)",
+                 "Auto-detect the M5 RFID2 (MFRC522 @0x28 on I2C) and read a tag's UID/ATQA/SAK.",
+                 {self_exe_path(), "--rfid2-read"}},
+                {"RFID2: Dump tag (Classic / NTAG)",
+                 "Dump MIFARE Classic 1K/4K (key dictionary) or Ultralight/NTAG pages.",
+                 {self_exe_path(), "--rfid2-dump"}},
+                {"RFID2: Detect reader",
+                 "Probe every I2C bus for an MFRC522/WS1850S and read its VersionReg.",
+                 {self_exe_path(), "--rfid2-detect"}},
 
                 // --- PN532 reader over I2C/SPI/UART (via libnfc) ---
                 {"PN532: Scan via I2C (/dev/i2c-1)",

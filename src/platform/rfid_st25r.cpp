@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include "cap_bringup.h"
+#include "rfid_i2c.h"
 #endif
 
 #ifndef APP_ST25R_SPIDEV
@@ -190,10 +191,18 @@ constexpr uint8_t IC_TYPE_3916B  = 0x30; // 6 << 3
 // are flaky on your antenna.
 constexpr uint8_t kAnalogTxDriver = 0x00;
 
+// The ST25R3916's default 7-bit I2C address (0xA0 >> 1); same chip, same mode
+// bytes as SPI, so the transport below just swaps the physical link.
+constexpr uint8_t kI2cAddr = 0x50;
+
 #if defined(__linux__)
-int g_fd = -1;
-int g_cs_fd = -1;      // GPIO line handle: the cap's NFC_CS (active low)
+enum class Bus { Spi, I2c };
+
+Bus g_bus = Bus::Spi;
+int g_fd = -1;         // spidev fd (SPI) or i2c-dev fd (I2C)
+int g_cs_fd = -1;      // SPI only: GPIO line handle for the cap's NFC_CS (active low)
 unsigned g_cs_line = 22;
+uint8_t g_i2c_addr = kI2cAddr;
 
 std::string env_or(const char* name, const char* fallback) {
     const char* v = std::getenv(name);
@@ -228,30 +237,57 @@ bool spi_xfer(const uint8_t* tx, uint8_t* rx, size_t len) {
     return ok;
 }
 
+// ---- Transport primitives (SPI frame OR I2C transaction) --------------------
+//
+// The ST25R3916 uses identical mode bytes on both links (READ=0x40|addr,
+// WRITE=0x00|addr, FIFO_LOAD=0x80, FIFO_READ=0x9F; register reads
+// auto-increment). On SPI an access is one CS-framed full-duplex transfer; on
+// I2C it is a write then (for reads) a repeated-start read. These two helpers
+// hide that difference; everything above the FIFO/register layer is bus-blind.
+
+// Send `whdr`+`wbody` (wn bytes) and, when rn>0, read rn bytes back.
+void bus_write_then_read(const uint8_t* wbuf, size_t wn, uint8_t* rbuf, size_t rn) {
+    if (g_bus == Bus::I2c) {
+        if (rn == 0) {
+            i2c_write(g_fd, wbuf, wn);
+        } else {
+            i2c_write_read(g_fd, g_i2c_addr, wbuf, wn, rbuf, rn);
+        }
+        return;
+    }
+    // SPI: one full-duplex frame of wn + rn bytes; the first wn carry the
+    // header/data, the trailing rn clock out the response (tx stuffed 0x00).
+    uint8_t tx[1 + 256] = {0};
+    uint8_t rx[1 + 256] = {0};
+    const size_t total = wn + rn;
+    if (total > sizeof(tx)) return;
+    std::memcpy(tx, wbuf, wn);
+    spi_xfer(tx, rx, total);
+    if (rn) std::memcpy(rbuf, &rx[wn], rn);
+}
+
 uint8_t reg_read(uint8_t addr) {
-    uint8_t tx[2] = {static_cast<uint8_t>(SPI_READ_MODE | addr), 0x00};
-    uint8_t rx[2] = {0, 0};
-    spi_xfer(tx, rx, 2);
-    return rx[1];
+    uint8_t hdr = static_cast<uint8_t>(SPI_READ_MODE | addr);
+    uint8_t v = 0;
+    bus_write_then_read(&hdr, 1, &v, 1);
+    return v;
 }
 
 void reg_write(uint8_t addr, uint8_t val) {
-    uint8_t tx[2] = {static_cast<uint8_t>(SPI_WRITE_MODE | addr), val};
-    uint8_t rx[2] = {0, 0};
-    spi_xfer(tx, rx, 2);
+    uint8_t w[2] = {static_cast<uint8_t>(SPI_WRITE_MODE | addr), val};
+    bus_write_then_read(w, 2, nullptr, 0);
 }
 
 void cmd(uint8_t c) {
-    uint8_t rx = 0;
-    spi_xfer(&c, &rx, 1);
+    bus_write_then_read(&c, 1, nullptr, 0);
 }
 
 void fifo_write(const uint8_t* data, size_t n) {
-    uint8_t tx[1 + 256];
-    uint8_t rx[1 + 256];
-    tx[0] = SPI_FIFO_LOAD;
-    std::memcpy(&tx[1], data, n);
-    spi_xfer(tx, rx, n + 1);
+    uint8_t w[1 + 256];
+    if (n > 255) n = 255;
+    w[0] = SPI_FIFO_LOAD;
+    std::memcpy(&w[1], data, n);
+    bus_write_then_read(w, n + 1, nullptr, 0);
 }
 
 size_t fifo_count() {
@@ -263,22 +299,19 @@ size_t fifo_count() {
 size_t fifo_read(uint8_t* out, size_t cap) {
     size_t n = fifo_count();
     if (n > cap) n = cap;
-    uint8_t tx[1 + 256] = {0};
-    uint8_t rx[1 + 256] = {0};
-    tx[0] = SPI_FIFO_READ;
     const size_t clamped = (n > 255) ? 255 : n;
-    spi_xfer(tx, rx, clamped + 1);
-    std::memcpy(out, &rx[1], clamped);
+    uint8_t hdr = SPI_FIFO_READ;
+    bus_write_then_read(&hdr, 1, out, clamped);
     return clamped;
 }
 
-// Read the four consecutive IRQ registers in one transfer (clears them).
+// Read the four consecutive IRQ registers in one transaction (clears them).
 uint32_t read_irqs() {
-    uint8_t tx[5] = {static_cast<uint8_t>(SPI_READ_MODE | REG_IRQ_MAIN), 0, 0, 0, 0};
-    uint8_t rx[5] = {0, 0, 0, 0, 0};
-    spi_xfer(tx, rx, 5);
-    return static_cast<uint32_t>(rx[1]) | (static_cast<uint32_t>(rx[2]) << 8) |
-           (static_cast<uint32_t>(rx[3]) << 16) | (static_cast<uint32_t>(rx[4]) << 24);
+    uint8_t hdr = static_cast<uint8_t>(SPI_READ_MODE | REG_IRQ_MAIN);
+    uint8_t r[4] = {0, 0, 0, 0};
+    bus_write_then_read(&hdr, 1, r, 4);
+    return static_cast<uint32_t>(r[0]) | (static_cast<uint32_t>(r[1]) << 8) |
+           (static_cast<uint32_t>(r[2]) << 16) | (static_cast<uint32_t>(r[3]) << 24);
 }
 
 // Poll the IRQ registers (no IRQ GPIO on the CAP) until any `mask` bit latches
@@ -422,15 +455,32 @@ bool t2t_write_page(uint8_t page, const uint8_t in4[4]) {
     return n >= 1 && (ack[0] & 0x0F) == 0x0A;
 }
 
-// Open spidev (MODE1, MSB-first) and verify an ST25R3916 answers.
+// SET_DEFAULT then read IC_IDENTITY; true when an ST25R3916(B) answers on the
+// link currently open in g_bus/g_fd. Appends a one-line verdict to `report`.
+bool probe_identity(std::string& report) {
+    cmd(CMD_SET_DEFAULT);
+    sleep_ms(1);
+    const uint8_t id = reg_read(REG_IC_IDENTITY);
+    const uint8_t ic = id & IC_TYPE_MASK;
+    if (ic != IC_TYPE_3916 && ic != IC_TYPE_3916B) {
+        char line[96];
+        std::snprintf(line, sizeof(line), "  no ST25R3916 here (IC_IDENTITY=0x%02X)\n", id);
+        report += line;
+        return false;
+    }
+    report += std::string("ST25R3916") + (ic == IC_TYPE_3916B ? "B" : "") + " detected (" +
+              (g_bus == Bus::I2c ? "I2C" : "SPI") + ").\n";
+    return true;
+}
+
+// Open the ST25R3916 over spidev (MODE1, MSB-first) and verify it answers.
 //
 // The cap's NFC_CS is a plain GPIO on this board (G22, HAT_P0/P1 bus) - not a
 // spidev chip select. The spidev node is therefore opened with SPI_NO_CS (so
 // no internal CS - on this board they are the LCD's G8 or the CC1101's G7 -
 // glitches during NFC traffic) and CS is bit-banged around every access.
-bool open_chip(const std::string& path, std::string& report) {
-    report += cap_bringup().text;
-
+bool try_open_spi(const std::string& path, std::string& report) {
+    g_bus = Bus::Spi;
     g_cs_fd = -1;
     const std::string cs_chip = env_or("ST25R_CS_CHIP", "/dev/gpiochip0");
     g_cs_line = static_cast<unsigned>(std::atoi(env_or("ST25R_CS_GPIO", "22").c_str()));
@@ -455,48 +505,124 @@ bool open_chip(const std::string& path, std::string& report) {
     ioctl(g_fd, SPI_IOC_WR_MODE, &mode);
     ioctl(g_fd, SPI_IOC_WR_BITS_PER_WORD, &bits);
     ioctl(g_fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
+    report += "NFC CS: GPIO" + std::to_string(g_cs_line) + " (manual, SPI_NO_CS on " + path + ")\n";
 
-    report += "NFC CS: GPIO" + std::to_string(g_cs_line) + " (manual, SPI_NO_CS on " +
-              path + ")\n";
+    if (probe_identity(report)) return true;
+    close(g_fd);
+    g_fd = -1;
+    return false;
+}
 
-    cmd(CMD_SET_DEFAULT);
-    sleep_ms(1);
-    const uint8_t id = reg_read(REG_IC_IDENTITY);
-    const uint8_t ic = id & IC_TYPE_MASK;
-    if (ic != IC_TYPE_3916 && ic != IC_TYPE_3916B) {
-        char line[96];
-        std::snprintf(line, sizeof(line),
-                      "error: no ST25R3916 (IC_IDENTITY=0x%02X). Check the CAP seating, the "
-                      "power lines above, and the CS GPIO.\n",
-                      id);
-        report += line;
-        close(g_fd);
-        g_fd = -1;
+// Open the ST25R3916 over i2c-dev at `addr` on `dev` and verify it answers.
+bool try_open_i2c(const std::string& dev, uint8_t addr, std::string& report) {
+    g_bus = Bus::I2c;
+    g_i2c_addr = addr;
+    g_fd = i2c_open(dev.c_str(), addr);
+    if (g_fd < 0) {
+        report += "error: cannot open " + dev + " (" + std::strerror(errno) + ")\n";
         return false;
     }
-    report += std::string("ST25R3916") + (ic == IC_TYPE_3916B ? "B" : "") + " detected.\n";
-    return true;
+    char head[64];
+    std::snprintf(head, sizeof(head), "NFC I2C: %s @ 0x%02X\n", dev.c_str(), addr);
+    report += head;
+    if (probe_identity(report)) return true;
+    i2c_close(g_fd);
+    g_fd = -1;
+    return false;
+}
+
+// Resolve the transport from `spec` and bring the chip up. `spec` is one of:
+//   ""/"auto"            - try SPI (cap CC1101), then scan every I2C bus at 0x50
+//   "/dev/spidevX.Y"     - force SPI on that node
+//   "spi"                - SPI on the picked spidev node
+//   "i2c"                - scan I2C buses at 0x50
+//   "i2c:/dev/i2c-1"     - I2C on that bus at 0x50
+//   "i2c:/dev/i2c-1@0x50"- I2C on that bus at that address
+bool open_chip(const std::string& spec, std::string& report) {
+    report += cap_bringup().text;
+
+    auto pick_spidev = []() {
+        const char* env = std::getenv("ST25R_SPIDEV");
+        if (env && env[0] != '\0') return std::string(env);
+        const std::string p =
+            spidev_pick({APP_ST25R_SPIDEV, "/dev/spidev0.1", "/dev/spidev0.0"});
+        return p.empty() ? std::string(APP_ST25R_SPIDEV) : p;
+    };
+    auto scan_i2c = [&report](uint8_t addr) -> bool {
+        for (const auto& bus : i2c_buses()) {
+            std::string r;
+            if (try_open_i2c(bus, addr, r)) {
+                report += r;
+                return true;
+            }
+            report += r;
+        }
+        return false;
+    };
+
+    std::string s = spec;
+    if (s == "auto") s.clear();
+
+    if (s.rfind("i2c", 0) == 0) {
+        std::string dev = "/dev/i2c-1";
+        uint8_t addr = kI2cAddr;
+        const auto colon = s.find(':');
+        if (colon != std::string::npos) {
+            dev = s.substr(colon + 1);
+            const auto at = dev.find('@');
+            if (at != std::string::npos) {
+                addr = static_cast<uint8_t>(std::strtol(dev.c_str() + at + 1, nullptr, 0));
+                dev = dev.substr(0, at);
+            }
+        } else {
+            return scan_i2c(addr); // "i2c" with no bus -> scan all
+        }
+        return try_open_i2c(dev, addr, report);
+    }
+
+    if (!s.empty() && s != "spi" && s.rfind("/dev/spidev", 0) == 0) {
+        return try_open_spi(s, report); // explicit spidev path
+    }
+    if (s == "spi") {
+        return try_open_spi(pick_spidev(), report);
+    }
+
+    // auto: SPI first (the CAP CC1101's ST25R), then scan I2C modules at 0x50.
+    std::string spiReport;
+    if (try_open_spi(pick_spidev(), spiReport)) {
+        report += spiReport;
+        return true;
+    }
+    report += spiReport;
+    report += "SPI had no ST25R3916; scanning I2C buses at 0x50 ...\n";
+    if (scan_i2c(kI2cAddr)) return true;
+    report += "error: no ST25R3916 on SPI or I2C. Check the CAP/module seating, power and wiring.\n";
+    return false;
 }
 
 void close_chip() {
     if (g_fd >= 0) {
         field_off();
-        close(g_fd);
+        if (g_bus == Bus::I2c) {
+            i2c_close(g_fd);
+        } else {
+            close(g_fd);
+        }
         g_fd = -1;
     }
 }
 
-std::string resolve_spidev(int argc, char** argv, int path_arg) {
+// The subcommands pass argv[path_arg] (if any) as the transport spec; otherwise
+// $ST25R_SPIDEV / $ST25R_BUS steer it, defaulting to full auto-detect.
+std::string resolve_spec(int argc, char** argv, int path_arg) {
     if (argc > path_arg && argv[path_arg] && argv[path_arg][0] != '\0') {
         return argv[path_arg];
     }
+    const char* bus = std::getenv("ST25R_BUS");
+    if (bus && bus[0] != '\0') return bus; // "spi" | "i2c" | "i2c:/dev/i2c-1" ...
     const char* env = std::getenv("ST25R_SPIDEV");
-    if (env && env[0] != '\0') {
-        return env;
-    }
-    // With SPI_NO_CS any spidev node works - pick whichever the kernel made.
-    const std::string picked = spidev_pick({APP_ST25R_SPIDEV, "/dev/spidev0.1", "/dev/spidev0.0"});
-    return picked.empty() ? std::string(APP_ST25R_SPIDEV) : picked;
+    if (env && env[0] != '\0') return env;
+    return "auto";
 }
 #endif // __linux__
 
@@ -561,7 +687,7 @@ size_t scan_once(std::string& report, uint8_t* uid, size_t uidcap, uint8_t& sak,
 int rfid_read_main(int argc, char** argv) {
 #if defined(__linux__)
     std::string report = "RFID read (ISO14443A)\n";
-    if (!open_chip(resolve_spidev(argc, argv, 0), report)) {
+    if (!open_chip(resolve_spec(argc, argv, 0), report)) {
         std::fputs(report.c_str(), stdout);
         return 1;
     }
@@ -581,7 +707,7 @@ int rfid_read_main(int argc, char** argv) {
 int rfid_dump_main(int argc, char** argv) {
 #if defined(__linux__)
     std::string report = "RFID dump (Type-2 tag)\n";
-    if (!open_chip(resolve_spidev(argc, argv, 0), report)) {
+    if (!open_chip(resolve_spec(argc, argv, 0), report)) {
         std::fputs(report.c_str(), stdout);
         return 1;
     }
@@ -632,7 +758,7 @@ int rfid_write_main(int argc, char** argv) {
         return 2;
     }
     std::string report = "RFID write (Type-2 tag)\n";
-    if (!open_chip(resolve_spidev(argc, argv, 2), report)) {
+    if (!open_chip(resolve_spec(argc, argv, 2), report)) {
         std::fputs(report.c_str(), stdout);
         return 1;
     }
@@ -670,7 +796,7 @@ int rfid_emulate_main(int argc, char** argv) {
         return 2;
     }
     std::string report = "RFID emulate (NFC-A Type-2 target)\nUID: " + to_hex(uid.data(), uid.size(), true) + "\n";
-    if (!open_chip(resolve_spidev(argc, argv, 1), report)) {
+    if (!open_chip(resolve_spec(argc, argv, 1), report)) {
         std::fputs(report.c_str(), stdout);
         return 1;
     }
@@ -686,7 +812,7 @@ int rfid_emulate_main(int argc, char** argv) {
 int rfid_clone_main(int argc, char** argv) {
 #if defined(__linux__)
     std::string report = "RFID clone (read a tag, then emulate its UID)\n";
-    if (!open_chip(resolve_spidev(argc, argv, 0), report)) {
+    if (!open_chip(resolve_spec(argc, argv, 0), report)) {
         std::fputs(report.c_str(), stdout);
         return 1;
     }
