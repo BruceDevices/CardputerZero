@@ -205,6 +205,8 @@ void MenuScreen::build_list(lv_obj_t* content) {
     const auto& category = catalog[static_cast<size_t>(category_index_)];
     if (std::string(category.label) == "Sub-GHz / RF" && !hal::has_cc1101()) {
         lv_label_set_text(header, "Sub-GHz / RF (CC1101 not detected)");
+    } else if (rfid_category && model::rfid_setup_is_open()) {
+        lv_label_set_text(header, "RFID \xe2\x80\x94 Setup Modules");
     } else if (rfid_category) {
         std::string tags;
         if (rfid_st25r) tags += tags.empty() ? "ST25R" : ", ST25R";

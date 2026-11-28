@@ -119,6 +119,11 @@ std::string rf_recordings_dir();
 // visible either way so the operator can (re)probe from the menu.
 void refresh_rfid_category(bool st25r_present, bool rfid2_present, bool pn532_present);
 
+// True while the RFID "Setup Modules >" sub-view (detect probes + PN532/libnfc
+// setup help) is open, so the menu header can say so. Toggled by the category's
+// nav row / Back key (on_navigation_action / on_category_back).
+bool rfid_setup_is_open();
+
 // A ToolAction with an empty argv is a navigation row (not a launchable tool):
 // selecting it mutates dynamic state instead of running a process. Screens route
 // such a row here, then re-enter the same category to show the updated list -
