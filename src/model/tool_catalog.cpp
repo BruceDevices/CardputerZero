@@ -134,6 +134,16 @@ std::string rf_recordings_dir() {
     return "/tmp/BruceRF";
 }
 
+std::string rfid_recordings_dir() {
+    if (const char* env = std::getenv("BRUCE_NFC_DIR"); env && env[0] != '\0') {
+        return env;
+    }
+    if (const char* home = std::getenv("HOME"); home && home[0] != '\0') {
+        return std::string(home) + "/BruceNFC";
+    }
+    return "/tmp/BruceNFC";
+}
+
 namespace {
 
 std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int gdo0_gpio) {
@@ -224,6 +234,126 @@ std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int g
          "{ echo 'rtl_fm is not installed. Run: sudo apt install rtl-sdr'; exit 127; }; "
          "rtl_fm -f 100M -M wbfm -s 200k -r 48k 2>/dev/null | aplay -r 48k -f S16_LE 2>&1 || "
          "echo 'playback failed - needs an RTL-SDR dongle + alsa-utils (aplay)'"}});
+    return actions;
+}
+
+// In-memory toggle for the RFID "Setup Modules >" drill-down (same pattern as
+// tz_picker_open()): the detect rows and the PN532/libnfc setup help live in a
+// sub-view so the main RFID list only carries each present module's tag ops.
+// Flipped by on_navigation_action() / on_category_back(), read on every rebuild.
+bool& rfid_setup_open() {
+    static bool open = false;
+    return open;
+}
+
+// Build the "RFID" rows. The main view shows a module's tag operations only when
+// it was detected; the per-module "Detect" rows and the PN532/libnfc setup help
+// are tucked behind a "Setup Modules >" drill-down. Mirrors build_rf_actions().
+std::vector<ToolAction> build_rfid_actions(bool st25r, bool rfid2, bool pn532) {
+    std::vector<ToolAction> actions;
+
+    if (rfid_setup_open()) {
+        // "Setup Modules" sub-view: a Back row, then the native detect probes
+        // for every module and the PN532/libnfc setup help.
+        actions.push_back({"<  Back", "Return to the RFID menu.", {}});
+        actions.push_back({"ST25R: Detect chip",
+                           "Probe the ST25R3916 on SPI then every I2C bus at 0x50; reads IC_IDENTITY.",
+                           {self_exe_path(), "--st25r-detect"}});
+        actions.push_back({"RFID2: Detect reader",
+                           "Probe every I2C bus for an MFRC522/WS1850S and read its VersionReg.",
+                           {self_exe_path(), "--rfid2-detect"}});
+        actions.push_back({"PN532: Detect reader",
+                           "Native GetFirmwareVersion probe on I2C (0x24) and SPI (spidev0.0 / $PN532_SPIDEV).",
+                           {self_exe_path(), "--pn532-detect"}});
+        actions.push_back({"PN532: Setup / buses help",
+                           "How to point libnfc at your PN532, and list available buses.",
+                           {"sh", "-c",
+                            "echo 'PN532 via libnfc. Set the device persistently in /etc/nfc/libnfc.conf:'; "
+                            "echo '  device.connstring = \"pn532_i2c:/dev/i2c-1\"   (or pn532_uart:/dev/ttyS0,'; "
+                            "echo '   pn532_spi:/dev/spidev0.0:500000)  and  allow_autoscan = true'; echo; "
+                            "echo 'I2C buses:'; ls /dev/i2c-* 2>/dev/null || echo '  (none; enable i2c overlay)'; "
+                            "echo 'SPI:'; ls /dev/spidev* 2>/dev/null || echo '  (none)'; "
+                            "echo 'Serial:'; ls /dev/ttyS* /dev/ttyUSB* /dev/ttyAMA* 2>/dev/null || echo '  (none)'; "
+                            "echo; nfc-list -v 2>&1 | head -4 || echo 'install libnfc-bin'"}});
+        return actions;
+    }
+
+    // --- M5 RF+NFC CAP: ST25R3916 over HAT SPI, or an I2C NFC unit at 0x50 ---
+    if (st25r) {
+        // rfid_tool opens the live RFID screen for ST25R operations.
+        ToolAction read{"Read tag (UID/ATQA/SAK)",
+                        "Read an ISO14443A tag's UID/ATQA/SAK on the detected ST25R3916 (SPI CAP or I2C @0x50).",
+                        {self_exe_path(), "--rfid-read"}};
+        read.rfid_tool = RfidTool::Read;
+        actions.push_back(read);
+        ToolAction dump{"Dump tag (Type-2 / NTAG)",
+                        "Read UID then dump the data pages of a Type-2 tag (NTAG/Ultralight).",
+                        {self_exe_path(), "--rfid-dump"}};
+        dump.rfid_tool = RfidTool::Dump;
+        actions.push_back(dump);
+        ToolAction clone{"Clone -> emulate tag",
+                         "Read a tag's UID, then emulate it as an NFC-A target until you go back.",
+                         {self_exe_path(), "--rfid-clone"}};
+        clone.rfid_tool = RfidTool::Clone;
+        actions.push_back(clone);
+    }
+    ToolAction load{"Load Tag", "Open a saved .nfc file to write or emulate it with the ST25R3916.", {}};
+    load.rfid_tool = RfidTool::Load;
+    actions.push_back(load);
+
+    // --- M5 RFID2 unit: MFRC522 / WS1850S over I2C (native driver) ---
+    if (rfid2) {
+        actions.push_back({"Read tag (UID/ATQA/SAK)",
+                           "Read a tag's UID/ATQA/SAK on the detected M5 RFID2 (MFRC522 @0x28 on I2C).",
+                           {self_exe_path(), "--rfid2-read"}});
+        actions.push_back({"Dump tag (Classic / NTAG)",
+                           "Dump MIFARE Classic 1K/4K (key dictionary) or Ultralight/NTAG pages.",
+                           {self_exe_path(), "--rfid2-dump"}});
+    }
+
+    // --- PN532 tag operations over libnfc (shown only when a PN532 answered) --
+    if (pn532) {
+        actions.push_back({"Scan via I2C (/dev/i2c-1)",
+                           "Test a PN532 wired on I2C bus 1 and read any tag present (nfc-list).",
+                           {"sh", "-c",
+                            "LIBNFC_DEFAULT_DEVICE=pn532_i2c:/dev/i2c-1 nfc-list -v 2>&1 || "
+                            "echo 'No PN532 on I2C bus 1. Check wiring / install libnfc-bin.'"}});
+        actions.push_back({"Scan via UART (/dev/ttyS0)",
+                           "Test a PN532 wired on UART and read any tag present (nfc-list).",
+                           {"sh", "-c",
+                            "LIBNFC_DEFAULT_DEVICE=pn532_uart:/dev/ttyS0 nfc-list -v 2>&1 || "
+                            "echo 'No PN532 on ttyS0. Check wiring/baud / install libnfc-bin.'"}});
+        actions.push_back({"Poll for tag (configured)",
+                           "nfc-poll using the device in /etc/nfc/libnfc.conf or $LIBNFC_DEFAULT_DEVICE.",
+                           {"sh", "-c",
+                            "nfc-poll 2>&1 || echo 'No PN532 found. Use a Scan entry to test the bus, "
+                            "or set /etc/nfc/libnfc.conf. Needs libnfc-bin.'"}});
+        actions.push_back({"Dump MIFARE Classic",
+                           "nfc-mfclassic read (default keys) to /tmp/bruce-mfc.mfd.",
+                           {"sh", "-c",
+                            "nfc-mfclassic r a /tmp/bruce-mfc.mfd 2>&1 || "
+                            "echo 'Needs a PN532 + MIFARE Classic tag (default keys). Install libnfc-bin.'"}});
+        actions.push_back({"Dump Ultralight/NTAG",
+                           "nfc-mfultralight read to /tmp/bruce-ul.mfd.",
+                           {"sh", "-c",
+                            "nfc-mfultralight r /tmp/bruce-ul.mfd 2>&1 || "
+                            "echo 'Needs a PN532 + Ultralight/NTAG tag. Install libnfc-bin.'"}});
+        actions.push_back({"Emulate NDEF tag",
+                           "Emulate a Type-2 NDEF tag (nfc-emulate-forum-tag2).",
+                           {"sh", "-c",
+                            "nfc-emulate-forum-tag2 2>&1 || "
+                            "echo 'Needs a PN532. nfc-emulate-forum-tag2 is in libnfc-examples.'"}});
+        actions.push_back({"Emulate UID 01:02:03:04",
+                           "Emulate a tag advertising a fixed UID (nfc-emulate-uid).",
+                           {"sh", "-c",
+                            "nfc-emulate-uid 01020304 2>&1 || "
+                            "echo 'Needs a PN532. nfc-emulate-uid is in libnfc-examples.'"}});
+    }
+
+    // Always offer the way into the detect/setup sub-view (empty argv = nav row).
+    actions.push_back({"Setup Modules  >",
+                       "Detect ST25R / RFID2 / PN532 readers and open the PN532/libnfc setup help.",
+                       {}});
     return actions;
 }
 
@@ -1417,74 +1547,12 @@ std::vector<ToolCategory>& mutable_catalog() {
         },
         {
             "RFID",
-            "13.56MHz NFC - M5 ST25R3916 CAP (native) or a PN532 reader (via libnfc)",
+            "13.56MHz NFC - M5 ST25R3916 (SPI CAP or I2C) / RFID2 (MFRC522 I2C) native, or PN532 (libnfc)",
             icon::kNfc,
             false,
-            {
-                // --- M5 RF+NFC CAP: ST25R3916 over HAT SPI (native driver) ---
-                // The app powers the cap chain first (M5IOE1 PYG13 HAT rail +
-                // GPIO26 POWER_EN) and bit-bangs NFC_CS on GPIO22; spidev must
-                // exist (sudo raspi-config nonint do_spi 0, once).
-                {"ST25R: Read tag (UID/ATQA/SAK)",
-                 "Power the field and read a 13.56MHz ISO14443A tag's UID, ATQA and SAK.",
-                 {self_exe_path(), "--rfid-read"}},
-                {"ST25R: Dump tag (Type-2 / NTAG)",
-                 "Read UID then dump the data pages of a Type-2 tag (NTAG/Ultralight).",
-                 {self_exe_path(), "--rfid-dump"}},
-                {"ST25R: Clone -> emulate tag",
-                 "Read a tag's UID, then emulate it as an NFC-A target until you go back.",
-                 {self_exe_path(), "--rfid-clone"}},
-                {"ST25R: Detect chip",
-                 "Probe the ST25R3916: powers the cap up, then reads IC_IDENTITY.",
-                 {self_exe_path(), "--st25r-detect"}},
-
-                // --- PN532 reader over I2C/SPI/UART (via libnfc) ---
-                {"PN532: Scan via I2C (/dev/i2c-1)",
-                 "Test a PN532 wired on I2C bus 1 and read any tag present (nfc-list).",
-                 {"sh", "-c",
-                  "LIBNFC_DEFAULT_DEVICE=pn532_i2c:/dev/i2c-1 nfc-list -v 2>&1 || "
-                  "echo 'No PN532 on I2C bus 1. Check wiring / install libnfc-bin.'"}},
-                {"PN532: Scan via UART (/dev/ttyS0)",
-                 "Test a PN532 wired on UART and read any tag present (nfc-list).",
-                 {"sh", "-c",
-                  "LIBNFC_DEFAULT_DEVICE=pn532_uart:/dev/ttyS0 nfc-list -v 2>&1 || "
-                  "echo 'No PN532 on ttyS0. Check wiring/baud / install libnfc-bin.'"}},
-                {"PN532: Poll for tag (configured)",
-                 "nfc-poll using the device in /etc/nfc/libnfc.conf or $LIBNFC_DEFAULT_DEVICE.",
-                 {"sh", "-c",
-                  "nfc-poll 2>&1 || echo 'No PN532 found. Use a Scan entry to test the bus, "
-                  "or set /etc/nfc/libnfc.conf. Needs libnfc-bin.'"}},
-                {"PN532: Dump MIFARE Classic",
-                 "nfc-mfclassic read (default keys) to /tmp/bruce-mfc.mfd.",
-                 {"sh", "-c",
-                  "nfc-mfclassic r a /tmp/bruce-mfc.mfd 2>&1 || "
-                  "echo 'Needs a PN532 + MIFARE Classic tag (default keys). Install libnfc-bin.'"}},
-                {"PN532: Dump Ultralight/NTAG",
-                 "nfc-mfultralight read to /tmp/bruce-ul.mfd.",
-                 {"sh", "-c",
-                  "nfc-mfultralight r /tmp/bruce-ul.mfd 2>&1 || "
-                  "echo 'Needs a PN532 + Ultralight/NTAG tag. Install libnfc-bin.'"}},
-                {"PN532: Emulate NDEF tag",
-                 "Emulate a Type-2 NDEF tag (nfc-emulate-forum-tag2).",
-                 {"sh", "-c",
-                  "nfc-emulate-forum-tag2 2>&1 || "
-                  "echo 'Needs a PN532. nfc-emulate-forum-tag2 is in libnfc-examples.'"}},
-                {"PN532: Emulate UID 01:02:03:04",
-                 "Emulate a tag advertising a fixed UID (nfc-emulate-uid).",
-                 {"sh", "-c",
-                  "nfc-emulate-uid 01020304 2>&1 || "
-                  "echo 'Needs a PN532. nfc-emulate-uid is in libnfc-examples.'"}},
-                {"PN532: Setup / buses help",
-                 "How to point libnfc at your PN532, and list available buses.",
-                 {"sh", "-c",
-                  "echo 'PN532 via libnfc. Set the device persistently in /etc/nfc/libnfc.conf:'; "
-                  "echo '  device.connstring = \"pn532_i2c:/dev/i2c-1\"   (or pn532_uart:/dev/ttyS0,'; "
-                  "echo '   pn532_spi:/dev/spidev0.0:500000)  and  allow_autoscan = true'; echo; "
-                  "echo 'I2C buses:'; ls /dev/i2c-* 2>/dev/null || echo '  (none; enable i2c overlay)'; "
-                  "echo 'SPI:'; ls /dev/spidev* 2>/dev/null || echo '  (none)'; "
-                  "echo 'Serial:'; ls /dev/ttyS* /dev/ttyUSB* /dev/ttyAMA* 2>/dev/null || echo '  (none)'; "
-                  "echo; nfc-list -v 2>&1 | head -4 || echo 'install libnfc-bin'"}},
-            },
+            // Rows are filled per detected module by refresh_rfid_category();
+            // this static placeholder shows only the per-module Detect rows.
+            build_rfid_actions(false, false, false),
         },
         {
             "Sub-GHz / RF",
@@ -1795,6 +1863,17 @@ void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio) {
     }
 }
 
+void refresh_rfid_category(bool st25r_present, bool rfid2_present, bool pn532_present) {
+    for (auto& category : mutable_catalog()) {
+        if (std::string(category.label) == "RFID") {
+            category.actions = build_rfid_actions(st25r_present, rfid2_present, pn532_present);
+            return;
+        }
+    }
+}
+
+bool rfid_setup_is_open() { return rfid_setup_open(); }
+
 std::string take_navigation_error(int category_index) {
     const auto& catalog = mutable_catalog();
     if (category_index < 0 || category_index >= static_cast<int>(catalog.size()) ||
@@ -1883,6 +1962,21 @@ bool on_navigation_action(int category_index, int item_index) {
         }
         return false;
     }
+
+    if (label == "RFID") {
+        // "Setup Modules >" opens the detect/setup sub-view; "<  Back" closes it.
+        const auto& acts = catalog[static_cast<size_t>(category_index)].actions;
+        if (item_index < 0 || item_index >= static_cast<int>(acts.size())) {
+            return false;
+        }
+        const std::string row = acts[static_cast<size_t>(item_index)].label;
+        if (row.rfind("Setup Modules", 0) == 0) {
+            rfid_setup_open() = true;
+        } else if (!row.empty() && row[0] == '<') {
+            rfid_setup_open() = false;
+        }
+        return false;
+    }
     return false;
 }
 
@@ -1919,6 +2013,13 @@ bool on_category_back(int category_index) {
             return false;
         }
         tz_picker_open() = false;
+        return true;
+    }
+    if (label == "RFID") {
+        if (!rfid_setup_open()) {
+            return false; // main view: leave the category as usual
+        }
+        rfid_setup_open() = false; // close the Setup Modules sub-view
         return true;
     }
     if (label == "GPS") {

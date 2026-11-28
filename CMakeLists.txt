@@ -447,6 +447,10 @@ target_include_directories(${PROJECT_NAME}_platform
         # Sub-GHz / RF unit (cc1101 radio + probes, RfRxCapture). Headers stay
         # reachable as "cc1101.h" / "rf_capture.h" so no includes had to change.
         "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rf"
+        # 13.56MHz NFC/RFID drivers (ST25R3916, MFRC522/RFID2, PN532, i2c-dev
+        # helper). Headers stay reachable as "rfid_st25r.h" etc. so includes in
+        # main.cpp / menu_screen.cpp did not have to change.
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/rfid"
 )
 
 target_compile_definitions(${PROJECT_NAME}_platform

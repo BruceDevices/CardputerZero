@@ -119,6 +119,13 @@ void BaseViewModel::show_ble_scan(int category_index, int item_index) {
     publish_all();
 }
 
+void BaseViewModel::show_rfid(int category_index, int item_index) {
+    model_.set_current_page(model::AppPage::Rfid);
+    model_.set_active_category(category_index);
+    model_.set_active_item(item_index);
+    publish_all();
+}
+
 void BaseViewModel::show_gps_app(int category_index, int item_index) {
     model_.set_current_page(model::AppPage::GpsApp);
     model_.set_active_category(category_index);
@@ -139,6 +146,7 @@ void BaseViewModel::go_back() {
         case model::AppPage::Rf:
         case model::AppPage::WifiScan:
         case model::AppPage::BleScan:
+        case model::AppPage::Rfid:
         case model::AppPage::GpsApp:
             show_menu(model_.active_category());
             break;

@@ -14,6 +14,13 @@ namespace model {
 
 enum class RfTool { None, Scan, ProtocolMonitor, Record, Spectrum, Spectrogram };
 
+// Which ST25R3916 tag operation a row opens on the dedicated RfidScreen (the
+// Tag-O-Matic-style live reader) instead of the one-shot tool-run log. Read
+// and Dump poll the field continuously and pause after a hit; Clone reads one
+// UID and then emulates it. `argv` is still the equivalent --rfid-* CLI, kept
+// as a fallback and reused by the screen to find this binary's path.
+enum class RfidTool { None, Read, Dump, Load, Clone };
+
 // Which structured Wi-Fi scan UI a row opens instead of the raw tool-run log.
 // ScanList  -> "Scan nearby networks": a signal-sorted, selectable network list
 //              on the left with the selected network's details on the right.
@@ -78,6 +85,10 @@ struct ToolAction {
     // Shown greyed out and does nothing when selected (Bruce's disabled
     // option, e.g. GPS Port > "Save Config" until something changed).
     bool dimmed = false;
+    // Non-None opens the dedicated RfidScreen (live ST25R reader) instead of the
+    // tool-run log. `argv` is still the fallback --rfid-* command. Kept last so
+    // the positional aggregate initializers above (Wi-Fi rows) are unaffected.
+    RfidTool rfid_tool = RfidTool::None;
 };
 
 // A menu category shown on the root menu (e.g. "Wi-Fi", "Responder").
@@ -111,6 +122,22 @@ std::string nmap_state_dir();
 // hardware probing and passes the resulting availability/pins into the model.
 void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio);
 std::string rf_recordings_dir();
+
+// Directory where saved RFID tags (.nfc files) are written. $BRUCE_NFC_DIR, else
+// $HOME/BruceNFC, else /tmp/BruceNFC. Mirrors rf_recordings_dir().
+std::string rfid_recordings_dir();
+
+// Rebuild the "RFID" category so each module's actions appear only when that
+// module was detected: ST25R3916 (CAP over SPI or an I2C unit at 0x50), the M5
+// RFID2 / MFRC522 (I2C), and a PN532 (I2C or SPI). The view probes the hardware
+// and passes the three presence flags in; a per-module "Detect" row stays
+// visible either way so the operator can (re)probe from the menu.
+void refresh_rfid_category(bool st25r_present, bool rfid2_present, bool pn532_present);
+
+// True while the RFID "Setup Modules >" sub-view (detect probes + PN532/libnfc
+// setup help) is open, so the menu header can say so. Toggled by the category's
+// nav row / Back key (on_navigation_action / on_category_back).
+bool rfid_setup_is_open();
 
 // A ToolAction with an empty argv is a navigation row (not a launchable tool):
 // selecting it mutates dynamic state instead of running a process. Screens route

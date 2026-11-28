@@ -12,6 +12,7 @@
 #include "gps_app_screen.h"
 #include "menu_screen.h"
 #include "rf_screen.h"
+#include "rfid_screen.h"
 #include "terminal_screen.h"
 #include "tool_run_screen.h"
 #include "wifi_scan_screen.h"
@@ -87,6 +88,9 @@ void ScreenManager::flush_requested_refresh() {
             break;
         case model::AppPage::Rf:
             load_screen(std::make_unique<screen::RfScreen>(view_model_, assets_));
+            break;
+        case model::AppPage::Rfid:
+            load_screen(std::make_unique<screen::RfidScreen>(view_model_, assets_));
             break;
         case model::AppPage::WifiScan:
             load_screen(std::make_unique<screen::WifiScanScreen>(view_model_, assets_));
