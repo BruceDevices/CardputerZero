@@ -18,6 +18,7 @@ enum class AppPage {
     WifiScan = 6,
     BleScan  = 7,
     GpsApp   = 8,
+    Rfid     = 9,
 };
 
 class BaseModel {

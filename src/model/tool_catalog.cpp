@@ -134,6 +134,16 @@ std::string rf_recordings_dir() {
     return "/tmp/BruceRF";
 }
 
+std::string rfid_recordings_dir() {
+    if (const char* env = std::getenv("BRUCE_NFC_DIR"); env && env[0] != '\0') {
+        return env;
+    }
+    if (const char* home = std::getenv("HOME"); home && home[0] != '\0') {
+        return std::string(home) + "/BruceNFC";
+    }
+    return "/tmp/BruceNFC";
+}
+
 namespace {
 
 std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int gdo0_gpio) {
@@ -270,15 +280,24 @@ std::vector<ToolAction> build_rfid_actions(bool st25r, bool rfid2, bool pn532) {
 
     // --- M5 RF+NFC CAP: ST25R3916 over HAT SPI, or an I2C NFC unit at 0x50 ---
     if (st25r) {
-        actions.push_back({"Read tag (UID/ATQA/SAK)",
-                           "Read an ISO14443A tag's UID/ATQA/SAK on the detected ST25R3916 (SPI CAP or I2C @0x50).",
-                           {self_exe_path(), "--rfid-read"}});
-        actions.push_back({"Dump tag (Type-2 / NTAG)",
-                           "Read UID then dump the data pages of a Type-2 tag (NTAG/Ultralight).",
-                           {self_exe_path(), "--rfid-dump"}});
-        actions.push_back({"Clone -> emulate tag",
-                           "Read a tag's UID, then emulate it as an NFC-A target until you go back.",
-                           {self_exe_path(), "--rfid-clone"}});
+        // These three open the live RfidScreen (Tag-O-Matic-style continuous
+        // reader) via rfid_tool; the argv stays as the CLI fallback and lets the
+        // screen find this binary for the Clone emulate child.
+        ToolAction read{"Read tag (UID/ATQA/SAK)",
+                        "Read an ISO14443A tag's UID/ATQA/SAK on the detected ST25R3916 (SPI CAP or I2C @0x50).",
+                        {self_exe_path(), "--rfid-read"}};
+        read.rfid_tool = RfidTool::Read;
+        actions.push_back(read);
+        ToolAction dump{"Dump tag (Type-2 / NTAG)",
+                        "Read UID then dump the data pages of a Type-2 tag (NTAG/Ultralight).",
+                        {self_exe_path(), "--rfid-dump"}};
+        dump.rfid_tool = RfidTool::Dump;
+        actions.push_back(dump);
+        ToolAction clone{"Clone -> emulate tag",
+                         "Read a tag's UID, then emulate it as an NFC-A target until you go back.",
+                         {self_exe_path(), "--rfid-clone"}};
+        clone.rfid_tool = RfidTool::Clone;
+        actions.push_back(clone);
     }
 
     // --- M5 RFID2 unit: MFRC522 / WS1850S over I2C (native driver) ---

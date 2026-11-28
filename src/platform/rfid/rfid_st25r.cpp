@@ -17,9 +17,11 @@
 #include "rfid_st25r.h"
 
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 
 #if defined(__linux__)
 #include <cerrno>
@@ -129,6 +131,8 @@ constexpr uint8_t CMD_TX_REQA            = 0xC6;
 constexpr uint8_t CMD_TX_WUPA            = 0xC7;
 constexpr uint8_t CMD_ADJUST_REGULATORS  = 0xD6;
 constexpr uint8_t CMD_CLEAR_FIFO         = 0xDB;
+constexpr uint8_t CMD_GOTO_SENSE         = 0xCD; // passive target -> Sense/Idle (listen)
+constexpr uint8_t CMD_GOTO_SLEEP         = 0xCE; // passive target -> Sleep/Halt
 
 // Registers (space A).
 constexpr uint8_t REG_OP_CONTROL     = 0x02;
@@ -137,6 +141,7 @@ constexpr uint8_t REG_BIT_RATE       = 0x04;
 constexpr uint8_t REG_ISO14443A_NFC  = 0x05;
 constexpr uint8_t REG_PASSIVE_TARGET = 0x08;
 constexpr uint8_t REG_AUX            = 0x0A;
+constexpr uint8_t REG_MASK_RX_TIMER  = 0x0F;
 constexpr uint8_t REG_NO_RESP_TIMER1 = 0x10;
 constexpr uint8_t REG_NO_RESP_TIMER2 = 0x11;
 constexpr uint8_t REG_TIMER_EMV_CTRL = 0x12;
@@ -146,6 +151,7 @@ constexpr uint8_t REG_FIFO_STATUS2   = 0x1F;
 constexpr uint8_t REG_NUM_TX_BYTES1  = 0x22;
 constexpr uint8_t REG_NUM_TX_BYTES2  = 0x23;
 constexpr uint8_t REG_TX_DRIVER      = 0x28;
+constexpr uint8_t REG_AUX_DISPLAY    = 0x31; // osc/field status (OSC_OK on bit 4)
 constexpr uint8_t REG_IC_IDENTITY    = 0x3F;
 
 // Register bit fields.
@@ -159,6 +165,19 @@ constexpr uint8_t MODE_OM_ISO14443A     = 0x1 << 3;
 constexpr uint8_t MODE_OM_TARG_NFCA     = 0x1 << 3;
 constexpr uint8_t AUX_NO_CRC_RX         = 1 << 7;
 constexpr uint8_t FIFO_STATUS2_B_MASK   = 3 << 6;
+constexpr uint8_t AUX_DISPLAY_OSC_OK    = 1 << 4; // crystal oscillator stable
+constexpr uint8_t AUX_NFC_ID_7BYTES     = 1 << 4; // REG_AUX: UID length for auto-AC
+// PASSIVE_TARGET register bits.
+constexpr uint8_t PT_D_106_AC_A         = 1 << 0; // 1 = manual data (disable auto-AC)
+constexpr uint8_t PT_D_212_424_1R       = 1 << 2; // disable NFC-F 212/424 single-slot
+constexpr uint8_t PT_D_AC_AP2P          = 1 << 3; // disable active P2P
+constexpr uint8_t PT_FDEL_0             = 1 << 4;
+constexpr uint8_t PT_FDEL_2             = 1 << 6;
+// Listen-A config (Bruce ST25R3916::_setupListenMode): fdel=5, NFC-F/AP2P off,
+// auto NFC-A anticollision enabled (d_106_ac_a = 0). After selection the code
+// sets d_106_ac_a to take over the data exchange by hand.
+constexpr uint8_t PASSIVE_TARGET_LISTEN_A =
+    PT_FDEL_2 | PT_FDEL_0 | PT_D_AC_AP2P | PT_D_212_424_1R; // 0x5C
 
 // IRQ bits (32-bit map across REG_IRQ_MAIN..IRQ_TARGET).
 constexpr uint32_t IRQ_RXS = 0x00000020;
@@ -171,13 +190,16 @@ constexpr uint32_t IRQ_PAR = 0x00400000;
 constexpr uint32_t IRQ_ERR2 = 0x00200000;
 constexpr uint32_t IRQ_ERR1 = 0x00100000;
 constexpr uint32_t IRQ_ERRORS = IRQ_CRC | IRQ_PAR | IRQ_ERR2 | IRQ_ERR1;
-constexpr uint32_t IRQ_WU_A = 0x01000000;
+constexpr uint32_t IRQ_WU_A = 0x01000000;   // passive target: Active reached (selected)
+constexpr uint32_t IRQ_WU_AX = 0x02000000;  // passive target: Active* reached
+constexpr uint32_t IRQ_EOF = 0x00000800;    // external field off (reader left)
 
 // SPI mode bytes.
 constexpr uint8_t SPI_READ_MODE  = 0x40;
 constexpr uint8_t SPI_WRITE_MODE = 0x00;
 constexpr uint8_t SPI_FIFO_LOAD  = 0x80;
 constexpr uint8_t SPI_FIFO_READ  = 0x9F;
+constexpr uint8_t SPI_PT_LOAD_A  = 0xA0; // load the NFC-A passive-target memory
 
 // ST25R3916 IC_IDENTITY ic_type values (ic_type field = id & 0xF8).
 constexpr uint8_t IC_TYPE_MASK   = 0xF8;
@@ -280,6 +302,14 @@ void reg_write(uint8_t addr, uint8_t val) {
 
 void cmd(uint8_t c) {
     bus_write_then_read(&c, 1, nullptr, 0);
+}
+
+void reg_set_bits(uint8_t addr, uint8_t bits) {
+    reg_write(addr, static_cast<uint8_t>(reg_read(addr) | bits));
+}
+
+void reg_clr_bits(uint8_t addr, uint8_t bits) {
+    reg_write(addr, static_cast<uint8_t>(reg_read(addr) & ~bits));
 }
 
 void fifo_write(const uint8_t* data, size_t n) {
@@ -610,6 +640,13 @@ void close_chip() {
         }
         g_fd = -1;
     }
+    // SPI uses a GPIO line handle for the CAP's manual chip-select; it must be
+    // released too, or the next open_chip() cannot re-claim the line (the line
+    // stays busy and the reader reports "no ST25R" on every reopen).
+    if (g_cs_fd >= 0) {
+        close(g_cs_fd);
+        g_cs_fd = -1;
+    }
 }
 
 // The subcommands pass argv[path_arg] (if any) as the transport spec; otherwise
@@ -655,27 +692,222 @@ size_t scan_once(std::string& report, uint8_t* uid, size_t uidcap, uint8_t& sak,
     return uidlen;
 }
 
+// One in-process poll cycle for st25r_session_poll(): energize the field, do
+// REQA + anticollision, and (when asked, for a Type-2 tag) dump the data pages.
+// Fills `out` and returns true on a tag; false on an empty field. Each call
+// re-runs poller_init() so a tag presented after the previous one was removed
+// is detected again (REQA only answers tags in the IDLE state).
+bool poll_tag(St25rScan& out, bool dump_pages) {
+    poller_init();
+    uint8_t atqa[2] = {0, 0};
+    if (!reqa(atqa)) {
+        return false;
+    }
+    uint8_t uid[10] = {0}, sak = 0;
+    const size_t uidlen = anticollision(uid, sizeof(uid), sak);
+    if (uidlen == 0) {
+        return false;
+    }
+    out.uid.assign(uid, uid + uidlen);
+    out.atqa[0] = atqa[0];
+    out.atqa[1] = atqa[1];
+    out.sak = sak;
+    out.sak_text = sak_describe(sak);
+    out.t2t = (sak == 0x00);
+    out.pages.clear();
+    out.page_count = 0;
+    if (dump_pages && out.t2t) {
+        for (uint8_t page = 0; page < 44; page += 4) {
+            uint8_t block[16] = {0};
+            if (!t2t_read_page(page, block)) {
+                break;
+            }
+            out.pages.insert(out.pages.end(), block, block + 16);
+            out.page_count += 4;
+        }
+    }
+    return true;
+}
+
+// Load the NFC-A passive-target memory (PT_Memory) the chip answers REQA /
+// anticollision / SELECT from automatically. 15 bytes follow the 0xA0 op:
+//   [0..9]  NFCID1 (the 4- or 7-byte UID, in order)
+//   [10,11] SENS_RES (ATQA)
+//   [12]    SEL_RES level 1 (SAK; cascade bit 0x04 set for a 7-byte UID)
+//   [13]    SEL_RES level 2 (SAK, 7-byte UID only)
+//   [14]    RFU (0)
+// Layout per DS13541 Table 8 (via BatteryJuice4/st25r3916b-driver).
+void pt_load_a(const uint8_t* uid, size_t uidlen, const uint8_t atqa[2], uint8_t sak) {
+    uint8_t w[1 + 15] = {0};
+    w[0] = SPI_PT_LOAD_A;
+    for (size_t i = 0; i < uidlen && i < 10; ++i) {
+        w[1 + i] = uid[i];
+    }
+    w[1 + 10] = atqa[0];
+    w[1 + 11] = atqa[1];
+    if (uidlen >= 7) {
+        w[1 + 12] = static_cast<uint8_t>(sak | 0x04); // L1 is a cascade
+        w[1 + 13] = sak;                              // L2 completes the UID
+    } else {
+        w[1 + 12] = sak;                              // single level
+    }
+    bus_write_then_read(w, sizeof(w), nullptr, 0);
+}
+
+// Put the (already-open) chip into NFC-A passive-target (card-emulation) mode
+// advertising the given UID/ATQA/SAK. The chip then auto-answers a reader from
+// PT_Memory; st25r_emulate_step()/emulate_loop() only watch for the activation
+// IRQ. Shared by the blocking CLI loop and the in-process st25r_emulate_* API.
+void emulate_setup(const uint8_t* uid, size_t uidlen, const uint8_t atqa[2], uint8_t sak) {
+    cmd(CMD_SET_DEFAULT);
+    sleep_ms(1);
+    reg_write(REG_OP_CONTROL, OP_CONTROL_EN); // power the oscillator
+    for (int i = 0; i < 50; ++i) {
+        if (reg_read(REG_AUX_DISPLAY) & AUX_DISPLAY_OSC_OK) break;
+        sleep_ms(1);
+    }
+    reg_write(REG_MODE, MODE_TARG_TARG | MODE_OM_TARG_NFCA); // 0x88 target NFC-A
+    reg_write(REG_BIT_RATE, 0x00);            // 106 kbit/s both ways
+    reg_write(REG_PASSIVE_TARGET, PASSIVE_TARGET_LISTEN_A);  // fdel, NFC-F/AP2P off, auto-AC on
+    reg_write(REG_MASK_RX_TIMER, 0x02);       // mask-receive timer (Bruce _setupListenMode)
+    cmd(CMD_STOP);
+    // UID length for the chip's automatic anticollision.
+    if (uidlen >= 7) {
+        reg_set_bits(REG_AUX, AUX_NFC_ID_7BYTES);
+    } else {
+        reg_clr_bits(REG_AUX, AUX_NFC_ID_7BYTES);
+    }
+    pt_load_a(uid, uidlen, atqa, sak);
+    reg_clr_bits(REG_PASSIVE_TARGET, PT_D_106_AC_A); // enable automatic NFC-A anticollision
+    reg_write(REG_OP_CONTROL, OP_CONTROL_EN | OP_CONTROL_RX_EN | OP_CONTROL_EN_FD_AUTO);
+    read_irqs();                              // clear anything latched during bring-up
+    cmd(CMD_GOTO_SENSE);                      // enter Sense/Idle: ready to be read
+}
+
+// --- Listen-mode responder (Bruce ST25R3916::_handleListenLoop) --------------
+//
+// After the chip auto-handles REQA/anticollision/SELECT from PT_Memory and
+// raises WU_A/WU_A_X (selected), d_106_ac_a is set so the host takes over the
+// data exchange. The reader's higher-layer command then arrives in the FIFO
+// (RXE); we answer it here. Minimal ISO14443-3A Type-2 set, enough for a phone
+// to read an NTAG/Ultralight clone.
+
+std::vector<uint8_t> g_emu_pages;   // served T2T page bytes (multiple of 4)
+unsigned g_emu_page_count = 0;
+
+// Send a response frame (hardware appends CRC_A), then wait for TX-end.
+void listen_respond(const uint8_t* resp, size_t len) {
+    cmd(CMD_CLEAR_FIFO);
+    fifo_write(resp, len);
+    set_num_tx_bits(static_cast<uint16_t>(len * 8));
+    cmd(CMD_TX_WITH_CRC);
+    wait_irq(IRQ_TXE, 20);
+}
+
+// Parse one reader command (already in the FIFO) and answer it.
+void handle_listen_rx() {
+    uint8_t fifo[64] = {0};
+    const size_t n = fifo_read(fifo, sizeof(fifo));
+    if (n < 1) return;
+    const uint8_t c = fifo[0];
+    if (c == 0x30 && n >= 2) {                 // READ: 16 bytes (4 pages from addr)
+        const uint8_t addr = fifo[1];
+        uint8_t resp[16] = {0};
+        for (int i = 0; i < 4; ++i) {
+            const unsigned page = g_emu_page_count ? (addr + i) % g_emu_page_count : (addr + i);
+            for (int b = 0; b < 4; ++b) {
+                const size_t off = static_cast<size_t>(page) * 4 + b;
+                resp[i * 4 + b] = (off < g_emu_pages.size()) ? g_emu_pages[off] : 0;
+            }
+        }
+        listen_respond(resp, sizeof(resp));
+    } else if (c == 0x50) {                     // HALT
+        cmd(CMD_GOTO_SLEEP);
+    }
+    // Other commands (WRITE, GET_VERSION, ...) are left unanswered: a read-only
+    // UID/NDEF clone is enough for the phone to detect and read the tag.
+}
+
+// One non-blocking service pass of the listen loop. Returns true when the
+// reader interacted (selected us or sent a frame), for the UI activity counter.
+bool emulate_service(long timeout_ms) {
+    const uint32_t irqs = wait_irq(IRQ_WU_A | IRQ_WU_AX | IRQ_RXE | IRQ_EOF, timeout_ms);
+    bool interacted = false;
+    if (irqs & (IRQ_WU_A | IRQ_WU_AX)) {        // selected: take over data handling
+        reg_set_bits(REG_PASSIVE_TARGET, PT_D_106_AC_A);
+        interacted = true;
+    }
+    if (irqs & IRQ_RXE) {                        // a command frame is waiting
+        handle_listen_rx();
+        interacted = true;
+    }
+    if (irqs & IRQ_EOF) {                        // reader field dropped: re-arm auto-AC
+        reg_clr_bits(REG_PASSIVE_TARGET, PT_D_106_AC_A);
+        cmd(CMD_GOTO_SENSE);
+    }
+    return interacted;
+}
+
+// Default ATQA for a UID of this length when the caller has no measured value
+// (the CLI --rfid-emulate takes only a UID): single-size -> 0x0004, double -> 0x0044.
+void default_atqa(size_t uidlen, uint8_t out[2]) {
+    out[0] = (uidlen >= 7) ? 0x44 : 0x04;
+    out[1] = 0x00;
+}
+
 // NFC-A passive-target / listen loop advertising `uid`. Same register path the
 // ESP32 firmware uses; runs until the process is killed (SIGTERM from the UI).
 // ponytail: relies on the chip's automatic target mode; robust T2T emulation
 // ultimately wants ST's full listen state machine. Experimental.
 [[noreturn]] void emulate_loop(const uint8_t* uid, size_t uidlen) {
-    cmd(CMD_SET_DEFAULT);
-    sleep_ms(1);
-    reg_write(REG_OP_CONTROL, OP_CONTROL_EN | OP_CONTROL_RX_EN | OP_CONTROL_EN_FD_AUTO);
-    reg_write(REG_MODE, MODE_TARG_TARG | MODE_OM_TARG_NFCA);
-    reg_write(REG_PASSIVE_TARGET, 0x00);
-    fifo_write(uid, uidlen); // load UID for the chip's automatic anticollision
-    read_irqs();
+    uint8_t atqa[2];
+    default_atqa(uidlen, atqa);
+    emulate_setup(uid, uidlen, atqa, /*sak=*/0x00); // CLI: advertise as Type-2
 
     std::fputs("Listening as a tag. Present a reader. Ctrl-C / Back to stop.\n", stdout);
     std::fflush(stdout);
 
+    // ST25R_EMU_DEBUG=1 traces every service pass (raw IRQ word + registers) so
+    // a captured log shows exactly what the reader triggers.
+    const bool dbg = std::getenv("ST25R_EMU_DEBUG") != nullptr;
     unsigned long activations = 0;
     for (;;) {
-        const uint32_t irqs = wait_irq(IRQ_WU_A | IRQ_RXE, 1000);
-        if (irqs & (IRQ_WU_A | IRQ_RXE)) {
-            std::printf("reader detected (activation #%lu)\n", ++activations);
+        if (dbg) {
+            const uint32_t irqs = wait_irq(IRQ_WU_A | IRQ_WU_AX | IRQ_RXE | IRQ_EOF, 1000);
+            std::printf("tick irq=%08X aux=%02X pt=%02X\n", irqs, reg_read(REG_AUX_DISPLAY),
+                        reg_read(REG_PASSIVE_TARGET));
+            std::fflush(stdout);
+            if (irqs & (IRQ_WU_A | IRQ_WU_AX)) reg_set_bits(REG_PASSIVE_TARGET, PT_D_106_AC_A);
+            if (irqs & IRQ_RXE) {
+                uint8_t fifo[64] = {0};
+                const size_t n = fifo_read(fifo, sizeof(fifo));
+                std::printf("  rx n=%zu cmd=%02X %02X\n", n, n > 0 ? fifo[0] : 0,
+                            n > 1 ? fifo[1] : 0);
+                std::fflush(stdout);
+                // Still answer so a phone can actually read during debug.
+                if (n >= 2 && fifo[0] == 0x30) {
+                    uint8_t resp[16] = {0};
+                    for (int i = 0; i < 4; ++i) {
+                        const unsigned page =
+                            g_emu_page_count ? (fifo[1] + i) % g_emu_page_count : (fifo[1] + i);
+                        for (int b = 0; b < 4; ++b) {
+                            const size_t off = static_cast<size_t>(page) * 4 + b;
+                            resp[i * 4 + b] = (off < g_emu_pages.size()) ? g_emu_pages[off] : 0;
+                        }
+                    }
+                    listen_respond(resp, sizeof(resp));
+                } else if (n >= 1 && fifo[0] == 0x50) {
+                    cmd(CMD_GOTO_SLEEP);
+                }
+            }
+            if (irqs & IRQ_EOF) {
+                reg_clr_bits(REG_PASSIVE_TARGET, PT_D_106_AC_A);
+                cmd(CMD_GOTO_SENSE);
+            }
+            continue;
+        }
+        if (emulate_service(1000)) {
+            std::printf("reader interaction #%lu\n", ++activations);
             std::fflush(stdout);
         }
     }
@@ -697,6 +929,108 @@ bool st25r_present_i2c() {
 #else
     return false;
 #endif
+}
+
+bool st25r_session_open(std::string* report) {
+#if defined(__linux__)
+    std::string local;
+    const bool ok = open_chip("auto", local);
+    if (report) *report = local;
+    if (!ok) close_chip();
+    return ok;
+#else
+    (void)report;
+    return false;
+#endif
+}
+
+bool st25r_session_ready() {
+#if defined(__linux__)
+    return g_fd >= 0;
+#else
+    return false;
+#endif
+}
+
+bool st25r_session_poll(St25rScan& out, bool dump_pages) {
+#if defined(__linux__)
+    if (g_fd < 0) return false;
+    return poll_tag(out, dump_pages);
+#else
+    (void)out; (void)dump_pages;
+    return false;
+#endif
+}
+
+void st25r_session_close() {
+#if defined(__linux__)
+    close_chip();
+#endif
+}
+
+bool st25r_emulate_begin(const St25rScan& scan) {
+#if defined(__linux__)
+    if (g_fd < 0 || scan.uid.empty()) return false;
+    uint8_t atqa[2] = {scan.atqa[0], scan.atqa[1]};
+    if (atqa[0] == 0 && atqa[1] == 0) default_atqa(scan.uid.size(), atqa);
+    // Serve the tag's own pages to the reader (READ responder) when we have them.
+    g_emu_pages = scan.pages;
+    g_emu_page_count = scan.page_count;
+    emulate_setup(scan.uid.data(), scan.uid.size(), atqa, scan.sak);
+    return true;
+#else
+    (void)scan;
+    return false;
+#endif
+}
+
+bool st25r_emulate_step() {
+#if defined(__linux__)
+    if (g_fd < 0) return false;
+    // Short window so the UI timer stays responsive; services one reader
+    // command (selection, READ, HALT, ...) per call.
+    return emulate_service(40);
+#else
+    return false;
+#endif
+}
+
+std::string st25r_save_nfc(const St25rScan& scan, const std::string& dir) {
+    if (scan.uid.empty()) return "";
+
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) return "";
+
+    const std::string base = to_hex(scan.uid.data(), scan.uid.size());
+    std::string path;
+    FILE* f = nullptr;
+    for (int i = 0; i <= 100000; ++i) {
+        path = dir + "/" + base + (i ? "_" + std::to_string(i) : "") + ".nfc";
+        f = std::fopen(path.c_str(), "wbx");
+        if (f || errno != EEXIST) break;
+    }
+    if (!f) return "";
+
+    const bool t2t = scan.t2t && scan.page_count > 0;
+    std::fputs("Filetype: Flipper NFC device\n", f);
+    std::fputs("Version: 4\n", f);
+    std::fputs("# Saved by Bruce CardputerZero (ST25R3916)\n", f);
+    std::fprintf(f, "Device type: %s\n", t2t ? "NTAG/Ultralight" : "ISO14443-3A");
+    std::fputs("# UID, ATQA and SAK are common for all formats\n", f);
+    std::fprintf(f, "UID: %s\n", to_hex(scan.uid.data(), scan.uid.size(), true).c_str());
+    std::fprintf(f, "ATQA: %02X %02X\n", scan.atqa[0], scan.atqa[1]);
+    std::fprintf(f, "SAK: %02X\n", scan.sak);
+    if (t2t) {
+        std::fputs("Data format version: 2\n", f);
+        std::fputs("# Mifare Ultralight / NTAG data pages\n", f);
+        std::fprintf(f, "Pages total: %u\n", scan.page_count);
+        for (unsigned p = 0; p < scan.page_count; ++p) {
+            std::fprintf(f, "Page %u: %s\n", p, to_hex(&scan.pages[p * 4], 4, true).c_str());
+        }
+    }
+    std::fclose(f);
+    return path;
 }
 
 int rfid_read_main(int argc, char** argv) {

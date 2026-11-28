@@ -69,6 +69,61 @@ std::string to_hex(const uint8_t* data, size_t len, bool colons = false);
 // menu ORs the two. Returns false off Linux. Opens and closes its own handle.
 bool st25r_present_i2c();
 
+// ---- In-process reader session (for the Tag-O-Matic-style RfidScreen) -------
+//
+// The CLI entry points below print a one-shot report and exit; the on-device
+// RFID screen instead drives the chip continuously from the LVGL timer, so it
+// needs structured results rather than printed text. These three functions are
+// that in-process surface: open the transport once, poll in a loop (each poll
+// energizes the field, does REQA + anticollision, and optionally dumps the
+// Type-2 pages), and close when leaving the screen. All are Linux-only no-ops
+// elsewhere. Not thread-safe: call them only from the UI thread, like the
+// screen does, and never while a --rfid-* CLI child is also touching the bus.
+
+// One tag seen by a poll. `uid`/`atqa`/`sak` are the ISO14443A identity; `t2t`
+// is true for a Type-2 tag (SAK 0x00, e.g. NTAG/Ultralight). When a dump was
+// requested and the tag is Type-2, `pages` holds `page_count` 4-byte pages read
+// from page 0 upward (so byte offset = page*4).
+struct St25rScan {
+    std::vector<uint8_t> uid;
+    uint8_t atqa[2] = {0, 0};
+    uint8_t sak = 0;
+    std::string sak_text;
+    bool t2t = false;
+    std::vector<uint8_t> pages;
+    unsigned page_count = 0;
+};
+
+// Open the ST25R reader (auto transport: SPI CAP first, then I2C @0x50). When
+// `report` is non-null it receives the same human-readable bring-up text the
+// CLI prints. Returns false (and leaves nothing open) if no chip answered.
+bool st25r_session_open(std::string* report = nullptr);
+
+// True while a session opened by st25r_session_open() is live.
+bool st25r_session_ready();
+
+// Energize the field and try to read one tag. Returns true and fills `out` when
+// a tag answered; false on an empty field / anticollision miss. When
+// `dump_pages` is true and the tag is Type-2, `out.pages` is also populated.
+bool st25r_session_poll(St25rScan& out, bool dump_pages);
+
+// Release the transport opened by st25r_session_open() (turns the field off).
+void st25r_session_close();
+
+// In-process tag emulation (Clone), reusing the open session so there is no
+// second process fighting for the SPI/GPIO. begin() switches the chip into
+// NFC-A passive-target mode advertising `scan.uid`; step() polls once for a
+// reader activation (short, UI-timer friendly) and returns true when one is
+// seen. Call st25r_session_close() to stop and release the field.
+bool st25r_emulate_begin(const St25rScan& scan);
+bool st25r_emulate_step();
+
+// Write a read tag to a Flipper/Bruce-compatible `.nfc` file in `dir` (created
+// if needed; a numeric suffix avoids clobbering an existing UID). Returns the
+// saved path, or "" on failure. Includes the Type-2 data pages when the scan
+// carries them. Portable (plain file IO); no hardware access.
+std::string st25r_save_nfc(const St25rScan& scan, const std::string& dir);
+
 int rfid_read_main(int argc, char** argv);           // --rfid-read [spidev]
 int rfid_dump_main(int argc, char** argv);            // --rfid-dump [spidev]
 int rfid_write_main(int argc, char** argv);           // --rfid-write <page> <hex4> [spidev]
