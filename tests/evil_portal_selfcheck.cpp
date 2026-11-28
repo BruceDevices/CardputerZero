@@ -78,6 +78,11 @@ struct FakeSys {
     bool nft_table = false;
     std::set<std::string> ipt; // keys like "udp:1053", "tcp:1053"
 
+    // Modeled DEVICE autoconnect (only touched by the nmcli commands below).
+    // `nmcli connection up` re-enables it as a real side effect; `nmcli device
+    // set <iface> autoconnect <v>` sets it explicitly.
+    std::string dev_autoconnect;
+
     static bool has(const std::string& c, const std::string& s) {
         return c.find(s) != std::string::npos;
     }
@@ -146,6 +151,14 @@ struct FakeSys {
             if (forced) return {1, "Error: Operation not permitted"}; // inspection error -> Unknown
             if (nft_table) return {0, "table ip bruce_portal_dns { }"};
             return {1, "Error: No such file or directory"};
+        }
+        if (has(c, "nmcli") && has(c, "connection up uuid")) {
+            if (!forced) dev_autoconnect = "yes"; // re-enables device autoconnect
+            return {forced ? 1 : 0, r.out};
+        }
+        if (has(c, "nmcli device set") && has(c, " autoconnect ")) {
+            if (!forced) dev_autoconnect = has(c, "autoconnect no") ? "no" : "yes";
+            return {forced ? 1 : 0, r.out};
         }
         return {forced ? 1 : 0, r.out};
     }
@@ -322,6 +335,34 @@ int main() {
     assert(reg_is_self_managed("global\ncountry 00: DFS-UNSET\nphy#0 (self-managed)\n"));
     assert(!reg_is_self_managed("global\ncountry JP: DFS-JP\n"));
 
+    // --- wiphy index parse + PHY-scoped self-managed detection --------------
+    assert(parse_wiphy_index("Interface wlan0\n\tifindex 3\n\twiphy 0\n\ttype managed\n") == 0);
+    assert(parse_wiphy_index("Interface wlan1\n\twiphy 7\n") == 7);
+    assert(parse_wiphy_index("Interface wlan0\n\ttype managed\n") == -1); // no wiphy line
+    {
+        // Two PHYs, the '(self-managed)' marker ONLY on phy#1. The target (phy#0)
+        // must read non-self-managed in BOTH section orderings.
+        const std::string a = "global\ncountry 00: DFS-UNSET\n\n"
+                              "phy#0\ncountry US: DFS-FCC\n\n"
+                              "phy#1 (self-managed)\ncountry 00: DFS-UNSET\n";
+        const std::string b = "global\ncountry 00: DFS-UNSET\n\n"
+                              "phy#1 (self-managed)\ncountry 00: DFS-UNSET\n\n"
+                              "phy#0\ncountry US: DFS-FCC\n";
+        assert(!phy_is_self_managed(a, 0) && phy_is_self_managed(a, 1));
+        assert(!phy_is_self_managed(b, 0) && phy_is_self_managed(b, 1));
+        // Exact index match: looking for phy#1 must not hit phy#10.
+        const std::string c = "phy#10 (self-managed)\ncountry 00: DFS-UNSET\n";
+        assert(!phy_is_self_managed(c, 1) && phy_is_self_managed(c, 10));
+        assert(!phy_is_self_managed(a, -1)); // unresolved wiphy -> not self-managed
+    }
+
+    // --- AP-ENABLED EXISTENCE (diagnostics) vs LAST state (readiness) -------
+    assert(ap_event_ever_enabled("wlan0", "wlan0: AP-ENABLED\nwlan0: AP-DISABLED\n"));
+    assert(!ap_event_enabled("wlan0", "wlan0: AP-ENABLED\nwlan0: AP-DISABLED\n"));
+    assert(!ap_event_ever_enabled("wlan0", "wlan0: AP-DISABLED\n")); // never enabled
+    assert(ap_event_ever_enabled("wlan0", "wlan0: AP-ENABLED \n"));  // trailing space tolerated
+    assert(!ap_event_ever_enabled("wlan0", "wlan1: AP-ENABLED\n"));  // different iface
+
     // --- full interface release sequence (exact order) ----------------------
     {
         const std::vector<std::string> rel = iface_release_commands("wlan0");
@@ -351,11 +392,13 @@ int main() {
         assert(r[3] == "ip link set dev wlan0 up");
         assert(r[4] == "iw reg set JP"); // original regdom restored
         assert(r[5] == "nmcli device set wlan0 managed yes");
-        assert(r[6] == "nmcli connection modify uuid "
-                       "11111111-2222-3333-4444-555555555555 connection.autoconnect yes");
+        // DEVICE autoconnect restored (not the profile's connection.autoconnect).
+        assert(r[6] == "nmcli device set wlan0 autoconnect yes");
         assert(r[7] == "nmcli --wait 30 connection up uuid "
                        "11111111-2222-3333-4444-555555555555 ifname wlan0");
         assert(r.size() == 8);
+        // We must NOT rewrite the profile's connection.autoconnect.
+        for (const auto& c : r) assert(c.find("connection.autoconnect") == std::string::npos);
         assert(iface_restore_commands(st) == r); // deterministic
 
         NetState unmanaged = st; // never managed -> cycle the link, but NO nmcli parts
@@ -369,15 +412,63 @@ int main() {
         const std::vector<std::string> n = iface_restore_commands(no_regdom);
         for (const auto& c : n) assert(c.rfind("iw reg set", 0) != 0);
 
-        NetState no_ac = st; // no saved autoconnect -> no modify, but still up
+        NetState no_ac = st; // no saved device-autoconnect -> no autoconnect set, but still up
         no_ac.autoconnect.clear();
         const std::vector<std::string> a = iface_restore_commands(no_ac);
-        bool has_modify = false, has_up = false;
+        bool has_ac = false, has_up = false;
         for (const auto& c : a) {
-            if (c.find("connection.autoconnect") != std::string::npos) has_modify = true;
+            if (c.find("device set wlan0 autoconnect") != std::string::npos) has_ac = true;
             if (c.find("connection up uuid") != std::string::npos) has_up = true;
         }
-        assert(!has_modify && has_up);
+        assert(!has_ac && has_up);
+
+        // Managed but DISCONNECTED (no active UUID) + device-autoconnect yes:
+        // restore the device autoconnect, but issue NO `connection up`.
+        NetState disc = st;
+        disc.active_uuid.clear();
+        disc.autoconnect = "yes";
+        const std::vector<std::string> d = iface_restore_commands(disc);
+        bool d_ac = false, d_up = false;
+        for (const auto& c : d) {
+            if (c == "nmcli device set wlan0 autoconnect yes") d_ac = true;
+            if (c.find("connection up uuid") != std::string::npos) d_up = true;
+        }
+        assert(d_ac && !d_up);
+
+        // Originally-DISABLED device autoconnect + active UUID: `connection up`
+        // re-enables the device autoconnect, so the saved "no" must be RE-APPLIED
+        // AFTER the up. Expect: set no (pre), connection up, set no (post).
+        NetState off = st;
+        off.autoconnect = "no";
+        const std::vector<std::string> o = iface_restore_commands(off);
+        int set_no = 0, up_idx = -1, last_set_no = -1;
+        for (int i = 0; i < static_cast<int>(o.size()); ++i) {
+            if (o[i] == "nmcli device set wlan0 autoconnect no") {
+                ++set_no;
+                last_set_no = i;
+            }
+            if (o[i].find("connection up uuid") != std::string::npos) up_idx = i;
+        }
+        assert(set_no == 2 && up_idx >= 0 && last_set_no > up_idx); // re-applied AFTER up
+
+        // Disabled autoconnect but NO active UUID: no `connection up`, so the
+        // device setting is never re-enabled -> a single "no" suffices.
+        NetState off_disc = off;
+        off_disc.active_uuid.clear();
+        const std::vector<std::string> od = iface_restore_commands(off_disc);
+        int od_set_no = 0, od_up = 0;
+        for (const auto& c : od) {
+            if (c == "nmcli device set wlan0 autoconnect no") ++od_set_no;
+            if (c.find("connection up uuid") != std::string::npos) ++od_up;
+        }
+        assert(od_set_no == 1 && od_up == 0);
+
+        // Originally-ENABLED autoconnect + UUID: `connection up` leaves it "yes",
+        // so NO extra re-apply is emitted (restoring yes would be a no-op).
+        int yes_set = 0;
+        for (const auto& c : r)
+            if (c == "nmcli device set wlan0 autoconnect yes") ++yes_set;
+        assert(yes_set == 1);
     }
 
     // --- PortalNet lifecycle (injected fake runner) -------------------------
@@ -585,15 +676,44 @@ int main() {
         assert(!net.cleanup()); // DNAT removed, but restore incomplete -> not fully clean
     }
 
-    {   // ...but a benign `ip addr del` (address already gone) does NOT.
+    {   // a failed `ip addr del` is benign ONLY when the address is CONFIRMED
+        // gone: the inspection query shows it absent -> cleanup still clean.
         FakeSys fs;
         fs.present = {"hostapd.pid", "dnsmasq.pid"};
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
         prepare(fs, net);
         assert(net.start(lopts).ok());
-        fs.fail = {"ip addr del"}; // addr already absent -> nonzero, but benign
-        assert(net.cleanup());     // still fully clean
+        fs.fail = {"ip addr del"}; // delete returns nonzero...
+        // default `ip -o -4 addr show` output is empty -> address confirmed gone
+        assert(net.cleanup());     // benign absence -> still fully clean
+    }
+
+    {   // GENUINE deletion failure: the delete fails AND the address is still
+        // present afterward -> NOT clean (must not be silenced as "absence").
+        FakeSys fs;
+        fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
+        assert(net.start(lopts).ok());
+        fs.fail = {"ip addr del"};
+        fs.output["ip -o -4 addr show"] =
+            "3: wlan0    inet 192.168.4.1/24 brd 192.168.4.255 scope global wlan0\n";
+        assert(!net.cleanup());            // address remains -> not fully clean
+        assert(!net.cleanup());            // retried, not given up
+    }
+
+    {   // delete fails AND the inspection query itself fails -> UNKNOWN, which is
+        // NOT confirmed absence -> not clean (we don't assume it worked).
+        FakeSys fs;
+        fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
+        assert(net.start(lopts).ok());
+        fs.fail = {"ip addr del", "ip -o -4 addr show"};
+        assert(!net.cleanup());
     }
 
     {   // REGRESSION FIX: nft load fails but is CONFIRMED gone -> fall back to
@@ -711,10 +831,12 @@ int main() {
     }
 
     {   // self-managed radio: resolve succeeds with NO country, start sets no
-        // regdom and writes no country_code, yet still comes up.
+        // regdom and writes no country_code, yet still comes up. Detection is
+        // scoped to THIS iface's wiphy (phy#0 via `iw dev wlan0 info`).
         FakeSys fs;
         fs.tools = {"iw", "nft"};
         fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        fs.output["iw dev wlan0 info"] = "Interface wlan0\n\twiphy 0\n\ttype managed\n";
         fs.output["iw reg get"] = "global\ncountry 00: DFS-UNSET\nphy#0 (self-managed)\n";
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
@@ -726,10 +848,32 @@ int main() {
         assert(!fs.ran("iw reg set"));      // we never touch a self-managed regdom
     }
 
-    {   // FULL release: exact command order; a failed managed-no / link-down, or
-        // a still-associated link, aborts (so serve_portal routes to cleanup).
+    {   // SCOPED self-managed: wlan0 is phy#0 (ordinary); a SECOND radio (phy#1)
+        // is self-managed. The stray marker must NOT make us skip country for
+        // wlan0 - it resolves non-self-managed and gets its US regdom set.
+        FakeSys fs;
+        fs.tools = {"iw", "nft"};
+        fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        fs.output["iw dev wlan0 info"] = "Interface wlan0\n\twiphy 0\n\ttype managed\n";
+        fs.output["iw reg get"] = "global\ncountry US: DFS-FCC\n\n"
+                                  "phy#1 (self-managed)\ncountry 00: DFS-UNSET\n\n"
+                                  "phy#0\ncountry US: DFS-FCC\n";
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        std::string e;
+        assert(net.resolve_country("", e));
+        assert(!net.state().reg_self_managed && net.state().country == "US");
+        assert(net.start(lopts).ok());
+        assert(fs.ran("iw reg set US")); // country IS set for the non-self-managed target
+    }
+
+    {   // FULL release: exact command order; it SUCCEEDS only on a successful,
+        // explicit "Not connected." post-condition. A failed managed-no /
+        // link-down, a failed/empty/unknown query, or a still-associated link
+        // aborts (so serve_portal routes to cleanup).
         FakeSys fs;
         fs.tools = {"nmcli", "iw"};
+        fs.output["iw dev wlan0 link"] = "Not connected.\n"; // explicit disconnected
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
         assert(net.release_interface()); // disconnect (best-effort) + managed no + link down
@@ -757,6 +901,28 @@ int main() {
         PortalNet nc(fc.env());
         nc.set_interface("wlan0", "192.168.4.1");
         assert(!nc.release_interface());
+
+        FakeSys fq; // the link QUERY itself fails -> unknown, NOT disconnected
+        fq.tools = {"nmcli", "iw"};
+        fq.fail = {"iw dev wlan0 link"};
+        PortalNet nq(fq.env());
+        nq.set_interface("wlan0", "192.168.4.1");
+        assert(!nq.release_interface());
+
+        FakeSys fe; // successful query but EMPTY output -> not recognized disconnected
+        fe.tools = {"nmcli", "iw"};
+        fe.output["iw dev wlan0 link"] = ""; // status 0, no "Not connected"
+        PortalNet ne(fe.env());
+        ne.set_interface("wlan0", "192.168.4.1");
+        assert(!ne.release_interface());
+
+        FakeSys fd; // disconnect FAILS, but the post-condition confirms disconnected
+        fd.tools = {"nmcli", "iw"};
+        fd.fail = {"device disconnect"};           // best-effort disconnect returns nonzero
+        fd.output["iw dev wlan0 link"] = "Not connected.\n";
+        PortalNet nd(fd.env());
+        nd.set_interface("wlan0", "192.168.4.1");
+        assert(nd.release_interface());            // still OK: confirmed not connected
     }
 
     {   // readiness STABILITY: AP-ENABLED then AP-DISABLED within the window is
@@ -768,27 +934,149 @@ int main() {
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
         prepare(fs, net);
-        assert(!net.start(lopts).hostapd); // not stable -> not up
+        const StartResult r = net.start(lopts);
+        assert(!r.hostapd);      // not stable -> not up
+        assert(r.ap_event_seen); // ...but AP-ENABLED DID appear (existence, for diag)
     }
 
-    {   // capture_ownership also records the connection's autoconnect (restored
-        // on teardown because `nmcli device disconnect` blocks it).
+    {   // P2 REGRESSION: the log already shows AP-ENABLED then AP-DISABLED at the
+        // FIRST read. Readiness (last state) is false, but the diagnostic must
+        // still record that AP-ENABLED existed (enabled-then-dropped, not
+        // never-enabled) and that the pid was alive.
+        FakeSys fs;
+        fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        fs.ap_log = "wlan0: AP-ENABLED\nwlan0: AP-DISABLED\n"; // constant: last state disabled
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
+        const StartResult r = net.start(lopts);
+        assert(!r.hostapd);                        // last state is disabled -> not up
+        assert(r.ap_event_seen && r.pid_ever_alive); // diagnostics distinguish the cause
+    }
+
+    {   // never enabled + dead pid: diagnostics show BOTH were false (vs the case
+        // above), so an on-device [diag] line tells the two apart.
+        FakeSys fs;
+        fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        fs.ap_log = "wlan0: interface state UNINITIALIZED->COUNTRY_UPDATE\n"; // never AP-ENABLED
+        fs.pid_alive_val = false;                                            // launch failed
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
+        const StartResult r = net.start(lopts);
+        assert(!r.hostapd && !r.ap_event_seen && !r.pid_ever_alive);
+    }
+
+    {   // capture_ownership records the DEVICE autoconnect (GENERAL.AUTOCONNECT),
+        // restored on teardown because `nmcli device disconnect` inhibits it.
+        // Distinct output keys so the autoconnect read and the main managed read
+        // don't collide on the "device show" substring.
         FakeSys fs;
         fs.tools = {"nmcli"};
-        fs.output["device show"] =
+        fs.output["GENERAL.NM-MANAGED,GENERAL.CON-UUID"] =
             "GENERAL.NM-MANAGED:yes\nGENERAL.CON-UUID:11111111-2222-3333-4444-555555555555\n";
-        fs.output["connection.autoconnect connection show"] = "yes\n";
+        fs.output["GENERAL.AUTOCONNECT"] = "yes\n";
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
         assert(net.capture_ownership());
         assert(net.state().autoconnect == "yes");
+        assert(fs.ran("-g GENERAL.AUTOCONNECT device show wlan0")); // the DEVICE property
+
+        // Device autoconnect is captured even with NO active connection ("--").
+        FakeSys fs2;
+        fs2.tools = {"nmcli"};
+        fs2.output["GENERAL.NM-MANAGED,GENERAL.CON-UUID"] =
+            "GENERAL.NM-MANAGED:yes\nGENERAL.CON-UUID:--\n";
+        fs2.output["GENERAL.AUTOCONNECT"] = "no\n"; // originally disabled
+        PortalNet net2(fs2.env());
+        net2.set_interface("wlan0", "192.168.4.1");
+        assert(net2.capture_ownership());
+        assert(net2.state().active_uuid.empty() && net2.state().autoconnect == "no");
+
+        // For a MANAGED iface the device-autoconnect read must succeed AND be
+        // strictly yes/no: a failed, empty, or garbled read fails ownership
+        // capture BEFORE any NIC mutation (so no release command is ever run).
+        auto no_mutation = [](const FakeSys& f) {
+            for (const auto& c : f.log) {
+                assert(c.find("managed no") == std::string::npos);
+                assert(c.find("link set") == std::string::npos);
+                assert(c.find("ip addr") == std::string::npos);
+                assert(c.find("device set") == std::string::npos);
+            }
+        };
+        const char* bad_ac[] = {"", "maybe\n", "yes\nno\n"}; // empty / invalid / ambiguous
+        for (const char* bad : bad_ac) {
+            FakeSys f;
+            f.tools = {"nmcli"};
+            f.output["GENERAL.NM-MANAGED,GENERAL.CON-UUID"] =
+                "GENERAL.NM-MANAGED:yes\nGENERAL.CON-UUID:--\n";
+            f.output["GENERAL.AUTOCONNECT"] = bad;
+            PortalNet n(f.env());
+            n.set_interface("wlan0", "192.168.4.1");
+            assert(!n.capture_ownership() && !n.state().ownership_read_ok);
+            no_mutation(f);
+        }
+        {   // autoconnect read command FAILS (nonzero) -> same: capture fails.
+            FakeSys f;
+            f.tools = {"nmcli"};
+            f.output["GENERAL.NM-MANAGED,GENERAL.CON-UUID"] =
+                "GENERAL.NM-MANAGED:yes\nGENERAL.CON-UUID:--\n";
+            f.fail = {"GENERAL.AUTOCONNECT"};
+            PortalNet n(f.env());
+            n.set_interface("wlan0", "192.168.4.1");
+            assert(!n.capture_ownership() && !n.state().ownership_read_ok);
+            no_mutation(f);
+        }
+        {   // UNMANAGED iface: a missing autoconnect is irrelevant (never handed
+            // back to NM), so ownership capture still succeeds.
+            FakeSys f;
+            f.tools = {"nmcli"};
+            f.output["GENERAL.NM-MANAGED,GENERAL.CON-UUID"] =
+                "GENERAL.NM-MANAGED:no\nGENERAL.CON-UUID:--\n";
+            f.fail = {"GENERAL.AUTOCONNECT"};
+            PortalNet n(f.env());
+            n.set_interface("wlan0", "192.168.4.1");
+            assert(n.capture_ownership() && !n.state().iface_was_managed);
+        }
+    }
+
+    {   // P2 (autoconnect): teardown must land the DEVICE autoconnect back on
+        // its captured value even though `connection up` re-enables it. Model
+        // that side effect and check the final device state after cleanup().
+        FakeSys fs;
+        fs.tools = {"nmcli"};
+        fs.output["GENERAL.NM-MANAGED,GENERAL.CON-UUID"] =
+            "GENERAL.NM-MANAGED:yes\nGENERAL.CON-UUID:11111111-2222-3333-4444-555555555555\n";
+        fs.output["GENERAL.AUTOCONNECT"] = "no\n"; // originally disabled + active UUID
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        assert(net.capture_ownership());
+        assert(net.state().autoconnect == "no" && !net.state().active_uuid.empty());
+        fs.dev_autoconnect = "no"; // real starting device state
+        assert(net.cleanup());
+        assert(fs.ran("connection up uuid"));   // we did reactivate (which flips it)
+        assert(fs.dev_autoconnect == "no");     // ...but the post-up re-apply won
+
+        // Failure of that device-autoconnect restore is a cleanup failure.
+        FakeSys fs2;
+        fs2.tools = {"nmcli"};
+        fs2.output["GENERAL.NM-MANAGED,GENERAL.CON-UUID"] =
+            "GENERAL.NM-MANAGED:yes\nGENERAL.CON-UUID:11111111-2222-3333-4444-555555555555\n";
+        fs2.output["GENERAL.AUTOCONNECT"] = "no\n";
+        PortalNet net2(fs2.env());
+        net2.set_interface("wlan0", "192.168.4.1");
+        assert(net2.capture_ownership());
+        fs2.fail = {"device set wlan0 autoconnect no"}; // the restore never takes
+        assert(!net2.cleanup());
     }
 
     {   // capture_ownership parses nmcli; release honors managed state.
         FakeSys fs;
         fs.tools = {"nmcli", "nft"};
-        fs.output["device show"] =
+        fs.output["GENERAL.NM-MANAGED,GENERAL.CON-UUID"] =
             "GENERAL.NM-MANAGED:yes\nGENERAL.CON-UUID:11111111-2222-3333-4444-555555555555\n";
+        fs.output["GENERAL.AUTOCONNECT"] = "yes\n";
+        fs.output["iw dev wlan0 link"] = "Not connected.\n";
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
         assert(net.capture_ownership());
@@ -843,8 +1131,9 @@ int main() {
         // Release failure is surfaced (NM may still own the NIC).
         FakeSys fsr;
         fsr.tools = {"nmcli"};
-        fsr.output["device show"] =
+        fsr.output["GENERAL.NM-MANAGED,GENERAL.CON-UUID"] =
             "GENERAL.NM-MANAGED:yes\nGENERAL.CON-UUID:11111111-2222-3333-4444-555555555555\n";
+        fsr.output["GENERAL.AUTOCONNECT"] = "yes\n";
         fsr.fail = {"nmcli device set"};
         PortalNet netr(fsr.env());
         netr.set_interface("wlan0", "192.168.4.1");

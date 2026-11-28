@@ -126,9 +126,10 @@ std::string ssid_post_page(const std::string& ap_name);
 
 // Open-AP config for hostapd (driver line required, or hostapd refuses to
 // start - the bug the old "Rogue open AP" menu entry had). A non-empty
-// `country` adds country_code=<CC> + ieee80211d=1: on brcmfmac (Pi onboard
-// wifi) an AP typically will not beacon without a regulatory domain, so this
-// gives it one (not a guarantee of beaconing on every firmware/channel).
+// `country` adds country_code=<CC> + ieee80211d=1: setting a regulatory domain
+// for a non-self-managed radio is correct practice (and some firmware/channel
+// combinations need it to beacon). The confirmed fix for the Pi's brcmfmac not
+// beaconing was the full interface release, not the country alone.
 std::string hostapd_conf(const std::string& iface, const std::string& ssid, int channel,
                          const std::string& country = "");
 
@@ -142,11 +143,22 @@ bool valid_country(const std::string& cc);
 // selection - with multiple regulatory sections it is best-effort.
 std::string parse_reg_country(const std::string& iw_reg_get_output);
 
-// Is the wiphy self-managed (sets its own regulatory domain)? `iw reg get`
-// prints a "phy#N (self-managed)" line for such devices. A self-managed radio
-// needs no country_code / `iw reg set`; a NON-self-managed one (e.g. the Pi's
-// brcmfmac) does, or it will not beacon.
+// Does ANY wiphy in `iw reg get` self-manage its regulatory domain? `iw reg
+// get` prints a "phy#N (self-managed)" line for such a device. Global (not
+// scoped to one interface) - prefer phy_is_self_managed() for a decision about
+// a specific radio.
 bool reg_is_self_managed(const std::string& iw_reg_get_output);
+
+// The wiphy index for an interface, parsed from `iw dev <iface> info` ("wiphy
+// N"), or -1 if absent/unparseable.
+int parse_wiphy_index(const std::string& iw_dev_info_output);
+
+// Is the given wiphy (by index) self-managed? Inspects ONLY that phy's
+// "phy#<index>[ (self-managed)]" header in `iw reg get`, so a second,
+// self-managed radio elsewhere in the output never misclassifies this one.
+// A self-managed radio needs no country_code / `iw reg set`; a non-self-managed
+// one is given a regulatory domain as correct practice.
+bool phy_is_self_managed(const std::string& iw_reg_get_output, int phy_index);
 
 // Does hostapd's log show OUR interface's AP currently enabled? Scans COMPLETE
 // (newline-terminated) lines for exact "<iface>: AP-ENABLED" records and
@@ -154,6 +166,12 @@ bool reg_is_self_managed(const std::string& iw_reg_get_output);
 // AP-DISABLED / INTERFACE-DISABLED reads as NOT enabled. Note: a log event is
 // not itself proof that a beacon is on the air.
 bool ap_event_enabled(const std::string& iface, const std::string& hostapd_log);
+
+// Did OUR interface's AP EVER reach AP-ENABLED in the log (any complete
+// "<iface>: AP-ENABLED" record), regardless of a later AP-DISABLED? Used for
+// diagnostics only - it distinguishes "never enabled" from "enabled then
+// dropped"; readiness still uses ap_event_enabled() (the LAST state).
+bool ap_event_ever_enabled(const std::string& iface, const std::string& hostapd_log);
 // DHCP + DNS hijack: every name resolves to the gateway, clients get it as
 // router and DNS server - the Linux stand-in for DNSServer.start(53, "*", ip).
 // dnsmasq listens on `dns_port` (an alternate high port) so it can coexist
@@ -227,7 +245,7 @@ struct NetState {
     bool ownership_read_ok = false;   // the managed-state read succeeded (vs failed/invalid)
     bool iface_was_managed = false;   // iface was explicitly NM-managed before we took it
     std::string active_uuid;          // NM connection to re-up on exit ("" = none/invalid)
-    std::string autoconnect;          // the connection's connection.autoconnect ("yes"/"no"/"")
+    std::string autoconnect;          // the DEVICE autoconnect (GENERAL.AUTOCONNECT) ("yes"/"no"/"")
 };
 
 // The FULL interface-release command sequence run before hostapd (so it owns
@@ -290,6 +308,11 @@ struct StartResult {
     bool hostapd = false; // AP reached (and still at) AP-ENABLED, pid alive
     bool dnsmasq = false;
     bool dnat = false;
+    // Self-diagnosis for a failed AP readiness (printed on-device so we never
+    // need an SSH experiment to tell a slow-to-beacon radio from a dead pid):
+    bool ap_event_seen = false;  // an AP-ENABLED record EVER appeared (even if later disabled)
+    bool pid_ever_alive = false; // the tracked hostapd pid was ever alive
+    int  ap_wait_ms = 0;         // measured elapsed ms waited in await_ap_enabled (monotonic clock)
     bool ok() const { return regdom && hostapd && dnsmasq && dnat; }
 };
 
@@ -309,9 +332,10 @@ public:
     // Resolve the AP regulatory domain BEFORE any mutation: `cli_country` (from
     // --country) wins, else the device's current `iw reg get` country. false
     // (with `err` set) when `iw` is missing or the country is unknown/world -
-    // we must never bring the AP up without a country (brcmfmac won't beacon).
+    // a non-self-managed radio is given a regulatory domain as correct practice.
+    // Self-managed detection is scoped to THIS iface's wiphy.
     bool resolve_country(const std::string& cli_country, std::string& err);
-    bool release_interface();   // `managed no`; false => release failed (NM may still own it)
+    bool release_interface();   // full release + confirm disconnected; false => release failed
     StartResult start(const PortalOptions& opts);            // bring AP+DNS+DNAT up
     bool stop();                // down for a restart; false => a tracked DNAT rule survived
     bool verify(const PortalOptions& opts, const std::string& password, StartResult& restart);
@@ -324,8 +348,11 @@ private:
     // never silently treated as Absent - we retain ownership on unknown state.
     enum class Presence { Present, Absent, Unknown };
 
+    // CONFIRMED absence of <gateway>/.. on <iface> (a successful inspection that
+    // shows it gone), so a failed `ip addr del` can be called benign only then.
+    bool addr_absent(const std::string& iface, const std::string& gateway);
     bool install_dnat();                      // only after dnsmasq is confirmed up
-    bool await_ap_enabled();                  // poll: pid alive AND AP-ENABLED (bounded window)
+    bool await_ap_enabled(StartResult& res);  // poll: pid alive AND AP-ENABLED (bounded window)
     void track_rule(const DnatRule& r);       // record a rule we may have installed
     bool purge_dnat();                        // delete+confirm each tracked rule; keep survivors
     Presence nft_presence();                  // is our nft table there? (status + stderr marker)

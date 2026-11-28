@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
@@ -419,9 +420,10 @@ std::string hostapd_conf(const std::string& iface, const std::string& ssid, int 
     conf += "ssid=" + conf_quote(ssid) + "\n";
     if (channel > 0) conf += "channel=" + std::to_string(channel) + "\n";
     conf += "hw_mode=g\n";
-    // On brcmfmac (Pi onboard wifi) an AP typically will not beacon without a
-    // regulatory domain set; country_code + ieee80211d give it one. This is the
-    // needed precondition, not a guarantee of beaconing on every firmware.
+    // Setting a regulatory domain for a non-self-managed radio is correct
+    // practice; country_code + ieee80211d provide it (some firmware/channel
+    // combinations also need it to beacon). Not a universal precondition - the
+    // confirmed brcmfmac fix was the full interface release.
     if (!country.empty()) {
         conf += "country_code=" + country + "\n";
         conf += "ieee80211d=1\n";
@@ -469,6 +471,43 @@ bool reg_is_self_managed(const std::string& iw_reg_get_output) {
     return iw_reg_get_output.find("(self-managed)") != std::string::npos;
 }
 
+int parse_wiphy_index(const std::string& iw_dev_info_output) {
+    // `iw dev <iface> info` prints an indented "wiphy N" line.
+    const std::string key = "wiphy ";
+    std::istringstream in(iw_dev_info_output);
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t b = 0;
+        while (b < line.size() && (line[b] == ' ' || line[b] == '\t')) ++b;
+        const std::string t = line.substr(b);
+        if (t.rfind(key, 0) != 0) continue;
+        size_t i = key.size(), j = i;
+        while (j < t.size() && t[j] >= '0' && t[j] <= '9') ++j;
+        if (j == i) continue; // no digits after "wiphy "
+        return std::atoi(t.substr(i, j - i).c_str());
+    }
+    return -1;
+}
+
+bool phy_is_self_managed(const std::string& iw_reg_get_output, int phy_index) {
+    if (phy_index < 0) return false;
+    // Inspect ONLY the target phy's header line: "phy#<index>" optionally
+    // followed by " (self-managed)". Match the index exactly (phy#1 != phy#10).
+    const std::string tag = "phy#" + std::to_string(phy_index);
+    std::istringstream in(iw_reg_get_output);
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t b = 0;
+        while (b < line.size() && (line[b] == ' ' || line[b] == '\t')) ++b;
+        const std::string t = line.substr(b);
+        if (t.rfind(tag, 0) != 0) continue;
+        const char nxt = (t.size() > tag.size()) ? t[tag.size()] : '\0';
+        if (nxt >= '0' && nxt <= '9') continue; // e.g. phy#10 when looking for phy#1
+        return t.find("(self-managed)") != std::string::npos;
+    }
+    return false;
+}
+
 std::vector<std::string> iface_release_commands(const std::string& iface) {
     // Order matters: break the association first, then unmanage, then down.
     return {"nmcli --wait 15 device disconnect " + iface,
@@ -490,15 +529,25 @@ std::vector<std::string> iface_restore_commands(const NetState& st) {
     // Hand back to NetworkManager ONLY if it explicitly managed the iface.
     if (st.nmcli_present && st.ownership_read_ok && st.iface_was_managed) {
         cmds.push_back("nmcli device set " + st.iface + " managed yes");
+        // `nmcli device disconnect` inhibits the DEVICE autoconnect (not the
+        // profile's connection.autoconnect); restore the saved device setting,
+        // independent of whether a saved connection exists. We do NOT rewrite
+        // the profile - that could clobber a change made during the run.
+        if (st.autoconnect == "yes" || st.autoconnect == "no") {
+            cmds.push_back("nmcli device set " + st.iface + " autoconnect " + st.autoconnect);
+        }
+        // Reactivate the previously-active connection only when we captured a
+        // valid UUID (a managed-but-disconnected device has none).
         if (valid_uuid(st.active_uuid)) {
-            // `nmcli device disconnect` blocks the connection's autoconnect;
-            // restore its saved value, then bring it back up explicitly.
-            if (st.autoconnect == "yes" || st.autoconnect == "no") {
-                cmds.push_back("nmcli connection modify uuid " + st.active_uuid +
-                               " connection.autoconnect " + st.autoconnect);
-            }
             cmds.push_back("nmcli --wait 30 connection up uuid " + st.active_uuid + " ifname " +
                            st.iface);
+            // `connection up` re-enables the DEVICE autoconnect as a side
+            // effect. If the original was "no", re-apply it AFTER the up so
+            // the final device state matches what we captured (restoring "yes"
+            // again would be a no-op, so only the "no" case needs this).
+            if (st.autoconnect == "no") {
+                cmds.push_back("nmcli device set " + st.iface + " autoconnect no");
+            }
         }
     }
     return cmds;
@@ -516,7 +565,14 @@ bool ap_event_enabled(const std::string& iface, const std::string& hostapd_log) 
         if (nl == std::string::npos) break; // trailing partial line: ignore
         std::string line = hostapd_log.substr(pos, nl - pos);
         pos = nl + 1;
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        // hostapd emits these event lines with trailing whitespace (observed:
+        // `wlan0: AP-ENABLED \n`). Strip CR, spaces and tabs so the exact-match
+        // below is robust to it - otherwise AP-ENABLED never matched and
+        // await_ap_enabled timed out even after the AP was up.
+        while (!line.empty() &&
+               (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+            line.pop_back();
+        }
         if (line.rfind(prefix, 0) != 0) continue;
         const std::string ev = line.substr(prefix.size());
         if (ev == "AP-ENABLED") {
@@ -526,6 +582,27 @@ bool ap_event_enabled(const std::string& iface, const std::string& hostapd_log) 
         }
     }
     return enabled;
+}
+
+bool ap_event_ever_enabled(const std::string& iface, const std::string& hostapd_log) {
+    // Existence (not last-state): true if ANY complete "<iface>: AP-ENABLED"
+    // record appears, even one later cancelled by AP-DISABLED. Same whitespace
+    // tolerance as ap_event_enabled(). Diagnostics only.
+    const std::string prefix = iface + ": ";
+    size_t pos = 0;
+    while (true) {
+        const size_t nl = hostapd_log.find('\n', pos);
+        if (nl == std::string::npos) break; // trailing partial line: ignore
+        std::string line = hostapd_log.substr(pos, nl - pos);
+        pos = nl + 1;
+        while (!line.empty() &&
+               (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
+            line.pop_back();
+        }
+        if (line.rfind(prefix, 0) != 0) continue;
+        if (line.substr(prefix.size()) == "AP-ENABLED") return true;
+    }
+    return false;
 }
 
 std::string dnsmasq_conf(const std::string& iface, const std::string& gateway, int dns_port) {
@@ -987,8 +1064,9 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
     }
 
     // Resolve the AP regulatory domain BEFORE any mutation (the connected AP's
-    // country IE is gone once we take the NIC). Without it brcmfmac reaches
-    // AP-ENABLED but never beacons, so this is fatal rather than a silent no-SSID.
+    // country IE is gone once we take the NIC). A non-self-managed radio is
+    // given a regulatory domain as correct practice; resolving it up front also
+    // lets us fail early (with a clear message) rather than mid-setup.
     {
         std::string err;
         if (!net.resolve_country(opts.country, err)) {
@@ -1048,6 +1126,17 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
         run_failed = true;
         if (g_listen_fd >= 0) ::shutdown(g_listen_fd, SHUT_RDWR); // break accept()
     };
+    // One AP-readiness self-diagnosis, printed to stdout on EVERY path that can
+    // fail readiness (initial start AND verify/postssid restart), so an on-device
+    // run shows WHY: whether AP-ENABLED was ever seen, the pid was ever alive,
+    // and the measured wait. Only meaningful (and only printed) when hostapd
+    // readiness itself failed.
+    auto ap_readiness_diag = [&](const StartResult& r) {
+        if (!r.hostapd) {
+            std::printf("[diag] ap_event_seen=%d pid_ever_alive=%d waited=%dms\n",
+                        r.ap_event_seen, r.pid_ever_alive, r.ap_wait_ms);
+        }
+    };
 
     PortalHooks hooks;
     hooks.on_ap_restart = [&](const PortalOptions& o) {
@@ -1067,6 +1156,7 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
             std::snprintf(msg, sizeof(msg), "AP restart failed (hostapd=%d dnsmasq=%d dnat=%d)",
                           r.hostapd, r.dnsmasq, r.dnat);
             fail_run(msg);
+            ap_readiness_diag(r);
         }
     };
     hooks.verify_password = [&](const PortalOptions& o, const std::string& password) {
@@ -1082,6 +1172,7 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
                           "AP did not come back up after verify (hostapd=%d dnsmasq=%d dnat=%d)",
                           restart.hostapd, restart.dnsmasq, restart.dnat);
             fail_run(msg);
+            ap_readiness_diag(restart);
         }
         return ok;
     };
@@ -1117,6 +1208,7 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
                     "beacon). Check the log above; try a different --country, or disable Monitor "
                     "mode / other APs on the radio. (apt install hostapd if missing.)\n",
                     iface.c_str());
+        ap_readiness_diag(start);
         teardown();
         return 1;
     }
@@ -1344,19 +1436,30 @@ bool PortalNet::capture_ownership() {
         }
     }
     if (!managed_ok || !uuid_ok) return false; // missing/garbled field => invalid read
-    // Record the connection's autoconnect so we can restore it on teardown
-    // (`nmcli device disconnect` blocks autoconnect until reactivated).
-    if (valid_uuid(net_.active_uuid)) {
-        const CmdResult ac = env_.exec("LC_ALL=C nmcli -g connection.autoconnect connection show "
-                                       "uuid " +
-                                       net_.active_uuid + " 2>/dev/null");
+    // Record the DEVICE autoconnect so we can restore it on teardown
+    // (`nmcli device disconnect` inhibits the device autoconnect). This is the
+    // device property, not the profile's connection.autoconnect, and applies
+    // even when the device is managed but has no active connection.
+    {
+        const CmdResult ac = env_.exec("LC_ALL=C nmcli -g GENERAL.AUTOCONNECT device show " +
+                                       net_.iface + " 2>/dev/null");
+        bool ac_ok = false;
         if (ac.status == 0) {
             std::string v = ac.out;
             while (!v.empty() && (v.back() == '\r' || v.back() == '\n' || v.back() == ' ')) {
                 v.pop_back();
             }
-            if (v == "yes" || v == "no") net_.autoconnect = v;
+            if (v == "yes" || v == "no") {
+                net_.autoconnect = v;
+                ac_ok = true;
+            }
         }
+        // For a MANAGED iface we will restore this device autoconnect on
+        // teardown, so a failed/empty/garbled read means we can't safely own
+        // the NIC: fail capture BEFORE mutating anything (no release commands
+        // run). An unmanaged iface is never handed back to NM, so the value
+        // does not matter and we keep the prior behaviour.
+        if (net_.iface_was_managed && !ac_ok) return false;
     }
     net_.ownership_read_ok = true;
     return true;
@@ -1375,11 +1478,20 @@ bool PortalNet::resolve_country(const std::string& cli_country, std::string& err
     // from a failed invocation.
     const CmdResult reg = env_.exec("iw reg get 2>/dev/null");
     const bool read_ok = (reg.status == 0);
-    net_.reg_self_managed = read_ok && reg_is_self_managed(reg.out);
+    // Scope self-managed detection to THIS iface's wiphy: resolve its index via
+    // `iw dev <iface> info`, then inspect only that phy's section of `iw reg
+    // get`. A stray '(self-managed)' on a second radio must NOT make us skip
+    // country for wlan0. If the wiphy can't be resolved, treat as non-self-
+    // managed (set a country) - the conservative choice.
+    int phy = -1;
+    {
+        const CmdResult info = env_.exec("iw dev " + net_.iface + " info 2>/dev/null");
+        if (info.status == 0) phy = parse_wiphy_index(info.out);
+    }
+    net_.reg_self_managed = read_ok && phy >= 0 && phy_is_self_managed(reg.out, phy);
 
     // A self-managed wiphy sets its own regdom: no country_code / `iw reg set`
-    // needed (and we must not try). Everything else must have a country or it
-    // won't beacon.
+    // needed (and we must not try). A non-self-managed radio is given a country.
     if (net_.reg_self_managed) {
         net_.country.clear();
         net_.orig_country.clear();
@@ -1425,12 +1537,15 @@ bool PortalNet::release_interface() {
         if (!env_.run_ok(seq[1] + " 2>/dev/null")) return false; // managed no must take
     }
     if (!env_.run_ok(seq[2] + " 2>/dev/null")) return false; // link down must take
-    // Confirm the interface is no longer associated. `iw dev <iface> link`
-    // prints "Connected to <bssid>" when still associated, "Not connected."
-    // otherwise. A failed/absent iw read is treated as not-connected (we already
-    // unmanaged + downed it); a clear "Connected to" is fatal.
+    // Confirm the interface is no longer associated, and ONLY on a successful,
+    // recognized disconnected post-condition. `iw dev <iface> link` prints
+    // "Connected to <bssid>" when still associated and "Not connected."
+    // otherwise. A failed query, or any unknown/empty output, is NOT evidence of
+    // disconnection - route it to teardown (return false) rather than proceed.
     const CmdResult link = env_.exec("iw dev " + net_.iface + " link 2>/dev/null");
-    if (link.status == 0 && link.out.find("Connected to") != std::string::npos) return false;
+    if (link.status != 0) return false;                                   // query failed: unknown
+    if (link.out.find("Connected to") != std::string::npos) return false; // still associated
+    if (link.out.find("Not connected") == std::string::npos) return false; // unrecognized output
     return true;
 }
 
@@ -1535,28 +1650,46 @@ bool PortalNet::install_dnat() {
     return false;
 }
 
-bool PortalNet::await_ap_enabled() {
+bool PortalNet::await_ap_enabled(StartResult& res) {
     const std::string wd = kWorkDir;
     const std::string pid = wd + "/hostapd.pid";
     const std::string log = wd + "/hostapd.log";
-    auto up_now = [&]() {
-        // ALIVE (and non-zombie, via pid_alive) AND the log's LAST AP event is
-        // AP-ENABLED. Rereading each poll lets a split write complete.
-        return env_.pid_alive(pid) && ap_event_enabled(net_.iface, env_.read_file(log));
+    // Measure REAL elapsed time (monotonic), not a sum of requested sleeps, so
+    // the [diag] "waited" value reflects actual wall time incl. I/O/scheduling.
+    const auto t0 = std::chrono::steady_clock::now();
+    auto elapsed_ms = [&]() {
+        return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count());
     };
-    // Phase 1: wait up to ~3s for the AP to come up.
+    // Poll once. For diagnostics, record whether the pid was EVER alive and
+    // whether AP-ENABLED EVER appeared (existence, so an enabled-then-disabled
+    // log is not misread as "never enabled"); readiness itself uses the LAST
+    // state (ap_event_enabled) so a dropped AP is not called up.
+    auto up_now = [&]() {
+        const bool alive = env_.pid_alive(pid);
+        if (alive) res.pid_ever_alive = true;
+        const std::string logc = env_.read_file(log);
+        if (ap_event_ever_enabled(net_.iface, logc)) res.ap_event_seen = true;
+        const bool enabled = ap_event_enabled(net_.iface, logc);
+        return alive && enabled;
+    };
+    // Phase 1: wait up to ~12s for the AP to come up (24 polls, 23 x 500ms
+    // sleeps between them). A brcmfmac SDIO radio's COUNTRY_UPDATE -> ENABLED ->
+    // AP-ENABLED sequence can take well over 3s, so we poll longer; the early
+    // break keeps a fast AP from paying for the whole wait.
     bool up = false;
-    for (int i = 0; i < 7 && !up; ++i) {
+    for (int i = 0; i < 24 && !up; ++i) {
         up = up_now();
-        if (!up && i < 6) env_.sleep_ms(500);
+        if (!up && i < 23) env_.sleep_ms(500);
     }
-    if (!up) return false;
+    if (!up) { res.ap_wait_ms = elapsed_ms(); return false; }
     // Phase 2: ~2s stability - it must STAY up (brcmfmac can enable then drop,
     // or hostapd can go zombie). Any lost liveness / later AP-DISABLED fails it.
     for (int i = 0; i < 4; ++i) {
         env_.sleep_ms(500);
-        if (!up_now()) return false;
+        if (!up_now()) { res.ap_wait_ms = elapsed_ms(); return false; }
     }
+    res.ap_wait_ms = elapsed_ms();
     return true;
 }
 
@@ -1580,9 +1713,10 @@ StartResult PortalNet::start(const PortalOptions& opts) {
     // silently stops hostapd opening the interface. Clear it first.
     env_.run("rfkill unblock wifi 2>/dev/null");
     env_.run("rfkill unblock wlan 2>/dev/null");
-    // Set the regdom before hostapd (a non-self-managed brcmfmac needs it to
-    // beacon). GLOBAL change; check it took, and fail BEFORE touching the
-    // AP/addressing/DNS/DNAT if it did not. Self-managed: nothing to set.
+    // Set the regdom before hostapd for a non-self-managed radio (correct
+    // practice; some firmware/channel combinations also need it). GLOBAL change;
+    // check it took, and fail BEFORE touching the AP/addressing/DNS/DNAT if it
+    // did not. Self-managed: nothing to set.
     if (net_.reg_self_managed) {
         res.regdom = true; // device manages its own regdom
     } else {
@@ -1601,7 +1735,7 @@ StartResult PortalNet::start(const PortalOptions& opts) {
     // dead/never-beaconing AP "up".
     env_.run("hostapd -B -P " + wd + "/hostapd.pid " + wd + "/hostapd.conf > " + wd +
              "/hostapd.log 2>&1");
-    res.hostapd = await_ap_enabled();
+    res.hostapd = await_ap_enabled(res);
     if (!res.hostapd) return res;
 
     env_.run("ip addr flush dev " + net_.iface + " 2>/dev/null");
@@ -1660,6 +1794,15 @@ bool PortalNet::verify(const PortalOptions& opts, const std::string& password,
     return connected;
 }
 
+bool PortalNet::addr_absent(const std::string& iface, const std::string& gateway) {
+    // Inspect under a stable locale; true ONLY on a successful query that does
+    // not list the exact gateway address. A failed/unknown query is NOT absence.
+    const CmdResult q =
+        env_.exec("LC_ALL=C ip -o -4 addr show dev " + iface + " 2>/dev/null");
+    if (q.status != 0) return false; // couldn't inspect: unknown, not absent
+    return q.out.find(gateway + "/") == std::string::npos;
+}
+
 bool PortalNet::cleanup() {
     if (cleaned_) return true; // a prior cleanup already fully succeeded
     bool ok = true;
@@ -1672,11 +1815,16 @@ bool PortalNet::cleanup() {
     // managed, up state, restore the original regdom (iw_restore below is part
     // of the sequence), hand the iface back to NetworkManager and re-up its
     // connection - but only the parts that apply (see iface_restore_commands).
-    // An absent-address `ip addr del` is benign (addr may already be gone); every
-    // other command's result counts toward "fully clean" so we don't over-claim.
+    // A failed `ip addr del` is benign ONLY when the address is CONFIRMED gone
+    // (it may already have been absent); a perm/backend error that leaves the
+    // gateway address on the iface must count as NOT clean. Every other
+    // command's result counts toward "fully clean" so we don't over-claim.
     for (const auto& c : iface_restore_commands(net_)) {
-        const bool benign = c.rfind("ip addr del", 0) == 0;
-        if (!env_.run_ok(c + " 2>/dev/null") && !benign) ok = false;
+        if (env_.run_ok(c + " 2>/dev/null")) continue; // took
+        if (c.rfind("ip addr del", 0) == 0 && addr_absent(net_.iface, net_.gateway)) {
+            continue; // benign: the gateway address is confirmed gone
+        }
+        ok = false;
     }
     // The restore list included `iw reg set <orig>` when we had changed the
     // GLOBAL regdom and knew the original; a fully-clean pass means it took, so
