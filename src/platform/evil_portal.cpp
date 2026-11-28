@@ -11,7 +11,10 @@
  *   WiFi.softAPConfig/softAP   -> ip addr + hostapd (open AP)
  *   DNSServer.start(53, "*",)  -> dnsmasq address=/#/<gateway> (captive:
  *                                 every name resolves to us, unknown paths
- *                                 serve the portal)
+ *                                 serve the portal). dnsmasq listens on an
+ *                                 alternate high port and an nftables/iptables
+ *                                 DNAT redirects clients' :53 to it, so it
+ *                                 coexists with a system resolver holding :53.
  *   WiFi.begin() verify        -> stop AP, wpa_supplicant attempt (12 x 500ms
  *                                 = 6s, like verifyCreds which loops i=1..12;
  *                                 Bruce evil_portal.cpp:856-860), restart AP -
@@ -27,7 +30,9 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -417,18 +422,31 @@ std::string hostapd_conf(const std::string& iface, const std::string& ssid, int 
     return conf;
 }
 
-std::string dnsmasq_conf(const std::string& iface, const std::string& gateway) {
+std::string dnsmasq_conf(const std::string& iface, const std::string& gateway, int dns_port) {
     // DHCP tells clients we are router+DNS; address=/#/gw answers every lookup
     // with the gateway (ESP32: dnsServer.start(53, "*", apIp)) so all captive
     // probes land on the portal. The lease range starts above the gateway.
+    //
+    // DNS listens on `dns_port` (not 53): a system resolver (dnsmasq
+    // --local-service / systemd-resolved) often holds a wildcard 0.0.0.0:53
+    // that would refuse our bind. A DNAT (nft_dnat_script) redirects clients'
+    // :53 to this port. DHCP stays on 67; dhcp-option=6 still advertises the
+    // gateway as the DNS server (clients always ask on :53, which is DNAT-ed).
+    // no-hosts: never let /etc/hosts override the wildcard. local=/#/: answer
+    // every name ourselves and never forward upstream.
     const std::string base = gateway.substr(0, gateway.rfind('.'));
     return "interface=" + iface + "\n"
                                  "bind-interfaces\n"
                                  "except-interface=lo\n"
-                                 "no-resolv\n"
-                                 "dhcp-authoritative\n"
-                                 "dhcp-leasefile=/tmp/bruce-portal/dnsmasq.leases\n"
-                                 "dhcp-range=" +
+                                 "port=" +
+           std::to_string(dns_port) +
+           "\n"
+           "no-resolv\n"
+           "no-hosts\n"
+           "local=/#/\n"
+           "dhcp-authoritative\n"
+           "dhcp-leasefile=/tmp/bruce-portal/dnsmasq.leases\n"
+           "dhcp-range=" +
            base + ".10," + base +
            ".50,255.255.255.0,12h\n"
            "dhcp-option=3," +
@@ -449,6 +467,103 @@ std::string wpa_conf(const std::string& ssid, const std::string& password) {
            conf_quote(password) +
            "\"\n"
            "}\n";
+}
+
+// ---------------------------------------------------------------------------
+// captive DNS redirect helpers (pure; unit-checked in the self-check)
+// ---------------------------------------------------------------------------
+
+std::vector<int> dns_port_candidates() {
+    return {1053, 1054, 1055};
+}
+
+const char* dns_dnat_table() { return "bruce_portal_dns"; }
+
+std::string nft_dnat_script(const std::string& iface, const std::string& gateway, int dns_port) {
+    // A dedicated table so teardown is a single `delete table` that never
+    // touches the host ruleset. priority dstnat (-100) is where DNAT belongs;
+    // -101 runs just ahead of a host's own dstnat rules without replacing them.
+    const std::string t = dns_dnat_table();
+    const std::string dst = gateway + ":" + std::to_string(dns_port);
+    std::string s;
+    s += "add table ip " + t + "\n";
+    s += "add chain ip " + t +
+         " prerouting { type nat hook prerouting priority -101; policy accept; }\n";
+    s += "add rule ip " + t + " prerouting iifname \"" + iface + "\" ip daddr " + gateway +
+         " udp dport 53 dnat to " + dst + "\n";
+    s += "add rule ip " + t + " prerouting iifname \"" + iface + "\" ip daddr " + gateway +
+         " tcp dport 53 dnat to " + dst + "\n";
+    return s;
+}
+
+std::string nft_dnat_delete() { return std::string("delete table ip ") + dns_dnat_table(); }
+
+namespace {
+// One tagged PREROUTING DNAT rule for one protocol and op ("-A"/"-D"/"-C").
+// `-w` makes iptables wait for the xtables lock instead of failing on a
+// transient conflict. `-m comment` tags the rule so teardown removes exactly
+// ours and nothing of the host ruleset. This is the single source of the rule
+// string, shared by the public builders and PortalNet's per-rule teardown, so
+// a -C check always matches the -A/-D rule byte for byte.
+std::string iptables_dnat_rule(const std::string& op, const std::string& iface,
+                               const std::string& gateway, int dns_port,
+                               const std::string& proto) {
+    return "iptables -w -t nat " + op + " PREROUTING -i " + iface + " -d " + gateway + " -p " +
+           proto + " --dport 53 -m comment --comment " + dns_dnat_table() +
+           " -j DNAT --to-destination " + gateway + ":" + std::to_string(dns_port);
+}
+
+std::string iptables_dnat_rules(const std::string& op, const std::string& iface,
+                                const std::string& gateway, int dns_port) {
+    return iptables_dnat_rule(op, iface, gateway, dns_port, "udp") + "\n" +
+           iptables_dnat_rule(op, iface, gateway, dns_port, "tcp") + "\n";
+}
+} // namespace
+
+std::string iptables_dnat_add(const std::string& iface, const std::string& gateway, int dns_port) {
+    return iptables_dnat_rules("-A", iface, gateway, dns_port);
+}
+
+std::string iptables_dnat_delete(const std::string& iface, const std::string& gateway,
+                                 int dns_port) {
+    return iptables_dnat_rules("-D", iface, gateway, dns_port);
+}
+
+// -C probes whether each of our rules is still present (exit 0 == present), so
+// teardown can tell "already absent" from "delete failed".
+std::string iptables_dnat_check(const std::string& iface, const std::string& gateway,
+                                int dns_port) {
+    return iptables_dnat_rules("-C", iface, gateway, dns_port);
+}
+
+bool valid_uuid(const std::string& s) {
+    // 8-4-4-4-12 hex, as nmcli emits for GENERAL.CON-UUID. Anything else is a
+    // failed/garbled read and must never be interpolated into a command.
+    static const int groups[] = {8, 4, 4, 4, 12};
+    size_t i = 0;
+    for (int g = 0; g < 5; ++g) {
+        if (g && (i >= s.size() || s[i++] != '-')) return false;
+        for (int k = 0; k < groups[g]; ++k) {
+            if (i >= s.size() || !std::isxdigit(static_cast<unsigned char>(s[i]))) return false;
+            ++i;
+        }
+    }
+    return i == s.size();
+}
+
+std::vector<std::string> nm_restore_commands(const NetState& st) {
+    std::vector<std::string> cmds;
+    // Hand the interface back to NetworkManager - ONLY if it was explicitly
+    // managed before we took it (a read failure or a persistently-unmanaged
+    // iface must NOT trigger a spurious re-manage).
+    if (st.nmcli_present && st.ownership_read_ok && st.iface_was_managed) {
+        cmds.push_back("LC_ALL=C nmcli device set " + st.iface + " managed yes");
+        if (valid_uuid(st.active_uuid)) {
+            cmds.push_back("LC_ALL=C nmcli connection up uuid " + st.active_uuid + " ifname " +
+                           st.iface);
+        }
+    }
+    return cmds;
 }
 
 // ---------------------------------------------------------------------------
@@ -554,6 +669,21 @@ void on_signal(int) {
 // Run a fixed shell command (never user text; SSIDs go into config files only).
 void run(const std::string& cmd) { std::system(cmd.c_str()); }
 
+// Run a fixed command; capture its stdout and normalized exit status. This is
+// the real backend for PortalEnv::exec, so every lifecycle side effect and the
+// branch-on-success steps (DNAT install, nmcli reads/release) go through it.
+CmdResult exec_cmd(const std::string& cmd) {
+    CmdResult r;
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) return r; // status stays -1: could not even launch
+    char buf[512];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), p)) > 0) r.out.append(buf, n);
+    const int rc = pclose(p);
+    r.status = (rc != -1 && WIFEXITED(rc)) ? WEXITSTATUS(rc) : -1;
+    return r;
+}
+
 bool file_exists(const std::string& path) {
     struct stat st{};
     return ::stat(path.c_str(), &st) == 0;
@@ -658,60 +788,43 @@ void kill_pidfile(const char* name) {
     ::remove(pid_path.c_str());
 }
 
-void stop_ap_services() {
-    kill_pidfile("hostapd");
-    kill_pidfile("dnsmasq");
+// True if addr:port is free for BOTH udp and tcp - an EXCLUSIVE probe (no
+// SO_REUSEADDR), so an existing listener really does fail it. The gateway
+// address must already be on the interface. This is only a pre-filter; actual
+// dnsmasq startup (its pidfile) remains authoritative in PortalNet::start.
+bool dns_port_free(const std::string& addr, int port) {
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(static_cast<uint16_t>(port));
+    if (inet_pton(AF_INET, addr.c_str(), &sa.sin_addr) != 1) return false;
+    bool ok = true;
+    for (int type : {SOCK_DGRAM, SOCK_STREAM}) {
+        const int fd = ::socket(AF_INET, type, 0);
+        if (fd < 0) {
+            ok = false;
+            break;
+        }
+        if (::bind(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) != 0) ok = false;
+        ::close(fd);
+        if (!ok) break;
+    }
+    return ok;
 }
 
-void start_ap_services(const PortalOptions& opts, const std::string& iface) {
-    // A soft rfkill block (common after boot / when NetworkManager releases the
-    // radio) silently stops hostapd from ever opening the interface, which is
-    // the usual reason the AP "fails to start". Clear it before anything else.
-    run("rfkill unblock wifi 2>/dev/null");
-    run("rfkill unblock wlan 2>/dev/null");
-    const std::string wd = kWorkDir;
-    write_file(wd + "/hostapd.conf", hostapd_conf(iface, opts.ap_name, opts.channel));
-    write_file(wd + "/dnsmasq.conf", dnsmasq_conf(iface, opts.gateway));
-    // Start the AP first. Switching the NIC into AP mode (and hostapd's own
-    // interface up/down) flushes any IP, so the gateway address MUST be assigned
-    // AFTER hostapd - otherwise dnsmasq has no address to answer DHCP on and the
-    // client hangs at "obtaining IP address". hostapd's log is kept for
-    // diagnostics (no pidfile == failed, surfaced by serve_portal).
-    run("hostapd -B -P " + wd + "/hostapd.pid " + wd + "/hostapd.conf > " + wd +
-        "/hostapd.log 2>&1");
-    // (Re)assign the gateway IP now that the AP interface exists, then bring the
-    // DHCP/DNS server up bound to it. dnsmasq's log is kept the same way.
-    run("ip addr flush dev " + iface + " 2>/dev/null");
-    run("ip addr replace " + opts.gateway + "/24 dev " + iface + " 2>/dev/null");
-    run("ip link set " + iface + " up 2>/dev/null");
-    run("dnsmasq -C " + wd + "/dnsmasq.conf --pid-file=" + wd + "/dnsmasq.pid > " + wd +
-        "/dnsmasq.log 2>&1");
-}
-
-// Linux equivalent of Bruce's verifyCreds(): with one radio we must drop the
-// AP for the ~6s (12 x 500ms, Bruce verifyCreds:856-860) the connect attempt
-// takes, then bring the portal back up.
-bool verify_live(const PortalOptions& opts, const std::string& password, const std::string& iface) {
-    stop_ap_services();
-    write_file(std::string(kWorkDir) + "/wpa.conf", wpa_conf(opts.ap_name, password));
-    run("wpa_supplicant -B -i " + iface + " -c " + kWorkDir + "/wpa.conf -P " + kWorkDir +
-        "/wpa.pid 2>/dev/null");
-    bool connected = false;
-    for (int i = 0; i < 12 && !connected; ++i) { // Bruce: 12 x 500ms, 6s max (verifyCreds:856-860)
+// Verify-mode connect poll: bring up wpa_supplicant (already started) and wait
+// the Bruce 12 x 500ms (6s; verifyCreds:856-860) window for association.
+bool wait_wpa_connected(const std::string& iface) {
+    for (int i = 0; i < 12; ++i) {
         usleep(500000);
-        FILE* p = popen(("wpa_cli -i " + iface + " status 2>/dev/null").c_str(), "r");
-        if (p) {
+        if (FILE* p = popen(("wpa_cli -i " + iface + " status 2>/dev/null").c_str(), "r")) {
             char buf[2048];
             const size_t n = fread(buf, 1, sizeof(buf) - 1, p);
             buf[n] = '\0';
             pclose(p);
-            if (strstr(buf, "wpa_state=COMPLETED") != nullptr) connected = true;
+            if (strstr(buf, "wpa_state=COMPLETED") != nullptr) return true;
         }
     }
-    kill_pidfile("wpa");
-    run("ip addr flush dev " + iface + " 2>/dev/null"); // drop the STA lease
-    start_ap_services(opts, iface);
-    return connected;
+    return false;
 }
 
 int parse_int(const char* s, int fallback) {
@@ -733,28 +846,117 @@ void usage() {
 
 int serve_portal(PortalOptions opts, const std::string& iface) {
     PortalState state;
-    PortalHooks hooks;
-    hooks.on_ap_restart = [&opts, iface](const PortalOptions& o) {
-        stop_ap_services();
-        opts = o;
-        start_ap_services(opts, iface);
-        std::printf("[*] AP restarted as '%s'\n", opts.ap_name.c_str());
+
+    PortalNet net(default_portal_env());
+    net.set_interface(iface, opts.gateway);
+
+    // Read interface ownership BEFORE any mutation. A failed/garbled read is
+    // fatal: we must not take a NIC we cannot reliably hand back (SHOULD-FIX 2).
+    if (net.state().nmcli_present && !net.capture_ownership()) {
+        std::printf("error: could not read NetworkManager state for %s; refusing to take the "
+                    "interface (so it can be restored). Retry, or stop NetworkManager yourself.\n",
+                    iface.c_str());
+        return 1;
+    }
+
+    // Single idempotent teardown, established BEFORE the first network mutation
+    // so EVERY exit path (setup failure, bind failure, signal, normal stop) runs
+    // it. net.cleanup() drops our DNAT (checking the delete actually took),
+    // stops our daemons, flushes the interface and hands it back to
+    // NetworkManager; it retries on a later call if a previous attempt did not
+    // fully succeed.
+    //
+    // TODO(crash-recovery): an in-process handler cannot recover from SIGKILL /
+    // power loss. A future systemd unit supervising the portal with an
+    // idempotent ExecStopPost= helper should run this same teardown. Out of
+    // scope for this change.
+    // The single post-mutation teardown: close the listener, tear down with
+    // bounded retry, and surface any leftover. EVERY exit after the first
+    // mutation (setup-error branches, HTTP bind failure, normal shutdown) goes
+    // through this, so unresolved DNAT/NM resources are always retried and
+    // reported - never a lone best-effort cleanup.
+    auto teardown = [&]() -> bool {
+        if (g_listen_fd >= 0) {
+            ::close(g_listen_fd);
+            g_listen_fd = -1;
+        }
+        const bool clean = net.teardown(3);
+        if (!clean) {
+            std::printf("error: teardown incomplete - check `nft list table ip %s` / "
+                        "`iptables -t nat -S` and `nmcli device status` for leftovers.\n",
+                        dns_dnat_table());
+        }
+        return clean;
     };
-    hooks.verify_password = [&opts, iface](const PortalOptions& o, const std::string& password) {
+
+    // Install signal handlers now, before any mutation: a signal during setup
+    // flips g_stop, the accept loop is skipped, and we fall through to cleanup.
+    struct sigaction sa{};
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0; // no SA_RESTART: accept() must return EINTR
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGINT, &sa, nullptr);
+    std::signal(SIGPIPE, SIG_IGN);
+
+    bool run_failed = false; // a restart (verify / /postssid) failed -> stop + exit nonzero
+    auto fail_run = [&](const char* why) {
+        std::printf("[!] %s; stopping\n", why);
+        run_failed = true;
+        if (g_listen_fd >= 0) ::shutdown(g_listen_fd, SHUT_RDWR); // break accept()
+    };
+
+    PortalHooks hooks;
+    hooks.on_ap_restart = [&](const PortalOptions& o) {
+        // If the old redirect cannot be confirmed removed, do NOT start a new AP
+        // (a surviving rule for the old port would strand clients). Abort into
+        // cleanup, which keeps retrying the tracked rule.
+        if (!net.stop()) {
+            fail_run("could not remove the old DNS redirect before restart");
+            return;
+        }
+        opts = o;
+        const StartResult r = net.start(opts);
+        if (r.ok()) {
+            std::printf("[*] AP restarted as '%s'\n", opts.ap_name.c_str());
+        } else {
+            char msg[128];
+            std::snprintf(msg, sizeof(msg), "AP restart failed (hostapd=%d dnsmasq=%d dnat=%d)",
+                          r.hostapd, r.dnsmasq, r.dnat);
+            fail_run(msg);
+        }
+    };
+    hooks.verify_password = [&](const PortalOptions& o, const std::string& password) {
         std::printf("[*] verifying password against '%s' (AP pauses a few seconds)...\n",
                     o.ap_name.c_str());
-        const bool ok = verify_live(o, password, iface);
+        StartResult restart;
+        const bool ok = net.verify(o, password, restart);
         std::printf(ok ? "[+] password VALID for '%s'\n" : "[-] password invalid for '%s'\n",
                     o.ap_name.c_str());
+        if (!restart.ok()) {
+            char msg[128];
+            std::snprintf(msg, sizeof(msg),
+                          "AP did not come back up after verify (hostapd=%d dnsmasq=%d dnat=%d)",
+                          restart.hostapd, restart.dnsmasq, restart.dnat);
+            fail_run(msg);
+        }
         return ok;
     };
 
-    // NetworkManager would fight us for the interface (deauth/scan/re-associate).
-    run("systemctl stop NetworkManager 2>/dev/null");
-    run("killall wpa_supplicant 2>/dev/null");
-    start_ap_services(opts, iface);
+    // Release the interface from NetworkManager - scoped to THIS NIC, not a
+    // global `systemctl stop`. A no-op when it was never managed; a failed
+    // release is fatal (NM would keep fighting us for the radio). Our own
+    // verify-mode wpa_supplicant is tracked by pidfile; no `killall`.
+    if (!net.release_interface()) {
+        std::printf("error: could not release %s from NetworkManager (`nmcli device set %s "
+                    "managed no` failed).\n",
+                    iface.c_str(), iface.c_str());
+        teardown();
+        return 1;
+    }
 
-    if (!file_exists(std::string(kWorkDir) + "/hostapd.pid")) {
+    const StartResult start = net.start(opts);
+    if (!start.hostapd) {
         std::string hostapd_log;
         read_file(std::string(kWorkDir) + "/hostapd.log", hostapd_log);
         if (!hostapd_log.empty()) {
@@ -763,32 +965,47 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
         std::printf("error: hostapd failed to start (apt install hostapd; "
                     "disable Monitor mode / other APs on %s first)\n",
                     iface.c_str());
-        run("systemctl start NetworkManager 2>/dev/null");
+        teardown();
         return 1;
     }
-
-    // The AP is up but clients still need DHCP+DNS from dnsmasq; without it they
-    // associate and then hang at "obtaining IP address". Treat a missing dnsmasq
-    // pidfile as fatal and surface its log (usual causes: port 53 held by
-    // systemd-resolved, or dnsmasq not installed).
-    if (!file_exists(std::string(kWorkDir) + "/dnsmasq.pid")) {
+    // DNS now binds an alternate high port (not 53), so a system resolver on :53
+    // no longer collides; the usual causes left are dnsmasq not installed or
+    // DHCP port 67 held. start() tried every candidate port (actual startup is
+    // authoritative) before giving up.
+    if (!start.dnsmasq) {
         std::string dnsmasq_log;
         read_file(std::string(kWorkDir) + "/dnsmasq.log", dnsmasq_log);
         if (!dnsmasq_log.empty()) {
             std::printf("--- dnsmasq ---\n%s--- end dnsmasq ---\n", dnsmasq_log.c_str());
         }
-        std::printf("error: dnsmasq (DHCP/DNS) failed to start, so clients can't get an "
-                    "IP. Free port 53 (e.g. `systemctl stop systemd-resolved`) or install "
-                    "dnsmasq, then retry.\n");
-        stop_ap_services();
-        run("systemctl start NetworkManager 2>/dev/null");
+        std::printf("error: dnsmasq (DHCP/DNS) failed to start on every candidate port, so "
+                    "clients can't get an IP. Install dnsmasq or free DHCP port 67, then retry.\n");
+        teardown();
         return 1;
     }
+    // Without the DNS redirect, clients' lookups to the advertised gateway:53
+    // reach the system resolver instead of our wildcard, so captive detection
+    // never triggers. Treat a failed install as fatal.
+    if (!start.dnat) {
+        std::string nft_log;
+        read_file(std::string(kWorkDir) + "/nft.log", nft_log);
+        if (!nft_log.empty()) {
+            std::printf("--- nft ---\n%s--- end nft ---\n", nft_log.c_str());
+        }
+        std::printf("error: could not install the DNS redirect (nftables/iptables DNAT). "
+                    "Install nftables (or iptables), then retry.\n");
+        teardown();
+        return 1;
+    }
+    std::printf("[*] DNS on %s:%d; clients' :53 redirected via %s\n", opts.gateway.c_str(),
+                net.state().dns_port,
+                net.state().dnat == DnatBackend::Nft ? "nftables" : "iptables");
 
     // HTTP captive portal on :80, bound to the gateway address.
     const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         std::printf("error: socket: %s\n", std::strerror(errno));
+        teardown();
         return 1;
     }
     int one = 1;
@@ -809,18 +1026,14 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
                         "(/etc/sudoers.d/bruce-cardputerzero; see INSTALL.md 'A tool needs root').\n"
                         "Quick check on the device: `sudo -n true` must not ask for a password.\n");
         }
+        ::close(listen_fd);
+        teardown(); // HEAD leaked the interface here; now every failure restores it
         return 1;
     }
 
-    // SIGTERM breaks the accept() below (see on_signal).
+    // SIGTERM breaks the accept() below (see on_signal); publish the fd so the
+    // handler can unblock it. (Handlers were installed above, pre-mutation.)
     g_listen_fd = listen_fd;
-    struct sigaction sa{};
-    sa.sa_handler = on_signal;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0; // no SA_RESTART: accept() must return EINTR
-    sigaction(SIGTERM, &sa, nullptr);
-    sigaction(SIGINT, &sa, nullptr);
-    std::signal(SIGPIPE, SIG_IGN);
 
     const std::string creds_path =
         opts.creds_dir + "/BruceEvilCreds/" +
@@ -834,7 +1047,7 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
     std::printf("Back / Ctrl-C to stop.\n\n");
     std::fflush(stdout);
 
-    while (!g_stop) {
+    while (!g_stop && !run_failed) {
         sockaddr_in peer{};
         socklen_t peer_len = sizeof(peer);
         const int conn = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&peer), &peer_len);
@@ -888,10 +1101,11 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
         }
     }
 
-    ::close(listen_fd);
-    g_listen_fd = -1;
-    stop_ap_services();
-    run("systemctl start NetworkManager 2>/dev/null");
+    // Ordinary shutdown: the same bounded-retry teardown + diagnostic every
+    // other post-mutation exit uses. (This is normal-exit handling, distinct
+    // from the crash-recovery TODO above.)
+    const bool clean = teardown();
+
     // The on-log counter resets on /postssid (Bruce restartWiFi(reset=true));
     // the CSV keeps the full history, so summarize from the file.
     int captured = 0;
@@ -903,10 +1117,288 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
         }
     }
     std::printf("\nStopped. %d credential(s) in %s\n", captured, creds_path.c_str());
-    return 0;
+    if (!clean) return 1; // teardown() already surfaced what may remain
+    return run_failed ? 1 : 0; // a failed AP restart also exits nonzero
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// PortalNet: the AP + captive-DNS + firewall + NetworkManager lifecycle. All
+// side effects go through PortalEnv, so the self-check drives these paths with
+// a fake runner. Defined in the named namespace (header-declared); it reaches
+// the internal helpers above (kWorkDir, exec_cmd, dns_port_free, ...) by TU
+// visibility.
+// ---------------------------------------------------------------------------
+
+PortalEnv default_portal_env() {
+    PortalEnv env;
+    env.exec = [](const std::string& cmd) { return exec_cmd(cmd); };
+    env.have_cmd = [](const std::string& tool) { return have_cmd(tool); };
+    env.path_exists = [](const std::string& path) { return file_exists(path); };
+    env.port_free = [](const std::string& addr, int port) { return dns_port_free(addr, port); };
+    env.write_file = [](const std::string& path, const std::string& c) { write_file(path, c); };
+    env.wait_connected = [](const std::string& iface) { return wait_wpa_connected(iface); };
+    env.kill_pidfile = [](const std::string& name) { kill_pidfile(name.c_str()); };
+    return env;
+}
+
+void PortalNet::set_interface(const std::string& iface, const std::string& gateway) {
+    net_.iface = iface;
+    net_.gateway = gateway;
+    net_.nmcli_present = env_.have_cmd("nmcli");
+}
+
+bool PortalNet::capture_ownership() {
+    net_.ownership_read_ok = false;
+    net_.iface_was_managed = false;
+    net_.active_uuid.clear();
+    if (!net_.nmcli_present) return false;
+    // LC_ALL=C + --colors no: stable, machine-readable, locale-independent.
+    const CmdResult r = env_.exec("LC_ALL=C nmcli --colors no -t -f "
+                                  "GENERAL.NM-MANAGED,GENERAL.CON-UUID device show " +
+                                  net_.iface + " 2>/dev/null");
+    if (r.status != 0) return false; // the read failed - do NOT mutate the iface
+    bool managed_ok = false, uuid_ok = false;
+    std::istringstream in(r.out);
+    std::string line;
+    while (std::getline(in, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) {
+            line.pop_back();
+        }
+        const std::string mkey = "GENERAL.NM-MANAGED:";
+        const std::string ukey = "GENERAL.CON-UUID:";
+        if (line.rfind(mkey, 0) == 0) {
+            const std::string v = line.substr(mkey.size());
+            // Require EXACTLY yes/no; empty or garbled is an invalid read.
+            if (v == "yes" || v == "no") {
+                managed_ok = true;
+                net_.iface_was_managed = (v == "yes");
+            }
+        } else if (line.rfind(ukey, 0) == 0) {
+            const std::string v = line.substr(ukey.size());
+            // Accept ONLY a recognized no-connection ("--") or a valid UUID; a
+            // present-but-malformed value is a garbled snapshot, not "--".
+            if (v == "--") {
+                uuid_ok = true;
+            } else if (valid_uuid(v)) {
+                uuid_ok = true;
+                net_.active_uuid = v;
+            }
+        }
+    }
+    if (!managed_ok || !uuid_ok) return false; // missing/garbled field => invalid read
+    net_.ownership_read_ok = true;
+    return true;
+}
+
+bool PortalNet::release_interface() {
+    // Only release a NIC NM explicitly manages; otherwise nothing to release
+    // (and nothing to restore later). A successful ownership read is required.
+    if (!net_.nmcli_present || !net_.ownership_read_ok || !net_.iface_was_managed) return true;
+    return env_.run_ok("LC_ALL=C nmcli device set " + net_.iface + " managed no");
+}
+
+void PortalNet::track_rule(const DnatRule& r) {
+    for (const auto& e : net_.dnat_rules) {
+        if (e.backend == r.backend && e.gateway == r.gateway && e.port == r.port &&
+            e.proto == r.proto) {
+            return; // already tracked
+        }
+    }
+    net_.dnat_rules.push_back(r);
+}
+
+PortalNet::Presence PortalNet::nft_presence() {
+    // 2>&1 so the "No such file" marker (printed to stderr) is captured.
+    const CmdResult c = env_.exec("nft list table ip " + std::string(dns_dnat_table()) + " 2>&1");
+    if (c.status == 0) return Presence::Present;
+    if (c.out.find("No such file") != std::string::npos ||
+        c.out.find("does not exist") != std::string::npos) {
+        return Presence::Absent;
+    }
+    return Presence::Unknown; // exec/permission/backend error: do NOT assume gone
+}
+
+PortalNet::Presence PortalNet::ipt_presence(const DnatRule& r) {
+    const CmdResult c =
+        env_.exec(iptables_dnat_rule("-C", net_.iface, r.gateway, r.port, r.proto) + " 2>&1");
+    if (c.status == 0) return Presence::Present; // -C exits 0 when the rule exists
+    if (c.out.find("does a matching rule exist") != std::string::npos) return Presence::Absent;
+    return Presence::Unknown;
+}
+
+bool PortalNet::purge_dnat() {
+    // Delete each tracked rule, then CONFIRM it is gone. Keep (for a later
+    // retry) any rule still Present or whose state is Unknown - never conflate a
+    // failed inspection with "removed".
+    std::vector<DnatRule> remaining;
+    for (const auto& r : net_.dnat_rules) {
+        Presence after = Presence::Unknown;
+        if (r.backend == DnatBackend::Nft) {
+            env_.run("nft " + nft_dnat_delete() + " 2>/dev/null");
+            after = nft_presence();
+        } else if (r.backend == DnatBackend::Iptables) {
+            env_.run(iptables_dnat_rule("-D", net_.iface, r.gateway, r.port, r.proto) +
+                     " 2>/dev/null");
+            after = ipt_presence(r);
+        } else {
+            continue; // None: nothing to remove
+        }
+        if (after != Presence::Absent) remaining.push_back(r); // Present or Unknown -> keep
+    }
+    net_.dnat_rules = std::move(remaining);
+    if (net_.dnat_rules.empty()) net_.dnat = DnatBackend::None;
+    return net_.dnat_rules.empty();
+}
+
+bool PortalNet::install_dnat() {
+    const std::string wd = kWorkDir;
+    if (env_.have_cmd("nft")) {
+        env_.run("nft " + nft_dnat_delete() + " 2>/dev/null"); // reconcile a prior-run table
+        env_.write_file(wd + "/dnat.nft", nft_dnat_script(net_.iface, net_.gateway, net_.dns_port));
+        // Record ownership BEFORE the load: a partial/failed load is still ours.
+        track_rule({DnatBackend::Nft, net_.gateway, net_.dns_port, ""});
+        if (env_.run_ok("nft -f " + wd + "/dnat.nft 2>" + wd + "/nft.log")) {
+            net_.dnat = DnatBackend::Nft;
+            return true;
+        }
+        purge_dnat(); // checked rollback; keeps the entry if not confirmed gone
+        // Only fall back to iptables once the failed nft table is CONFIRMED gone
+        // (purge dropped it). If its state is unresolved we must NOT stack
+        // iptables rules on top of unknown nft state - abort, retaining ownership.
+        for (const auto& r : net_.dnat_rules) {
+            if (r.backend == DnatBackend::Nft) return false;
+        }
+        // nft confirmed absent -> continue to the iptables backend below.
+    }
+    if (env_.have_cmd("iptables")) {
+        // Record ownership for BOTH protos before adding, so a surviving rule is
+        // never untracked even if its own rollback delete later fails.
+        env_.run(iptables_dnat_rule("-D", net_.iface, net_.gateway, net_.dns_port, "udp") +
+                 " 2>/dev/null"); // reconcile a prior-run rule
+        env_.run(iptables_dnat_rule("-D", net_.iface, net_.gateway, net_.dns_port, "tcp") +
+                 " 2>/dev/null");
+        track_rule({DnatBackend::Iptables, net_.gateway, net_.dns_port, "udp"});
+        track_rule({DnatBackend::Iptables, net_.gateway, net_.dns_port, "tcp"});
+        bool all_ok = true;
+        for (const char* proto : {"udp", "tcp"}) {
+            if (!env_.run_ok(iptables_dnat_rule("-A", net_.iface, net_.gateway, net_.dns_port,
+                                                proto) +
+                             " 2>>" + wd + "/nft.log")) {
+                all_ok = false;
+            }
+        }
+        if (all_ok) {
+            net_.dnat = DnatBackend::Iptables;
+            return true;
+        }
+        purge_dnat(); // checked rollback: deletes what it can, KEEPS unconfirmed survivors
+        return false;
+    }
+    net_.dnat = DnatBackend::None;
+    return false;
+}
+
+StartResult PortalNet::start(const PortalOptions& opts) {
+    StartResult res;
+    const std::string wd = kWorkDir;
+    // A soft rfkill block (common after boot / when NM releases the radio)
+    // silently stops hostapd opening the interface. Clear it first.
+    env_.run("rfkill unblock wifi 2>/dev/null");
+    env_.run("rfkill unblock wlan 2>/dev/null");
+    env_.write_file(wd + "/hostapd.conf", hostapd_conf(net_.iface, opts.ap_name, opts.channel));
+    // Start the AP first: switching the NIC to AP mode flushes any IP, so the
+    // gateway address must be assigned AFTER hostapd. Readiness == pidfile.
+    env_.run("hostapd -B -P " + wd + "/hostapd.pid " + wd + "/hostapd.conf > " + wd +
+             "/hostapd.log 2>&1");
+    res.hostapd = env_.path_exists(wd + "/hostapd.pid");
+    if (!res.hostapd) return res;
+
+    env_.run("ip addr flush dev " + net_.iface + " 2>/dev/null");
+    env_.run("ip addr replace " + net_.gateway + "/24 dev " + net_.iface + " 2>/dev/null");
+    env_.run("ip link set " + net_.iface + " up 2>/dev/null");
+
+    // Try each candidate DNS port; the exclusive probe skips an obviously-busy
+    // one, but ACTUAL dnsmasq startup (its pidfile) is authoritative - on a
+    // start failure we clear the half-start and fall through to the next.
+    env_.run("rm -f " + wd + "/dnsmasq.pid 2>/dev/null");
+    for (int port : dns_port_candidates()) {
+        if (!env_.port_free(net_.gateway, port)) continue;
+        net_.dns_port = port;
+        env_.write_file(wd + "/dnsmasq.conf", dnsmasq_conf(net_.iface, net_.gateway, port));
+        env_.run("dnsmasq -C " + wd + "/dnsmasq.conf --pid-file=" + wd + "/dnsmasq.pid > " + wd +
+                 "/dnsmasq.log 2>&1");
+        if (env_.path_exists(wd + "/dnsmasq.pid")) {
+            res.dnsmasq = true;
+            break;
+        }
+        env_.kill_pidfile("dnsmasq"); // clear a half-start before the next candidate
+    }
+    if (!res.dnsmasq) return res; // install the DNAT ONLY after the resolver is up
+
+    // conntrack reverses the DNAT so replies come from :53; local delivery, so
+    // we deliberately never enable ip_forward or masquerade.
+    res.dnat = install_dnat();
+    return res;
+}
+
+bool PortalNet::stop() {
+    // Down for a restart: drop the DNAT (so it never points at a dead resolver),
+    // then stop our daemons. Returns false if a tracked rule is NOT confirmed
+    // gone - the caller must then abort the restart (bringing a new AP up on a
+    // possibly-different port while the old rule survives would strand clients
+    // on the dead port). A surviving rule stays tracked for cleanup to retry.
+    const bool dnat_clear = purge_dnat();
+    env_.kill_pidfile("hostapd");
+    env_.kill_pidfile("dnsmasq");
+    return dnat_clear;
+}
+
+bool PortalNet::verify(const PortalOptions& opts, const std::string& password,
+                       StartResult& restart) {
+    const std::string wd = kWorkDir;
+    const bool torn = stop(); // frees the radio AND removes the old redirect
+    env_.write_file(wd + "/wpa.conf", wpa_conf(opts.ap_name, password));
+    env_.run("wpa_supplicant -B -i " + net_.iface + " -c " + wd + "/wpa.conf -P " + wd +
+             "/wpa.pid 2>/dev/null");
+    const bool connected = env_.wait_connected(net_.iface);
+    env_.kill_pidfile("wpa");
+    env_.run("ip addr flush dev " + net_.iface + " 2>/dev/null"); // drop the STA lease
+    // Only bring the AP back if the old redirect was actually removed; otherwise
+    // leave restart unsuccessful so the caller stops and cleanup retries.
+    restart = torn ? start(opts) : StartResult{};
+    return connected;
+}
+
+bool PortalNet::cleanup() {
+    if (cleaned_) return true; // a prior cleanup already fully succeeded
+    bool ok = true;
+    if (!purge_dnat()) ok = false; // keeps unconfirmed survivors so a retry re-tries
+    env_.kill_pidfile("hostapd");
+    env_.kill_pidfile("dnsmasq");
+    env_.kill_pidfile("wpa");
+    // NB: this flushes ALL addresses on the iface, not only the gateway we
+    // added. Exact restoration of a pre-existing unmanaged iface's addressing
+    // is a known limitation; for a managed iface NM re-applies its own below.
+    // Its status still counts toward "fully clean" so we don't over-claim.
+    if (!env_.run_ok("ip addr flush dev " + net_.iface + " 2>/dev/null")) ok = false;
+    for (const auto& c : nm_restore_commands(net_)) {
+        if (!env_.run_ok(c)) ok = false;
+    }
+    if (ok) cleaned_ = true; // only stop retrying once teardown fully succeeded
+    return ok;
+}
+
+bool PortalNet::teardown(int attempts) {
+    // Bounded retry around cleanup() for a recoverable failure (a transient
+    // xtables lock, say). cleanup() is idempotent on success, so once a pass
+    // reports clean the rest return immediately. Shared by every post-mutation
+    // exit path in serve_portal.
+    bool clean = false;
+    for (int i = 0; i < attempts && !clean; ++i) clean = cleanup();
+    return clean;
+}
 
 int evil_portal_main(int argc, char** argv) {
     if (argc < 1 || !argv[0] || !argv[0][0]) {
