@@ -972,16 +972,84 @@ int main() {
         assert(!slurp(home + "/BruceEvilCreds/default_creds.csv").empty());
     }
 
-    // Unknown paths: captive fallback. No args -> portal; args -> capture
-    // (portals POST to arbitrary paths; Bruce's onNotFound does the same).
+    // OS captive-portal probes (Bruce setupRoutes/onNotFound): redirect (or
+    // 200+meta for Apple) so the sign-in UI opens; none of them capture.
     {
-        assert(portal_handle_request(parse_http_request("GET /generate_204 HTTP/1.1\r\n\r\n"), opts,
-                                     state, hooks)
-                   .body == default_portal_html());
+        state.victims = 0;
+        const std::string root = "http://" + opts.gateway + "/";
+
+        // Each exact probe path -> 302 to the portal root.
+        for (const char* p : {"/generate_204", "/gen_204", "/library/test/success.html",
+                              "/ncsi.txt", "/connecttest.txt", "/redirect", "/success.txt",
+                              "/canonical.html", "/fwlink", "/detectportal.firefox.com/success.txt",
+                              "/client.msftconnecttest.com/redirect"}) {
+            const HttpResponse r = portal_handle_request(
+                parse_http_request(std::string("GET ") + p + " HTTP/1.1\r\n\r\n"), opts, state, hooks);
+            assert(r.status == 302 && r.location == root);
+        }
+
+        // Apple's probe -> 200 with a meta-refresh (not a 302).
+        {
+            const HttpResponse r = portal_handle_request(
+                parse_http_request("GET /hotspot-detect.html HTTP/1.1\r\n\r\n"), opts, state, hooks);
+            assert(r.status == 200);
+            assert(r.body.find("http-equiv=\"refresh\"") != std::string::npos);
+            assert(r.body.find("url=http://" + opts.gateway) != std::string::npos);
+        }
+
+        // onNotFound substring match (e.g. a connecttest variant) -> 302.
+        assert(portal_handle_request(
+                   parse_http_request("GET /foo/connecttest/bar HTTP/1.1\r\n\r\n"), opts, state, hooks)
+                   .status == 302);
+
+        // Host header: a probe host steered here by DNS -> 302 onto the portal
+        // origin; a request already on the gateway is served (no redirect loop).
+        assert(portal_handle_request(
+                   parse_http_request("GET / HTTP/1.1\r\nHost: connectivitycheck.gstatic.com\r\n\r\n"),
+                   opts, state, hooks)
+                   .status == 302);
+        {
+            const HttpResponse r = portal_handle_request(
+                parse_http_request("GET / HTTP/1.1\r\nHost: 192.168.4.1\r\n\r\n"), opts, state, hooks);
+            assert(r.status == 200 && r.body == default_portal_html());
+        }
+
+        // "/" always serves the portal, even with query args (Bruce
+        // portalController): it must NOT be treated as a capture.
+        {
+            const HttpResponse r = portal_handle_request(
+                parse_http_request("GET /?utm_source=test HTTP/1.1\r\nHost: 192.168.4.1\r\n\r\n"),
+                opts, state, hooks);
+            assert(r.status == 200 && r.body == default_portal_html());
+        }
+
+        // A Host carrying ":80" still matches the bare gateway IP (served, not
+        // redirected).
+        {
+            const HttpResponse r = portal_handle_request(
+                parse_http_request("GET / HTTP/1.1\r\nHost: 192.168.4.1:80\r\n\r\n"), opts, state,
+                hooks);
+            assert(r.status == 200 && r.body == default_portal_html());
+        }
+
+        assert(state.victims == 0); // none of the above captured
+
+        // A non-GET to an exact probe path is NOT a GET-only probe redirect: it
+        // falls through and captures (Bruce onNotFound), so POST data is kept.
         portal_handle_request(
-            parse_http_request("GET /hotspot-detect.html?email=a@b.c HTTP/1.1\r\n\r\n"), opts,
-            state, hooks);
+            parse_http_request("POST /redirect HTTP/1.1\r\nContent-Length: 12\r\n\r\nemail=p@o.st"),
+            opts, state, hooks);
         assert(state.victims == 1);
+        assert(slurp(home + "/BruceEvilCreds/default_creds.csv").find("email: p@o.st\n") !=
+               std::string::npos);
+
+        // A genuine unknown path WITH args still captures (Bruce onNotFound
+        // args), even with a foreign Host.
+        portal_handle_request(
+            parse_http_request("POST /login HTTP/1.1\r\nHost: foo.example\r\n"
+                               "Content-Length: 11\r\n\r\nemail=a@b.c"),
+            opts, state, hooks);
+        assert(state.victims == 2);
         const std::string csv = slurp(home + "/BruceEvilCreds/default_creds.csv");
         assert(csv.find("email: a@b.c\n") != std::string::npos);
     }

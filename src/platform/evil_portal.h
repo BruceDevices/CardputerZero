@@ -32,6 +32,7 @@ namespace platform {
 struct HttpRequest {
     std::string method; // "GET" / "POST"
     std::string path;   // "/post", "/creds", ... (no query string)
+    std::string host;   // Host: header, port stripped ("" if absent)
     // Form arguments, query string first then urlencoded POST body, in order.
     std::vector<std::pair<std::string, std::string>> args;
 };
@@ -39,6 +40,7 @@ struct HttpRequest {
 struct HttpResponse {
     int status = 200;
     std::string body;
+    std::string location; // Location target when status is a redirect (302)
 };
 
 // Everything the portal needs to run. `html_page` is what "/"/unknown paths
