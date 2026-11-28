@@ -415,6 +415,7 @@ std::string hostapd_conf(const std::string& iface, const std::string& ssid, int 
     std::string conf;
     conf += "driver=nl80211\n";
     conf += "interface=" + iface + "\n";
+    conf += "ctrl_interface=/run/hostapd\n"; // control socket for a clean state read
     conf += "ssid=" + conf_quote(ssid) + "\n";
     if (channel > 0) conf += "channel=" + std::to_string(channel) + "\n";
     conf += "hw_mode=g\n";
@@ -440,25 +441,67 @@ bool valid_country(const std::string& cc) {
 }
 
 std::string parse_reg_country(const std::string& iw_reg_get_output) {
-    // Lines look like "country JP: DFS-JP" (or "global\ncountry 00: DFS-UNSET").
+    // The FIRST line beginning with "country XX:" ("global\ncountry JP: DFS-JP",
+    // or "...country 00: DFS-UNSET"). Line-anchored so "country" elsewhere in a
+    // line never matches.
     const std::string key = "country ";
-    size_t p = iw_reg_get_output.find(key);
-    while (p != std::string::npos) {
-        const size_t s = p + key.size();
-        if (s + 2 <= iw_reg_get_output.size() && iw_reg_get_output[s + 2] == ':') {
-            const std::string cc = iw_reg_get_output.substr(s, 2);
-            if (cc == "00") return "";          // world / regulatory domain unset
-            if (valid_country(cc)) {            // accept a real 2-letter code
-                std::string up = cc;
-                for (char& c : up) {
-                    if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
-                }
-                return up;
+    std::istringstream in(iw_reg_get_output);
+    std::string line;
+    while (std::getline(in, line)) {
+        while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) line.erase(0, 1);
+        if (line.rfind(key, 0) != 0) continue;
+        const size_t s = key.size();
+        if (s + 2 > line.size() || line[s + 2] != ':') continue;
+        const std::string cc = line.substr(s, 2);
+        if (cc == "00") return ""; // world / regulatory domain unset
+        if (valid_country(cc)) {
+            std::string up = cc;
+            for (char& c : up) {
+                if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
             }
+            return up;
         }
-        p = iw_reg_get_output.find(key, p + 1);
     }
     return "";
+}
+
+bool reg_is_self_managed(const std::string& iw_reg_get_output) {
+    return iw_reg_get_output.find("(self-managed)") != std::string::npos;
+}
+
+std::vector<std::string> iface_release_commands(const std::string& iface) {
+    // Order matters: break the association first, then unmanage, then down.
+    return {"nmcli --wait 15 device disconnect " + iface,
+            "nmcli device set " + iface + " managed no",
+            "ip link set dev " + iface + " down"};
+}
+
+std::vector<std::string> iface_restore_commands(const NetState& st) {
+    std::vector<std::string> cmds;
+    // Return the radio to a sane managed, up state regardless of prior ownership.
+    cmds.push_back("ip addr del " + st.gateway + "/24 dev " + st.iface); // benign if absent
+    cmds.push_back("ip link set dev " + st.iface + " down");
+    cmds.push_back("iw dev " + st.iface + " set type managed");
+    cmds.push_back("ip link set dev " + st.iface + " up");
+    // Restore the ORIGINAL global regdom if we changed it and know what it was.
+    if (st.regdom_changed && !st.orig_country.empty()) {
+        cmds.push_back("iw reg set " + st.orig_country);
+    }
+    // Hand back to NetworkManager ONLY if it explicitly managed the iface.
+    if (st.nmcli_present && st.ownership_read_ok && st.iface_was_managed) {
+        cmds.push_back("nmcli device set " + st.iface + " managed yes");
+        if (valid_uuid(st.active_uuid)) {
+            // `nmcli device disconnect` blocks the connection's autoconnect;
+            // restore its saved value, then bring it back up explicitly.
+            if (st.autoconnect == "yes" || st.autoconnect == "no") {
+                cmds.push_back("nmcli connection modify uuid " + st.active_uuid +
+                               " connection.autoconnect " + st.autoconnect);
+            }
+            cmds.push_back("nmcli --wait 30 connection up uuid " + st.active_uuid + " ifname " +
+                           st.iface);
+        }
+    }
+    return cmds;
 }
 
 bool ap_event_enabled(const std::string& iface, const std::string& hostapd_log) {
@@ -612,21 +655,6 @@ bool valid_uuid(const std::string& s) {
         }
     }
     return i == s.size();
-}
-
-std::vector<std::string> nm_restore_commands(const NetState& st) {
-    std::vector<std::string> cmds;
-    // Hand the interface back to NetworkManager - ONLY if it was explicitly
-    // managed before we took it (a read failure or a persistently-unmanaged
-    // iface must NOT trigger a spurious re-manage).
-    if (st.nmcli_present && st.ownership_read_ok && st.iface_was_managed) {
-        cmds.push_back("LC_ALL=C nmcli device set " + st.iface + " managed yes");
-        if (valid_uuid(st.active_uuid)) {
-            cmds.push_back("LC_ALL=C nmcli connection up uuid " + st.active_uuid + " ifname " +
-                           st.iface);
-        }
-    }
-    return cmds;
 }
 
 // ---------------------------------------------------------------------------
@@ -844,9 +872,19 @@ void kill_pidfile(const char* name) {
     std::ifstream in(pid_path);
     long pid = 0;
     if (in >> pid && pid > 1) {
-        char cmd[64];
-        std::snprintf(cmd, sizeof(cmd), "kill -9 %ld 2>/dev/null", pid);
-        run(cmd);
+        // Prefer a clean shutdown: SIGTERM, wait up to ~2s, then SIGKILL. This
+        // lets hostapd deauth stations / tear the AP down in order rather than
+        // being hard-killed.
+        ::kill(static_cast<pid_t>(pid), SIGTERM);
+        bool gone = false;
+        for (int i = 0; i < 20; ++i) {
+            if (::kill(static_cast<pid_t>(pid), 0) != 0) {
+                gone = true;
+                break;
+            }
+            usleep(100000); // 100ms
+        }
+        if (!gone) ::kill(static_cast<pid_t>(pid), SIGKILL);
     }
     ::remove(pid_path.c_str());
 }
@@ -895,7 +933,18 @@ bool pid_alive(const std::string& pid_path) {
     std::ifstream in(pid_path);
     long pid = 0;
     if (!(in >> pid) || pid <= 1) return false;
-    return ::kill(static_cast<pid_t>(pid), 0) == 0; // signal 0: existence/permission check
+    if (::kill(static_cast<pid_t>(pid), 0) != 0) return false; // signal 0: existence check
+    // kill(pid,0) also succeeds for a ZOMBIE (exited, not yet reaped); such a
+    // hostapd is not serving. Reject it via /proc/<pid>/stat's state field.
+    std::ifstream st("/proc/" + std::to_string(pid) + "/stat");
+    std::string statline;
+    std::getline(st, statline);
+    const size_t rp = statline.rfind(')'); // comm is in parens and may contain spaces
+    if (rp != std::string::npos && rp + 2 < statline.size()) {
+        const char state = statline[rp + 2]; // "...) <state> ..."
+        if (state == 'Z') return false;
+    }
+    return true;
 }
 
 std::string read_file_str(const std::string& path) {
@@ -946,7 +995,11 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
             std::printf("error: %s\n", err.c_str());
             return 1;
         }
-        std::printf("[*] wifi country %s (regdom)\n", net.state().country.c_str());
+        if (net.state().reg_self_managed) {
+            std::printf("[*] wifi regdom: self-managed radio (no country_code needed)\n");
+        } else {
+            std::printf("[*] wifi country %s (regdom)\n", net.state().country.c_str());
+        }
     }
 
     // Single idempotent teardown, established BEFORE the first network mutation
@@ -1033,13 +1086,14 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
         return ok;
     };
 
-    // Release the interface from NetworkManager - scoped to THIS NIC, not a
-    // global `systemctl stop`. A no-op when it was never managed; a failed
-    // release is fatal (NM would keep fighting us for the radio). Our own
-    // verify-mode wpa_supplicant is tracked by pidfile; no `killall`.
+    // FULLY release the interface (disconnect + unmanage + link down) so hostapd
+    // owns the radio - scoped to THIS NIC, not a global `systemctl stop`. A
+    // failed release is fatal: if wlan0 stays associated to another AP, hostapd
+    // can't set the AP channel. Our verify-mode wpa_supplicant is pidfile-tracked.
     if (!net.release_interface()) {
-        std::printf("error: could not release %s from NetworkManager (`nmcli device set %s "
-                    "managed no` failed).\n",
+        std::printf("error: could not fully release %s for the AP (disconnect / `managed no` / "
+                    "link down failed, or it stayed associated). Check `nmcli device status` and "
+                    "`iw dev %s link`.\n",
                     iface.c_str(), iface.c_str());
         teardown();
         return 1;
@@ -1254,6 +1308,7 @@ bool PortalNet::capture_ownership() {
     net_.ownership_read_ok = false;
     net_.iface_was_managed = false;
     net_.active_uuid.clear();
+    net_.autoconnect.clear();
     if (!net_.nmcli_present) return false;
     // LC_ALL=C + --colors no: stable, machine-readable, locale-independent.
     const CmdResult r = env_.exec("LC_ALL=C nmcli --colors no -t -f "
@@ -1289,22 +1344,49 @@ bool PortalNet::capture_ownership() {
         }
     }
     if (!managed_ok || !uuid_ok) return false; // missing/garbled field => invalid read
+    // Record the connection's autoconnect so we can restore it on teardown
+    // (`nmcli device disconnect` blocks autoconnect until reactivated).
+    if (valid_uuid(net_.active_uuid)) {
+        const CmdResult ac = env_.exec("LC_ALL=C nmcli -g connection.autoconnect connection show "
+                                       "uuid " +
+                                       net_.active_uuid + " 2>/dev/null");
+        if (ac.status == 0) {
+            std::string v = ac.out;
+            while (!v.empty() && (v.back() == '\r' || v.back() == '\n' || v.back() == ' ')) {
+                v.pop_back();
+            }
+            if (v == "yes" || v == "no") net_.autoconnect = v;
+        }
+    }
     net_.ownership_read_ok = true;
     return true;
 }
 
 bool PortalNet::resolve_country(const std::string& cli_country, std::string& err) {
-    // We need `iw` both to read the current regdom and to set it before hostapd.
+    // We need `iw` both to read the current regdom and (for a non-self-managed
+    // radio) to set it before hostapd.
     if (!env_.have_cmd("iw")) {
-        err = "evil portal needs 'iw' to set the wifi regulatory domain (apt install iw)";
+        err = "evil portal needs 'iw' to read/set the wifi regulatory domain (apt install iw)";
         return false;
     }
     // Read the current regdom BEFORE we release/reconfigure the NIC (the
     // connected AP's country IE is what set it; it's gone once we take the
-    // interface). Record it as the value to restore on teardown. A failed read
-    // yields "" (unknown) - we do NOT parse output from a failed invocation.
+    // interface). A failed read yields "" (unknown) - we do NOT parse output
+    // from a failed invocation.
     const CmdResult reg = env_.exec("iw reg get 2>/dev/null");
-    const std::string device_cc = (reg.status == 0) ? parse_reg_country(reg.out) : "";
+    const bool read_ok = (reg.status == 0);
+    net_.reg_self_managed = read_ok && reg_is_self_managed(reg.out);
+
+    // A self-managed wiphy sets its own regdom: no country_code / `iw reg set`
+    // needed (and we must not try). Everything else must have a country or it
+    // won't beacon.
+    if (net_.reg_self_managed) {
+        net_.country.clear();
+        net_.orig_country.clear();
+        return true;
+    }
+
+    const std::string device_cc = read_ok ? parse_reg_country(reg.out) : "";
     net_.orig_country = device_cc; // "" => unknown/world: teardown can't restore it
 
     std::string cc;
@@ -1329,10 +1411,27 @@ bool PortalNet::resolve_country(const std::string& cli_country, std::string& err
 }
 
 bool PortalNet::release_interface() {
-    // Only release a NIC NM explicitly manages; otherwise nothing to release
-    // (and nothing to restore later). A successful ownership read is required.
-    if (!net_.nmcli_present || !net_.ownership_read_ok || !net_.iface_was_managed) return true;
-    return env_.run_ok("LC_ALL=C nmcli device set " + net_.iface + " managed no");
+    // FULL release so hostapd owns the radio. `managed no` alone left wlan0
+    // ASSOCIATED to the home AP on its channel, so hostapd could not set the AP
+    // channel ("Could not set channel for kernel driver"). So: break the
+    // association, unmanage, bring the link down - then CONFIRM it is no longer
+    // connected before proceeding.
+    const std::vector<std::string> seq = iface_release_commands(net_.iface);
+    // seq[0] disconnect, seq[1] managed no, seq[2] link down.
+    if (net_.nmcli_present) {
+        // disconnect is best-effort (an already-disconnected NIC returns
+        // nonzero); the post-condition link check below is the real gate.
+        env_.run(seq[0] + " 2>/dev/null");
+        if (!env_.run_ok(seq[1] + " 2>/dev/null")) return false; // managed no must take
+    }
+    if (!env_.run_ok(seq[2] + " 2>/dev/null")) return false; // link down must take
+    // Confirm the interface is no longer associated. `iw dev <iface> link`
+    // prints "Connected to <bssid>" when still associated, "Not connected."
+    // otherwise. A failed/absent iw read is treated as not-connected (we already
+    // unmanaged + downed it); a clear "Connected to" is fatal.
+    const CmdResult link = env_.exec("iw dev " + net_.iface + " link 2>/dev/null");
+    if (link.status == 0 && link.out.find("Connected to") != std::string::npos) return false;
+    return true;
 }
 
 void PortalNet::track_rule(const DnatRule& r) {
@@ -1437,51 +1536,69 @@ bool PortalNet::install_dnat() {
 }
 
 bool PortalNet::await_ap_enabled() {
-    // Poll a bounded window (~3s): the tracked hostapd PID must be ALIVE and the
-    // log's last AP event must be AP-ENABLED. Rereading each poll lets a split
-    // write complete; honouring the last event rejects enabled-then-disabled.
     const std::string wd = kWorkDir;
-    for (int i = 0; i < 7; ++i) {
-        if (env_.pid_alive(wd + "/hostapd.pid") &&
-            ap_event_enabled(net_.iface, env_.read_file(wd + "/hostapd.log"))) {
-            return true;
-        }
-        if (i < 6) env_.sleep_ms(500);
+    const std::string pid = wd + "/hostapd.pid";
+    const std::string log = wd + "/hostapd.log";
+    auto up_now = [&]() {
+        // ALIVE (and non-zombie, via pid_alive) AND the log's LAST AP event is
+        // AP-ENABLED. Rereading each poll lets a split write complete.
+        return env_.pid_alive(pid) && ap_event_enabled(net_.iface, env_.read_file(log));
+    };
+    // Phase 1: wait up to ~3s for the AP to come up.
+    bool up = false;
+    for (int i = 0; i < 7 && !up; ++i) {
+        up = up_now();
+        if (!up && i < 6) env_.sleep_ms(500);
     }
-    return false;
+    if (!up) return false;
+    // Phase 2: ~2s stability - it must STAY up (brcmfmac can enable then drop,
+    // or hostapd can go zombie). Any lost liveness / later AP-DISABLED fails it.
+    for (int i = 0; i < 4; ++i) {
+        env_.sleep_ms(500);
+        if (!up_now()) return false;
+    }
+    return true;
 }
 
 StartResult PortalNet::start(const PortalOptions& opts) {
     StartResult res;
     const std::string wd = kWorkDir;
-    // The regulatory domain must be resolved first (serve_portal calls
-    // resolve_country before any mutation, storing a validated code on net_).
-    // Validate/canonicalize here too so a direct caller cannot bypass it (and
-    // never interpolate an unvalidated country into a shell command); without a
-    // valid country refuse to issue a single command rather than start a
-    // (likely non-beaconing) AP.
-    std::string cc = net_.country;
-    for (char& c : cc) {
-        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    // A self-managed wiphy sets its own regdom (resolve_country left country
+    // empty); a non-self-managed one needs a validated country or it won't
+    // beacon. Validate/canonicalize here too so a direct caller cannot bypass it
+    // (and never interpolate an unvalidated country into a shell command).
+    std::string cc;
+    if (!net_.reg_self_managed) {
+        cc = net_.country;
+        for (char& c : cc) {
+            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        }
+        if (!valid_country(cc) || cc == "00") return res; // need a country; issue nothing
+        net_.country = cc;
     }
-    if (!valid_country(cc) || cc == "00") return res;
-    net_.country = cc;
     // A soft rfkill block (common after boot / when NM releases the radio)
     // silently stops hostapd opening the interface. Clear it first.
     env_.run("rfkill unblock wifi 2>/dev/null");
     env_.run("rfkill unblock wlan 2>/dev/null");
-    // Set the regdom before hostapd (brcmfmac needs it to beacon). This is a
-    // GLOBAL change; check it took, and fail BEFORE touching the AP/addressing/
-    // DNS/DNAT if it did not (AP-ENABLED is not evidence the regdom applied).
-    if (!env_.run_ok("iw reg set " + cc + " 2>/dev/null")) return res; // res.regdom stays false
-    res.regdom = true;
-    net_.regdom_changed = true; // owe a restore on teardown (see cleanup())
+    // Set the regdom before hostapd (a non-self-managed brcmfmac needs it to
+    // beacon). GLOBAL change; check it took, and fail BEFORE touching the
+    // AP/addressing/DNS/DNAT if it did not. Self-managed: nothing to set.
+    if (net_.reg_self_managed) {
+        res.regdom = true; // device manages its own regdom
+    } else {
+        if (!env_.run_ok("iw reg set " + cc + " 2>/dev/null")) return res; // res.regdom false
+        res.regdom = true;
+        net_.regdom_changed = true; // owe a restore on teardown (see cleanup())
+    }
+    // hostapd's control socket (used for a clean state read); mkdir so it works.
+    env_.run("mkdir -p /run/hostapd 2>/dev/null");
     env_.write_file(wd + "/hostapd.conf",
                     hostapd_conf(net_.iface, opts.ap_name, opts.channel, cc));
     // Start the AP first: switching the NIC to AP mode flushes any IP, so the
     // gateway address must be assigned AFTER hostapd. Readiness is the tracked
-    // hostapd PID being ALIVE and its log's LAST AP event being AP-ENABLED - a
-    // pidfile alone would call a dead/never-beaconing AP "up".
+    // hostapd PID being ALIVE (non-zombie) and its log's LAST AP event being
+    // AP-ENABLED, held stable for a short window - a pidfile alone would call a
+    // dead/never-beaconing AP "up".
     env_.run("hostapd -B -P " + wd + "/hostapd.pid " + wd + "/hostapd.conf > " + wd +
              "/hostapd.log 2>&1");
     res.hostapd = await_ap_enabled();
@@ -1547,28 +1664,26 @@ bool PortalNet::cleanup() {
     if (cleaned_) return true; // a prior cleanup already fully succeeded
     bool ok = true;
     if (!purge_dnat()) ok = false; // keeps unconfirmed survivors so a retry re-tries
+    // Prefer a clean stop (kill_pidfile now SIGTERMs, waits, then SIGKILLs).
     env_.kill_pidfile("hostapd");
     env_.kill_pidfile("dnsmasq");
     env_.kill_pidfile("wpa");
-    // NB: this flushes ALL addresses on the iface, not only the gateway we
-    // added. Exact restoration of a pre-existing unmanaged iface's addressing
-    // is a known limitation; for a managed iface NM re-applies its own below.
-    // Its status still counts toward "fully clean" so we don't over-claim.
-    if (!env_.run_ok("ip addr flush dev " + net_.iface + " 2>/dev/null")) ok = false;
-    for (const auto& c : nm_restore_commands(net_)) {
-        if (!env_.run_ok(c)) ok = false;
+    // Reverse the release: drop the gateway addr, cycle the link back to a
+    // managed, up state, restore the original regdom (iw_restore below is part
+    // of the sequence), hand the iface back to NetworkManager and re-up its
+    // connection - but only the parts that apply (see iface_restore_commands).
+    // An absent-address `ip addr del` is benign (addr may already be gone); every
+    // other command's result counts toward "fully clean" so we don't over-claim.
+    for (const auto& c : iface_restore_commands(net_)) {
+        const bool benign = c.rfind("ip addr del", 0) == 0;
+        if (!env_.run_ok(c + " 2>/dev/null") && !benign) ok = false;
     }
-    // `iw reg set` is a GLOBAL regulatory change; restore the device's original
-    // regdom if we changed it and know what it was. If the original was unknown
-    // (world/unset or an unreadable `iw reg get`), we cannot restore it - the
-    // regdom is left at the AP's country (documented side effect in REPORT_DNS).
-    if (net_.regdom_changed && !net_.orig_country.empty()) {
-        if (env_.run_ok("iw reg set " + net_.orig_country + " 2>/dev/null")) {
-            net_.regdom_changed = false;
-        } else {
-            ok = false; // couldn't restore the global regdom: not fully clean, retry
-        }
-    }
+    // The restore list included `iw reg set <orig>` when we had changed the
+    // GLOBAL regdom and knew the original; a fully-clean pass means it took, so
+    // stop owing it. (Unknown original => left at the AP's country: documented
+    // side effect in REPORT_DNS.) We never restore the regdom for a self-managed
+    // radio (we never changed it).
+    if (ok && net_.regdom_changed) net_.regdom_changed = false;
     if (ok) cleaned_ = true; // only stop retrying once teardown fully succeeded
     return ok;
 }

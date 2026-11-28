@@ -136,11 +136,17 @@ std::string hostapd_conf(const std::string& iface, const std::string& ssid, int 
 // forms are canonical; pass the result of to-upper for comparison.
 bool valid_country(const std::string& cc);
 
-// The country from `iw reg get` output: the FIRST "country XX:" record (at a
-// line boundary), uppercased, or "" when unset ("country 00:" / world /
-// absent). This is a simple first-record parser, not a PHY/interface-aware
-// selection - with multiple regulatory sections it is a best-effort read.
+// The country from `iw reg get` output: the FIRST line that begins with
+// "country XX:", uppercased, or "" when unset ("country 00:" / world / absent).
+// Line-anchored but still a simple first-record read, not a PHY/interface-aware
+// selection - with multiple regulatory sections it is best-effort.
 std::string parse_reg_country(const std::string& iw_reg_get_output);
+
+// Is the wiphy self-managed (sets its own regulatory domain)? `iw reg get`
+// prints a "phy#N (self-managed)" line for such devices. A self-managed radio
+// needs no country_code / `iw reg set`; a NON-self-managed one (e.g. the Pi's
+// brcmfmac) does, or it will not beacon.
+bool reg_is_self_managed(const std::string& iw_reg_get_output);
 
 // Does hostapd's log show OUR interface's AP currently enabled? Scans COMPLETE
 // (newline-terminated) lines for exact "<iface>: AP-ENABLED" records and
@@ -212,6 +218,7 @@ struct NetState {
     std::string gateway;
     std::string country;             // regulatory domain for the AP (resolved before mutation)
     std::string orig_country;        // device regdom before we changed it ("" = unknown/world)
+    bool reg_self_managed = false;   // wiphy sets its own regdom (no country_code/iw reg set)
     bool regdom_changed = false;     // we issued `iw reg set` and owe a restore
     int dns_port = 0;                // chosen alternate DNS port (0 = none yet)
     DnatBackend dnat = DnatBackend::None; // backend of the CURRENTLY-active redirect (for the log)
@@ -220,17 +227,27 @@ struct NetState {
     bool ownership_read_ok = false;   // the managed-state read succeeded (vs failed/invalid)
     bool iface_was_managed = false;   // iface was explicitly NM-managed before we took it
     std::string active_uuid;          // NM connection to re-up on exit ("" = none/invalid)
+    std::string autoconnect;          // the connection's connection.autoconnect ("yes"/"no"/"")
 };
+
+// The FULL interface-release command sequence run before hostapd (so it owns
+// the radio): disconnect any association, mark the NIC NM-unmanaged, and bring
+// the link down. `managed no` alone left wlan0 associated to the home AP on its
+// channel, so hostapd could not set the AP channel. Each is run checked, in
+// order, with a post-condition link check (see PortalNet::release_interface).
+std::vector<std::string> iface_release_commands(const std::string& iface);
+
+// The reverse restore sequence for teardown: remove the gateway address, cycle
+// the link, put the type back to managed, restore the original regdom (when we
+// changed it and know it), and - only if the iface was NM-managed - hand it
+// back to NetworkManager, restore the connection's autoconnect, and bring the
+// saved connection up. Pure/deterministic; cleanup() runs it with result checks
+// (an absent-address delete is benign).
+std::vector<std::string> iface_restore_commands(const NetState& st);
 
 // true if s is a syntactically valid NM/RFC4122 UUID (hex groups 8-4-4-4-12).
 // Guards the value before it reaches `nmcli connection up uuid <...>`.
 bool valid_uuid(const std::string& s);
-
-// The commands that hand the interface back to NetworkManager: `managed yes`
-// and (when a valid saved connection exists) `connection up`. Empty unless the
-// iface was explicitly managed before we took it. Pure/deterministic; the DNAT
-// teardown is done separately (with result checks) by the runtime cleanup.
-std::vector<std::string> nm_restore_commands(const NetState& st);
 
 // --- injectable command environment (so the lifecycle is unit-testable) -----
 
