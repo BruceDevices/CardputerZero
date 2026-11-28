@@ -22,6 +22,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <vector>
 
 // Independent reference: ISO14443-3 CRC_A, bitwise, poly 0x8408, preset 0x6363.
@@ -85,6 +87,39 @@ int main() {
     assert(cap_ioe_high_bank(14) && cap_ioe_bit(14) == 0x20);
     assert(cap_ioe_bit(0) == 0 && cap_ioe_bit(15) == 0);
     assert(!cap_ioe_high_bank(0) && !cap_ioe_high_bank(15));
+
+    // Load files produced by Save and Bruce firmware, including partial dumps.
+    char temp_dir[] = "/tmp/bruce-nfc-check.XXXXXX";
+    if (!mkdtemp(temp_dir)) return 1;
+    St25rScan saved;
+    saved.uid = {4, 1, 2, 3, 4, 5, 6};
+    saved.atqa[0] = 0x44;
+    saved.t2t = true;
+    saved.pages = {4, 1, 2, 0x8F, 3, 4, 5, 6, 4, 0x48, 0, 0, 0xE1, 0x10, 0x12, 0};
+    saved.page_count = static_cast<unsigned>(saved.pages.size() / 4);
+    const auto dump_path = st25r_save_nfc(saved, temp_dir);
+    St25rScan loaded;
+    std::string error;
+    assert(st25r_load_nfc(dump_path, loaded, error));
+    assert(loaded.uid == saved.uid && loaded.atqa[0] == 0x44 && loaded.atqa[1] == 0);
+    assert(loaded.t2t && loaded.page_count == 4 && loaded.pages == saved.pages);
+
+    saved.pages.clear();
+    saved.page_count = 0;
+    assert(st25r_load_nfc(st25r_save_nfc(saved, temp_dir), loaded, error));
+    assert(loaded.uid == saved.uid && loaded.t2t && loaded.pages.empty() && loaded.page_count == 0);
+
+    const auto imported = std::filesystem::path(temp_dir) / "imported.nfc";
+    const char* header = "Filetype: Flipper NFC device\r\nVersion: 4\r\n"
+                         "UID: 04 01 02 03 04 05 06\r\nATQA: 44 00\r\nSAK: 00\r\n"
+                         "Pages total: 45\r\nPages read: 2\r\n";
+    std::ofstream(imported) << header << "Page 1: 03 04 05 06\r\nPage 0: 04 01 02 8F\r\n";
+    assert(st25r_load_nfc(imported.string(), loaded, error));
+    assert(loaded.page_count == 2 && loaded.pages[0] == 4 && loaded.pages[4] == 3);
+    std::ofstream(imported) << header << "Page 1: 03 04 05 06\r\n";
+    assert(!st25r_load_nfc(imported.string(), loaded, error) && !error.empty());
+    assert(loaded.page_count == 2);
+    std::filesystem::remove_all(temp_dir);
 
     std::puts("rfid self-check OK");
     return 0;

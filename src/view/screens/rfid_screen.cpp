@@ -9,6 +9,8 @@
 #include "theme.h"
 #include "ui_const.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -24,6 +26,7 @@ const char* mode_title(model::RfidTool tool) {
     switch (tool) {
         case model::RfidTool::Read:  return "Read tag";
         case model::RfidTool::Dump:  return "Dump tag";
+        case model::RfidTool::Load:  return "Load Tag";
         case model::RfidTool::Clone: return "Clone tag";
         default:                     return "RFID";
     }
@@ -79,8 +82,23 @@ void RfidScreen::build_content(lv_obj_t* content) {
 
     configure_common_nav(view::NAV_BACK, back_cb, this);
     nav_bar().set_icon(1, view::NAV_UP, up_cb, this);
-    nav_bar().set_icon(2, "", nullptr, nullptr);
     nav_bar().set_icon(3, view::NAV_DOWN, down_cb, this);
+    if (tool_ == model::RfidTool::Load) {
+        lv_obj_set_width(title_, view::kScreenWidth - 16);
+        lv_label_set_long_mode(title_, LV_LABEL_LONG_DOT);
+        nav_bar().set_icon(2, view::NAV_SELECT, select_cb, this);
+        list_ = lv_list_create(content_root_);
+        lv_obj_set_size(list_, LV_PCT(100), kContentH - 40);
+        lv_obj_align(list_, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_set_style_bg_opa(list_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(list_, 0, 0);
+        lv_obj_set_style_pad_row(list_, 2, 0);
+        std::error_code ec;
+        directory_ = std::filesystem::absolute(model::rfid_recordings_dir(), ec);
+        if (ec) directory_ = model::rfid_recordings_dir();
+        show_file_picker();
+        return;
+    }
     nav_bar().set_icon(4, "Save", save_cb, this);
     nav_bar().set_enabled(4, false); // enabled once a tag has been read
 
@@ -96,6 +114,10 @@ void RfidScreen::build_content(lv_obj_t* content) {
 void RfidScreen::start_polling() {
     phase_ = Phase::Polling;
     lv_label_set_text(status_, "Approach a tag...");
+    start_timer();
+}
+
+bool RfidScreen::start_timer() {
     if (!timer_) {
         timer_ = lv_timer_create([](lv_timer_t* timer) {
             static_cast<RfidScreen*>(lv_timer_get_user_data(timer))->tick();
@@ -105,9 +127,20 @@ void RfidScreen::start_polling() {
         lv_label_set_text(status_, "Could not start reader timer");
         phase_ = Phase::Error;
     }
+    return timer_ != nullptr;
 }
 
 void RfidScreen::tick() {
+    if (phase_ == Phase::Writing) {
+        std::string report;
+        const auto result = platform::st25r_session_write_tag(loaded_scan_, report);
+        if (result == platform::St25rWriteResult::WaitingForTag) return;
+        stop_all();
+        phase_ = Phase::WriteResult;
+        lv_label_set_text(status_, result == platform::St25rWriteResult::Written ? "Write complete" : "Write failed");
+        lv_label_set_text(info_, report.c_str());
+        return;
+    }
     if (phase_ == Phase::Hold) {
         const int32_t remaining = static_cast<int32_t>(hold_until_ - lv_tick_get());
         if (remaining <= 0) {
@@ -120,7 +153,7 @@ void RfidScreen::tick() {
     if (phase_ == Phase::Emulating) {
         if (platform::st25r_emulate_step()) {
             ++activations_;
-            lv_label_set_text_fmt(status_, "Emulating %s  -  reads: %lu  (Back to stop)",
+            lv_label_set_text_fmt(status_, "Emulating %s  -  selections: %lu  (Back to stop)",
                                   emulate_uid_hex_.c_str(), activations_);
         }
         return;
@@ -156,10 +189,7 @@ void RfidScreen::enter_hold() {
 }
 
 void RfidScreen::start_emulation(const platform::St25rScan& scan) {
-    // Emulate in-process on the already-open session: no second process, so no
-    // SPI/GPIO hand-off race (the subprocess approach failed to start because
-    // the child could not take the bus). The reader timer keeps running and
-    // drives st25r_emulate_step() while in Phase::Emulating.
+    // The listener owns the open session. The UI timer only reports selections.
     emulate_uid_hex_ = platform::to_hex(scan.uid.data(), scan.uid.size());
     activations_ = 0;
 
@@ -207,6 +237,163 @@ void RfidScreen::build_error_view(const std::string& report) {
     lv_label_set_text(info_, body.c_str());
 }
 
+void RfidScreen::add_menu_row(const std::string& label, bool available) {
+    auto* row = lv_list_add_button(list_, nullptr, label.c_str());
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_pad_ver(row, 3, 0);
+    lv_obj_set_style_text_font(row, &lv_font_montserrat_14, 0);
+    if (!available) lv_obj_set_style_text_opa(row, LV_OPA_40, 0);
+    rows_.push_back(row);
+}
+
+void RfidScreen::highlight_selection() {
+    for (size_t i = 0; i < rows_.size(); ++i) {
+        auto* row = rows_[i];
+        lv_obj_set_style_bg_opa(row, i == selected_ ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        if (i == selected_) {
+            lv_obj_set_style_bg_color(row, view::palette(true).primary, 0);
+            lv_obj_set_style_radius(row, 4, 0);
+            lv_obj_set_style_text_color(row, lv_color_white(), 0);
+            lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+        } else {
+            lv_obj_remove_local_style_prop(row, LV_STYLE_TEXT_COLOR, 0);
+        }
+    }
+}
+
+void RfidScreen::move_selection(int delta) {
+    if (phase_ != Phase::FilePicker && phase_ != Phase::TagMenu) {
+        scroll_info(delta);
+        return;
+    }
+    if (rows_.empty()) return;
+    const int count = static_cast<int>(rows_.size());
+    selected_ = (static_cast<int>(selected_) + delta + count) % count;
+    highlight_selection();
+}
+
+void RfidScreen::show_file_picker() {
+    phase_ = Phase::FilePicker;
+    lv_obj_add_flag(info_box_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(list_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clean(list_);
+    rows_.clear();
+    files_.clear();
+    nav_bar().set_enabled(2, true);
+    lv_label_set_text(title_, "Load Tag");
+
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(directory_, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code entry_error;
+        const auto& path = it->path();
+        const std::string name = path.filename().string();
+        if (name.empty() || name.front() == '.') continue;
+        if (it->is_directory(entry_error)) {
+            files_.push_back({path, name + "/", true});
+        } else if (it->is_regular_file(entry_error)) {
+            auto extension = path.extension().string();
+            for (auto& c : extension) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (extension == ".nfc") files_.push_back({path, name, false});
+        }
+    }
+    std::sort(files_.begin(), files_.end(), [](const FileEntry& a, const FileEntry& b) {
+        if (a.directory != b.directory) return a.directory;
+        return a.label < b.label;
+    });
+    const auto parent = directory_.parent_path();
+    if (!parent.empty() && parent != directory_) files_.insert(files_.begin(), {parent, "../", true});
+    std::string status = "Choose a .nfc file";
+    if (ec) status = "Folder unavailable";
+    else if (std::all_of(files_.begin(), files_.end(), [](const FileEntry& entry) { return entry.directory; })) {
+        status = "No .nfc files in this folder";
+    }
+    lv_label_set_text(status_, status.c_str());
+    selected_ = files_.size() > 1 && files_.front().label == "../" ? 1 : 0;
+    for (const auto& entry : files_) {
+        if (entry.path == loaded_path_) selected_ = rows_.size();
+        add_menu_row(entry.label);
+    }
+    nav_bar().set_enabled(2, !rows_.empty());
+    lv_obj_update_layout(list_);
+    highlight_selection();
+}
+
+void RfidScreen::show_tag_menu() {
+    phase_ = Phase::TagMenu;
+    lv_obj_add_flag(info_box_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(list_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clean(list_);
+    rows_.clear();
+    nav_bar().set_enabled(2, true);
+    lv_label_set_text(title_, loaded_path_.filename().string().c_str());
+    const auto uid = platform::to_hex(loaded_scan_.uid.data(), loaded_scan_.uid.size(), true);
+    lv_label_set_text_fmt(status_, "UID: %s", uid.c_str());
+    const bool can_emulate = loaded_scan_.uid.size() != 10;
+    add_menu_row("Write Tag", loaded_scan_.t2t && loaded_scan_.page_count > 4);
+    add_menu_row("Emulate Tag", can_emulate && loaded_scan_.t2t && loaded_scan_.page_count > 0);
+    add_menu_row("Emulate UID", can_emulate);
+    selected_ = loaded_scan_.page_count > 0 ? 0 : 2;
+    lv_obj_update_layout(list_);
+    highlight_selection();
+}
+
+void RfidScreen::select_row() {
+    if (phase_ == Phase::FilePicker) {
+        if (selected_ >= files_.size()) return;
+        const auto entry = files_[selected_];
+        if (entry.directory) {
+            directory_ = entry.path;
+            show_file_picker();
+            return;
+        }
+        std::string error;
+        if (!platform::st25r_load_nfc(entry.path.string(), loaded_scan_, error)) {
+            lv_label_set_text(status_, error.c_str());
+            return;
+        }
+        loaded_path_ = entry.path;
+        show_tag_menu();
+        return;
+    }
+    if (phase_ != Phase::TagMenu) return;
+
+    const bool writing = selected_ == 0;
+    if ((writing && (!loaded_scan_.t2t || loaded_scan_.page_count <= 4)) ||
+        (selected_ == 1 && (!loaded_scan_.t2t || loaded_scan_.page_count == 0))) {
+        lv_label_set_text(status_, "Select a Type-2 dump with data pages");
+        return;
+    }
+    if (!writing && loaded_scan_.uid.size() == 10) {
+        lv_label_set_text(status_, "Emulation supports 4- or 7-byte UIDs");
+        return;
+    }
+    lv_obj_add_flag(list_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(info_box_, LV_OBJ_FLAG_HIDDEN);
+    nav_bar().set_enabled(2, false);
+    std::string report;
+    session_open_ = platform::st25r_session_open(&report);
+    if (!session_open_) {
+        build_error_view(report);
+        return;
+    }
+    if (!start_timer()) {
+        stop_all();
+        return;
+    }
+    if (writing) {
+        phase_ = Phase::Writing;
+        lv_label_set_text(status_, "Approach the destination tag...");
+        lv_label_set_text(info_, "Hold a writable Type-2 tag in place until writing finishes.");
+        return;
+    }
+    auto scan = loaded_scan_;
+    if (selected_ == 2) {
+        scan.pages.clear();
+        scan.page_count = 0;
+    }
+    start_emulation(scan);
+}
+
 void RfidScreen::stop_all() {
     if (timer_) {
         lv_timer_delete(timer_);
@@ -220,6 +407,16 @@ void RfidScreen::stop_all() {
 
 void RfidScreen::handle_back() {
     stop_all();
+    if (tool_ == model::RfidTool::Load) {
+        if (phase_ == Phase::TagMenu) {
+            show_file_picker();
+            return;
+        }
+        if (phase_ != Phase::FilePicker) {
+            show_tag_menu();
+            return;
+        }
+    }
     view_model().go_back();
 }
 
@@ -259,15 +456,20 @@ void RfidScreen::save_cb(lv_event_t* event) {
 void RfidScreen::up_cb(lv_event_t* event) {
     auto* self = static_cast<RfidScreen*>(lv_event_get_user_data(event));
     if (self) {
-        self->scroll_info(-1);
+        self->move_selection(-1);
     }
 }
 
 void RfidScreen::down_cb(lv_event_t* event) {
     auto* self = static_cast<RfidScreen*>(lv_event_get_user_data(event));
     if (self) {
-        self->scroll_info(1);
+        self->move_selection(1);
     }
+}
+
+void RfidScreen::select_cb(lv_event_t* event) {
+    auto* self = static_cast<RfidScreen*>(lv_event_get_user_data(event));
+    if (self) self->select_row();
 }
 
 void RfidScreen::back_cb(lv_event_t* event) {

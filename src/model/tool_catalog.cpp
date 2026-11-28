@@ -280,9 +280,7 @@ std::vector<ToolAction> build_rfid_actions(bool st25r, bool rfid2, bool pn532) {
 
     // --- M5 RF+NFC CAP: ST25R3916 over HAT SPI, or an I2C NFC unit at 0x50 ---
     if (st25r) {
-        // These three open the live RfidScreen (Tag-O-Matic-style continuous
-        // reader) via rfid_tool; the argv stays as the CLI fallback and lets the
-        // screen find this binary for the Clone emulate child.
+        // rfid_tool opens the live RFID screen for ST25R operations.
         ToolAction read{"Read tag (UID/ATQA/SAK)",
                         "Read an ISO14443A tag's UID/ATQA/SAK on the detected ST25R3916 (SPI CAP or I2C @0x50).",
                         {self_exe_path(), "--rfid-read"}};
@@ -299,6 +297,9 @@ std::vector<ToolAction> build_rfid_actions(bool st25r, bool rfid2, bool pn532) {
         clone.rfid_tool = RfidTool::Clone;
         actions.push_back(clone);
     }
+    ToolAction load{"Load Tag", "Open a saved .nfc file to write or emulate it with the ST25R3916.", {}};
+    load.rfid_tool = RfidTool::Load;
+    actions.push_back(load);
 
     // --- M5 RFID2 unit: MFRC522 / WS1850S over I2C (native driver) ---
     if (rfid2) {

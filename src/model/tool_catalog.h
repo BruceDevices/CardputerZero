@@ -19,7 +19,7 @@ enum class RfTool { None, Scan, ProtocolMonitor, Record, Spectrum, Spectrogram }
 // and Dump poll the field continuously and pause after a hit; Clone reads one
 // UID and then emulates it. `argv` is still the equivalent --rfid-* CLI, kept
 // as a fallback and reused by the screen to find this binary's path.
-enum class RfidTool { None, Read, Dump, Clone };
+enum class RfidTool { None, Read, Dump, Load, Clone };
 
 // Which structured Wi-Fi scan UI a row opens instead of the raw tool-run log.
 // ScanList  -> "Scan nearby networks": a signal-sorted, selectable network list

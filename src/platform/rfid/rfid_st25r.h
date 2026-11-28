@@ -10,16 +10,13 @@
  * verbatim from ST's ST25R3916 definitions (lewisxhe/ST25R3916-fork, the same
  * source the ESP32 Bruce firmware builds on), so the framing is authoritative.
  *
- * Feature parity with the firmware's RFID module for the ST25R chip: read a
- * tag's UID/ATQA/SAK, dump a Type-2 tag, write a Type-2 block, and emulate a
- * Type-2 tag with a chosen UID (NFC-A passive-target / listen mode, as the
- * firmware does - the "card emulation not wired" note in its header is stale).
+ * Supports UID/ATQA/SAK reads, Type-2 page reads and writes, and NFC-A passive
+ * target emulation with Type-2 page responses.
  *
  * The ISO14443A protocol logic here (CRC_A, BCC, anticollision cascade, SAK
  * decoding, hex parsing) is covered by tests/rfid_selfcheck.cpp. The RF
- * front-end bring-up values are sensible defaults exposed as a calibration knob
- * (see kTxDriverResistance / analog init in the .cpp): real antennas vary, so
- * expect to tune them on the device the first time.
+ * front-end bring-up uses the antenna and passive load modulation settings in
+ * rfid_st25r.cpp.
  */
 
 #pragma once
@@ -94,7 +91,7 @@ struct St25rScan {
     unsigned page_count = 0;
 };
 
-// Open the ST25R reader (auto transport: SPI CAP first, then I2C @0x50). When
+// Open the ST25R reader (ST25R_BUS override, else SPI CAP then I2C @0x50). When
 // `report` is non-null it receives the same human-readable bring-up text the
 // CLI prints. Returns false (and leaves nothing open) if no chip answered.
 bool st25r_session_open(std::string* report = nullptr);
@@ -110,11 +107,9 @@ bool st25r_session_poll(St25rScan& out, bool dump_pages);
 // Release the transport opened by st25r_session_open() (turns the field off).
 void st25r_session_close();
 
-// In-process tag emulation (Clone), reusing the open session so there is no
-// second process fighting for the SPI/GPIO. begin() switches the chip into
-// NFC-A passive-target mode advertising `scan.uid`; step() polls once for a
-// reader activation (short, UI-timer friendly) and returns true when one is
-// seen. Call st25r_session_close() to stop and release the field.
+// In-process tag emulation (Clone). begin() starts a listener on the open
+// session. step() consumes one pending reader selection without accessing the
+// bus. st25r_session_close() joins the listener and releases the session.
 bool st25r_emulate_begin(const St25rScan& scan);
 bool st25r_emulate_step();
 
@@ -124,10 +119,19 @@ bool st25r_emulate_step();
 // carries them. Portable (plain file IO); no hardware access.
 std::string st25r_save_nfc(const St25rScan& scan, const std::string& dir);
 
+// Load NFC-A identity and contiguous Type-2 pages from a Bruce/Flipper file.
+bool st25r_load_nfc(const std::string& path, St25rScan& scan, std::string& error);
+
+enum class St25rWriteResult { WaitingForTag, Written, Failed };
+
+// Copy the stored Type-2 user pages to a presented writable tag. The report
+// includes the number of pages already written if the operation fails.
+St25rWriteResult st25r_session_write_tag(const St25rScan& scan, std::string& report);
+
 int rfid_read_main(int argc, char** argv);           // --rfid-read [spidev]
 int rfid_dump_main(int argc, char** argv);            // --rfid-dump [spidev]
 int rfid_write_main(int argc, char** argv);           // --rfid-write <page> <hex4> [spidev]
-int rfid_emulate_main(int argc, char** argv);         // --rfid-emulate <uid-hex> [spidev]
+int rfid_emulate_main(int argc, char** argv);         // --rfid-emulate <uid-hex> [bus]
 int rfid_clone_main(int argc, char** argv);           // --rfid-clone [spidev] (read UID, then emulate it)
 
 } // namespace platform

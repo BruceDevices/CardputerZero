@@ -11,6 +11,7 @@
 #include "tool_catalog.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -24,22 +25,29 @@ namespace screen {
 // the loop for 5 s so the operator can lift the tag and decide what to do,
 // then resumes polling automatically.
 //
-// Three modes (model::RfidTool), chosen by the catalog row that opened it:
+// Modes (model::RfidTool), chosen by the catalog row that opened it:
 //   Read  - UID / ATQA / SAK / type, re-reading on every new tag.
 //   Dump  - the above plus the Type-2 (NTAG/Ultralight) data pages.
-//   Clone - read one UID, then hand the bus to a `--rfid-emulate <uid>` child
-//           so the device advertises that UID until the operator goes Back.
+//   Clone - read one tag, then emulate it on the same session until Back.
+//   Load  - choose a saved tag and show write and emulation actions.
 class RfidScreen : public BaseScreen {
 public:
     RfidScreen(viewmodel::BaseViewModel& view_model, app::AssetManager& assets);
     ~RfidScreen() override;
 
 private:
-    enum class Phase { Error, Polling, Hold, Emulating };
+    enum class Phase { Error, Polling, Hold, Emulating, FilePicker, TagMenu, Writing, WriteResult };
+
+    struct FileEntry {
+        std::filesystem::path path;
+        std::string label;
+        bool directory;
+    };
 
     void build_content(lv_obj_t* content) override;
 
     void start_polling();
+    bool start_timer();
     void tick();
     void on_tag(const platform::St25rScan& scan);
     void enter_hold();
@@ -50,6 +58,12 @@ private:
     void scroll_info(int dir); // +1 down, -1 up
     void save_tag();
     void set_save_enabled(bool enabled);
+    void show_file_picker();
+    void show_tag_menu();
+    void add_menu_row(const std::string& label, bool available = true);
+    void highlight_selection();
+    void move_selection(int delta);
+    void select_row();
 
     std::string scan_to_text(const platform::St25rScan& scan) const;
 
@@ -57,6 +71,7 @@ private:
     static void up_cb(lv_event_t* event);
     static void down_cb(lv_event_t* event);
     static void save_cb(lv_event_t* event);
+    static void select_cb(lv_event_t* event);
 
     model::RfidTool tool_ = model::RfidTool::None;
 
@@ -68,6 +83,13 @@ private:
     bool have_scan_ = false;
     bool save_enabled_ = false;
 
+    std::filesystem::path directory_;
+    std::filesystem::path loaded_path_;
+    platform::St25rScan loaded_scan_;
+    std::vector<FileEntry> files_;
+    std::vector<lv_obj_t*> rows_;
+    size_t selected_ = 0;
+
     std::string emulate_uid_hex_;   // UID being emulated (Clone)
     unsigned long activations_ = 0; // reader activations seen while emulating
 
@@ -77,6 +99,7 @@ private:
     lv_obj_t* status_ = nullptr;
     lv_obj_t* info_box_ = nullptr;
     lv_obj_t* info_ = nullptr;
+    lv_obj_t* list_ = nullptr;
 };
 
 } // namespace screen

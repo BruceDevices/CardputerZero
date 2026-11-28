@@ -196,7 +196,7 @@ bool probe_cc1101(const char* spidev_path, int cs_gpio, int rst_gpio, uint8_t& v
 bool probe_st25r(const char* spidev_path, int cs_gpio, int rst_gpio, uint8_t& ic_identity) {
     ic_identity = 0;
 #if defined(__linux__)
-    const bool hw_cs = (cs_gpio == kHwCsGpio);
+    const bool hw_cs = cs_gpio == kHwCsGpio || std::strcmp(spidev_path, "/dev/spidev0.2") == 0;
     const int fd = spi_open(spidev_path, SPI_MODE_1, /*no_cs=*/!hw_cs);
     if (fd < 0) {
         return false;
@@ -873,11 +873,11 @@ int cc1101_detect_main(int argc, char** argv) {
 std::string st25r_detect_report(const std::string& spidev_path, bool& detected) {
     detected = false;
 
-    // CLI diagnostic default (CAP CC1101 profile: ST25R3916 on the G7 HW CS);
+    // CLI diagnostic default (CAP CC1101 profile: ST25R3916 on G22);
     // override with ST25R_CS_GPIO. Runtime pin truth lives in the HAL registry.
     const int cs_gpio = env_int_or("ST25R_CS_GPIO", kSt25rDefaultCs);
     const int rst_gpio = env_int_or("ST25R_RST_GPIO", 26);
-    const bool hw_cs = (cs_gpio == kHwCsGpio);
+    const bool hw_cs = cs_gpio == kHwCsGpio || spidev_path == "/dev/spidev0.2";
 
     std::string report = "ST25R3916 NFC detection\nspidev: " + spidev_path + "\n";
     report += "NFC_CS = G" + std::to_string(cs_gpio) +
@@ -917,7 +917,7 @@ int st25r_detect_main(int argc, char** argv) {
             path = env;
         } else {
             const std::string picked =
-                spidev_pick({APP_ST25R_SPIDEV, "/dev/spidev0.1", "/dev/spidev0.0"});
+                spidev_pick({"/dev/spidev0.2", APP_ST25R_SPIDEV, "/dev/spidev0.1", "/dev/spidev0.0"});
             path = picked.empty() ? std::string(APP_ST25R_SPIDEV) : picked;
         }
     }
