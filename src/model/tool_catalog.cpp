@@ -658,16 +658,16 @@ std::vector<ToolAction> build_theme_actions() {
 
 // --- Wi-Fi category ---------------------------------------------------------
 //
-// A fixed prefix (recon, monitor mode, attacks, radio toggles) plus the Evil
-// Portal block (native --evil-portal subcommand) and the clone-AP drill-down,
+// A fixed prefix (recon, monitor mode, attacks, radio toggles) plus one
+// "Evil Portal >" navigation row. The portal actions, clone-AP drill-down and
+// password-mode setting are built as a submenu (build_evil_portal_actions),
 // rebuilt on every menu entry like Nmap's host list.
 
 // Interns an interface-bearing label/description so a ToolAction/ToolCategory
 // `const char*` field can be built at runtime from wifi_interface(). The pool
 // is persistent (never cleared) and deduplicated, so the handful of distinct
 // strings get stable addresses and repeated rebuilds do not grow it - and
-// build_wifi_static_actions().size() (called just for a count in
-// on_navigation_action) can never dangle pointers held by the live catalog.
+// pointers held by the live catalog stay stable.
 const char* intern_iface_text(const std::string& s) {
     static std::deque<std::string> pool; // deque: push_back keeps element addresses stable
     for (const auto& e : pool) {
@@ -676,6 +676,211 @@ const char* intern_iface_text(const std::string& s) {
         }
     }
     pool.push_back(s);
+    return pool.back().c_str();
+}
+
+// --- Evil Portal: password-mode setting + submenu ---------------------------
+//
+// Bruce's evilWifiPasswordMode (Config > Evil Wifi Settings > Password Mode)
+// decides how much of a captured password is saved. The Linux port persists
+// the same 0..3 value in ~/.bruce/evil_portal.conf and passes it to the portal
+// as --pwd-mode; the portal CLI itself is unchanged. The menu module cannot
+// include the platform enum, so the small mode -> token/label mapping lives
+// here (keep it in sync with platform::PwdMode: Full/FirstLast/Hidden/Length).
+enum class EvilPortalMode { Full = 0, FirstLast = 1, Hidden = 2, LengthOnly = 3 };
+
+std::string evil_portal_home_dir() {
+    if (const char* user = std::getenv("SUDO_USER"); user && user[0]) {
+        if (const passwd* pw = ::getpwnam(user); pw && pw->pw_dir && pw->pw_dir[0]) {
+            return pw->pw_dir;
+        }
+    }
+    if (const char* home = std::getenv("HOME"); home && home[0]) return home;
+    return "/root";
+}
+
+std::string evil_portal_conf_path() {
+    if (const char* env = std::getenv("BRUCE_EVIL_PORTAL_CONF"); env && env[0] != '\0') {
+        return env; // test/developer override
+    }
+    return evil_portal_home_dir() + "/.bruce/evil_portal.conf";
+}
+
+const char* evil_portal_mode_token(EvilPortalMode mode) {
+    switch (mode) {
+        case EvilPortalMode::Full: return "full";
+        case EvilPortalMode::FirstLast: return "first_last";
+        case EvilPortalMode::Hidden: return "hidden";
+        case EvilPortalMode::LengthOnly: return "length";
+    }
+    return "full";
+}
+
+const char* evil_portal_mode_label(EvilPortalMode mode) {
+    switch (mode) {
+        case EvilPortalMode::Full: return "Full";
+        case EvilPortalMode::FirstLast: return "p******d";
+        case EvilPortalMode::Hidden: return "*hidden*";
+        case EvilPortalMode::LengthOnly: return "Length only";
+    }
+    return "Full";
+}
+
+// Strict 0..3 parse: digits only, full token, no overflow. "2junk", "-1",
+// " 2" and "" are invalid (the conf file is written by us; be exact).
+bool parse_evil_portal_mode(const std::string& text, EvilPortalMode& out) {
+    if (text.empty()) return false;
+    for (const char c : text) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const long value = std::strtol(text.c_str(), &end, 10);
+    if (errno == ERANGE || end == text.c_str() || *end != '\0' || value < 0 || value > 3) {
+        return false;
+    }
+    out = static_cast<EvilPortalMode>(value);
+    return true;
+}
+
+EvilPortalMode load_evil_portal_mode() {
+    std::ifstream in(evil_portal_conf_path());
+    if (!in) return EvilPortalMode::Full;
+    static const std::string key = "evilWifiPasswordMode=";
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::size_t start = 0;
+        while (start < line.size() && (line[start] == ' ' || line[start] == '\t')) ++start;
+        if (line.compare(start, key.size(), key) != 0) continue;
+        EvilPortalMode mode = EvilPortalMode::Full;
+        if (parse_evil_portal_mode(line.substr(start + key.size()), mode)) return mode; // first valid wins
+    }
+    return EvilPortalMode::Full;
+}
+
+std::string& evil_portal_save_error() {
+    static std::string error;
+    return error;
+}
+
+// Atomic replace in the destination directory: mkstemp -> checked write ->
+// fchmod -> checked close -> one checked rename. A failure before the rename
+// removes only the temp file; the previous config is left untouched.
+bool save_evil_portal_mode(EvilPortalMode mode, std::string& error) {
+    const std::string path = evil_portal_conf_path();
+    const size_t slash = path.find_last_of('/');
+    const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
+    const char* override_env = std::getenv("BRUCE_EVIL_PORTAL_CONF");
+    const bool override_path = override_env != nullptr && override_env[0] != '\0';
+
+    struct stat st {};
+    bool created_dir = false;
+    if (::stat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+        if (override_path) {
+            error = "cannot save " + path + ": directory " + dir + " is missing";
+            return false;
+        }
+        if (::mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) {
+            error = "cannot create " + dir + ": " + std::strerror(errno);
+            return false;
+        }
+        created_dir = true;
+        if (::stat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+            error = "cannot create " + dir;
+            return false;
+        }
+    }
+
+    // When the menu runs as root through sudo, keep the settings readable and
+    // writable by the invoking user (best effort; failure is not fatal).
+    const passwd* owner = nullptr;
+    if (::geteuid() == 0) {
+        if (const char* user = std::getenv("SUDO_USER"); user && user[0]) {
+            owner = ::getpwnam(user);
+        }
+    }
+    if (created_dir && owner) {
+        const int ignored = ::chown(dir.c_str(), owner->pw_uid, owner->pw_gid);
+        (void)ignored; // best effort: the save still succeeds if this fails
+    }
+
+    std::string temp = dir + "/.evil_portal.conf.XXXXXX";
+    const int fd = ::mkstemp(&temp[0]);
+    if (fd < 0) {
+        error = "cannot create a temporary file in " + dir + ": " + std::strerror(errno);
+        return false;
+    }
+    const std::string content = "# Bruce CardputerZero Evil Portal settings\n"
+                                "evilWifiPasswordMode=" +
+                                std::to_string(static_cast<int>(mode)) + "\n";
+    std::size_t off = 0;
+    bool ok = true;
+    int failure_errno = 0; // preserve the first real failure across cleanup
+    while (off < content.size()) {
+        const ssize_t n = ::write(fd, content.data() + off, content.size() - off);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            failure_errno = errno;
+            ok = false;
+            break;
+        }
+        if (n == 0) {
+            failure_errno = EIO;
+            ok = false;
+            break;
+        }
+        off += static_cast<std::size_t>(n);
+    }
+    if (ok && ::fchmod(fd, 0644) != 0) {
+        failure_errno = errno;
+        ok = false;
+    }
+    if (ok && owner) {
+        const int ignored = ::fchown(fd, owner->pw_uid, owner->pw_gid);
+        (void)ignored; // best effort
+    }
+    const bool close_failed = ::close(fd) != 0;
+    if (ok && close_failed) {
+        failure_errno = errno;
+        ok = false;
+    }
+    if (!ok) {
+        ::unlink(temp.c_str());
+        const char* reason = failure_errno != 0 ? std::strerror(failure_errno) : "unknown error";
+        error = "cannot write " + path + ": " + reason;
+        return false;
+    }
+    if (::rename(temp.c_str(), path.c_str()) != 0) {
+        error = "cannot replace " + path + ": " + std::strerror(errno);
+        ::unlink(temp.c_str());
+        return false;
+    }
+    return true;
+}
+
+enum class EvilPortalPage { None, Main, Clone, PasswordMode };
+
+EvilPortalPage& evil_portal_page() {
+    static EvilPortalPage page = EvilPortalPage::None;
+    return page;
+}
+
+void clear_portal_selection() {
+    const std::string selected = portal_dir() + "/selected";
+    if (std::remove(selected.c_str()) != 0 && errno != ENOENT) {
+        // Best effort: the clone page simply keeps showing the old selection.
+    }
+}
+
+std::deque<std::string>& evil_portal_label_pool() {
+    static std::deque<std::string> pool;
+    return pool;
+}
+
+const char* evil_portal_own_label(const std::string& value) {
+    auto& pool = evil_portal_label_pool();
+    pool.push_back(value);
     return pool.back().c_str();
 }
 
@@ -773,18 +978,12 @@ std::vector<ToolAction> build_wifi_static_actions() {
          true},
 
         // --- evil portal (Linux port of the ESP32 Bruce feature) ---
-        {"Evil Portal: Default (Google)",
-         "Open AP + DNS-hijacked captive portal capturing credentials to "
-         "~/.bruce/BruceEvilCreds (Bruce default page). Needs root + hostapd/dnsmasq.",
-         {self_exe_path(), "--evil-portal", "default"}},
-        {"Evil Portal: Router Update (verify pwd)",
-         "'Router firmware update' portal; verifies each stolen password against "
-         "the real network (AP pauses seconds per check). Needs root + hostapd/dnsmasq.",
-         {self_exe_path(), "--evil-portal", "verify"}},
-        {"Evil Portal: Custom HTML",
-         "Serves ~/.bruce/evil_portal/index.html; a first line <!-- AP=\"Name\" --> "
-         "names the AP, captures go to <name>_creds.csv (Bruce Custom Html).",
-         {self_exe_path(), "--evil-portal", "custom", "~/.bruce/evil_portal/index.html"}},
+        // The portal actions, clone drill-down and password-mode setting live
+        // in one submenu (see build_evil_portal_actions()).
+        {"Evil Portal >",
+         "Captive portal: Default / Router Update / Custom HTML / Clone an AP "
+         "+ password mode. Needs root + hostapd/dnsmasq.",
+         {}},
 
         // --- radio toggles ---
         {"Enable Wi-Fi radio", "rfkill unblock wifi", {"rfkill", "unblock", "wifi"}},
@@ -792,29 +991,20 @@ std::vector<ToolAction> build_wifi_static_actions() {
     };
 }
 
-// Evil Portal clone-AP drill-down (Bruce's "Clone Portal"): scan -> pick an AP
-// -> the portal clones its SSID and channel. Rows carry an empty argv so the
-// menu treats them as navigation (see on_navigation_action).
-std::vector<ToolAction> build_portal_rows() {
-    // Owns the dynamically built label strings (ToolAction::label is const
-    // char*). Cleared each rebuild; no rebuild happens while a ToolRunScreen
-    // is live (see menu_screen.cpp).
-    static std::deque<std::string> pool;
-    pool.clear();
-    auto own = [](std::string s) -> const char* {
-        pool.push_back(std::move(s));
-        return pool.back().c_str();
-    };
-
+// Evil Portal submenu: the three portal actions, the clone drill-down and the
+// password-mode setting. Rows with an empty argv are navigation rows handled
+// by on_navigation_action(); runnable rows carry the saved mode.
+std::vector<ToolAction> build_evil_portal_clone_actions() {
     const std::string w = wifi_interface();
     const std::string dir = portal_dir();
+    const std::string pwd_mode = evil_portal_mode_token(load_evil_portal_mode());
     const std::string selected = read_first_line(dir + "/selected");
     std::vector<ToolAction> acts;
 
     if (selected.empty()) {
         acts.push_back(ToolAction{
-            "Evil Portal: Clone an AP  (1. scan first)",
-            "Scan nearby APs, then go Back and pick one to clone. Needs root.",
+            "Scan nearby APs",
+            "Scan for nearby APs, then pick one to clone. Needs root.",
             {"sh", "-c",
              "mkdir -p " + dir + "; rm -f " + dir + "/selected; "
              "ip link set " + w + " up 2>/dev/null; "
@@ -837,31 +1027,90 @@ std::vector<ToolAction> build_portal_rows() {
             for (const auto& t : targets) {
                 const auto [chan, ssid] = split_target(t);
                 acts.push_back(ToolAction{
-                    own("Clone \"" + ssid + "\"  (ch " + chan + ")  >"),
+                    evil_portal_own_label("Clone \"" + ssid + "\"  (ch " + chan + ")  >"),
                     "Pick this AP: the Evil Portal clones its SSID and channel.",
                     {}}); // empty argv => navigation row
             }
         }
+        acts.push_back(ToolAction{"< Back to Evil Portal",
+                                  "Return to the Evil Portal menu.",
+                                  {}});
     } else {
         const auto [chan, ssid] = split_target(selected);
+        acts.push_back(ToolAction{"< Back to AP list",
+                                  "Clear the picked AP and clone another.",
+                                  {}}); // empty argv => navigation row
         acts.push_back(ToolAction{
-            "< Back to AP list",
-            "Clear the picked AP and clone another.",
-            {}}); // navigation row
-        acts.push_back(ToolAction{
-            own("Evil Portal: Clone \"" + ssid + "\"  (ch " + chan + ")"),
+            evil_portal_own_label("Start clone of \"" + ssid + "\"  (ch " + chan + ")"),
             "Starts the cloned AP + captive portal; captures land in "
             "~/.bruce/BruceEvilCreds/default_creds.csv.",
-            {self_exe_path(), "--evil-portal", "clone", ssid, chan}});
+            {self_exe_path(), "--evil-portal", "clone", "--pwd-mode", pwd_mode, ssid, chan}});
     }
     return acts;
 }
 
+std::vector<ToolAction> build_evil_portal_actions() {
+    auto& pool = evil_portal_label_pool();
+    pool.clear(); // rebuilt on every menu entry; labels are owned here
+
+    const EvilPortalMode mode = load_evil_portal_mode();
+    const std::string token = evil_portal_mode_token(mode);
+    const std::string self = self_exe_path();
+    switch (evil_portal_page()) {
+        case EvilPortalPage::Main:
+            return {
+                {"Default (Google)",
+                 "Open AP + DNS-hijacked captive portal capturing credentials to "
+                 "~/.bruce/BruceEvilCreds. Needs root + hostapd/dnsmasq.",
+                 {self, "--evil-portal", "default", "--pwd-mode", token}},
+                {"Router Update (verify pwd)",
+                 "'Router firmware update' portal; verifies each stolen password "
+                 "against the real network. Needs root + hostapd/dnsmasq.",
+                 {self, "--evil-portal", "verify", "--pwd-mode", token}},
+                {"Custom HTML",
+                 "Serves ~/.bruce/evil_portal/index.html; a first line "
+                 "<!-- AP=\"Name\" --> names the AP. Needs root + hostapd/dnsmasq.",
+                 {self, "--evil-portal", "custom", "--pwd-mode", token,
+                  "~/.bruce/evil_portal/index.html"}},
+                {"Clone an AP >",
+                 "Scan nearby APs and clone one (SSID + channel).",
+                 {}},
+                {evil_portal_own_label("Password mode: " +
+                                       std::string(evil_portal_mode_label(mode)) + " >"),
+                 "How much of a captured password is saved (Bruce Evil Wifi Settings).",
+                 {}},
+                {"< Back to Wi-Fi", "Return to the Wi-Fi menu.", {}},
+            };
+        case EvilPortalPage::PasswordMode:
+            return {
+                {"Save 'password' (full)",
+                 "Store the whole captured password (Bruce: Save 'password').",
+                 {}},
+                {"Save 'p******d' (first/last)",
+                 "Store only the first and last character.",
+                 {}},
+                {"Save '*hidden*'",
+                 "Store nothing for the password.",
+                 {}},
+                {"Save length (length only)",
+                 "Store only the length, e.g. 8 chars.",
+                 {}},
+                {"< Back", "Return to the Evil Portal menu.", {}},
+            };
+        case EvilPortalPage::Clone:
+            return build_evil_portal_clone_actions();
+        case EvilPortalPage::None:
+            return {};
+    }
+    return {};
+}
+
 std::vector<ToolAction> build_wifi_actions() {
-    std::vector<ToolAction> acts = build_wifi_static_actions();
-    const std::vector<ToolAction> portal = build_portal_rows();
-    acts.insert(acts.end(), portal.begin(), portal.end());
-    return acts;
+    // The Evil Portal submenu replaces the whole Wi-Fi list while it is open.
+    if (evil_portal_page() != EvilPortalPage::None) {
+        return build_evil_portal_actions();
+    }
+    return build_wifi_static_actions();
 }
 
 } // namespace
@@ -1797,12 +2046,18 @@ void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio) {
 
 std::string take_navigation_error(int category_index) {
     const auto& catalog = mutable_catalog();
-    if (category_index < 0 || category_index >= static_cast<int>(catalog.size()) ||
-        std::string(catalog[static_cast<size_t>(category_index)].label) != "GPS") {
+    if (category_index < 0 || category_index >= static_cast<int>(catalog.size())) {
         return "";
     }
+    const std::string label = catalog[static_cast<size_t>(category_index)].label;
     std::string err;
-    err.swap(gps_state().error);
+    if (label == "GPS") {
+        err.swap(gps_state().error);
+    } else if (label == "Wi-Fi") {
+        // Password-mode save failures surface through menu_screen's existing
+        // pending_error -> "same list, selection kept" retry path.
+        err.swap(evil_portal_save_error());
+    }
     return err;
 }
 
@@ -1847,25 +2102,62 @@ bool on_navigation_action(int category_index, int item_index) {
     }
 
     if (label == "Wi-Fi") {
-        // Evil Portal clone rows sit after the fixed prefix; row layout mirrors
-        // build_portal_rows(): [scan][no-APs] / [scan][AP...] / [back][clone].
-        const int static_count = static_cast<int>(build_wifi_static_actions().size());
-        if (item_index < static_count) {
+        const auto& acts = catalog[static_cast<size_t>(category_index)].actions;
+        if (item_index < 0 || item_index >= static_cast<int>(acts.size())) {
             return false;
         }
-        const std::string dir = portal_dir();
-        const std::string selected = read_first_line(dir + "/selected");
-        if (selected.empty()) {
-            // The block's row 0 is the scan (runnable); rows >= 1 are targets.
-            const auto targets = read_lines(dir + "/targets");
-            const int target = item_index - static_count - 1;
-            if (target >= 0 && target < static_cast<int>(targets.size())) {
-                write_file(dir + "/selected", targets[static_cast<size_t>(target)]);
+        const std::string row = acts[static_cast<size_t>(item_index)].label;
+        switch (evil_portal_page()) {
+            case EvilPortalPage::None:
+                if (row == "Evil Portal >") evil_portal_page() = EvilPortalPage::Main;
+                return false;
+            case EvilPortalPage::Main:
+                if (row == "Clone an AP >") {
+                    evil_portal_page() = EvilPortalPage::Clone;
+                } else if (row.rfind("Password mode:", 0) == 0) {
+                    evil_portal_page() = EvilPortalPage::PasswordMode;
+                } else if (!row.empty() && row[0] == '<') {
+                    evil_portal_page() = EvilPortalPage::None;
+                    clear_portal_selection();
+                }
+                return false;
+            case EvilPortalPage::PasswordMode:
+                if (item_index >= 0 && item_index <= 3) {
+                    std::string error;
+                    if (save_evil_portal_mode(static_cast<EvilPortalMode>(item_index), error)) {
+                        evil_portal_save_error().clear();
+                        evil_portal_page() = EvilPortalPage::Main;
+                    } else {
+                        // Old config stays authoritative; menu_screen shows the
+                        // error and keeps this picker on screen for a retry.
+                        evil_portal_save_error() = error;
+                    }
+                } else if (!row.empty() && row[0] == '<') {
+                    evil_portal_page() = EvilPortalPage::Main;
+                }
+                return false;
+            case EvilPortalPage::Clone: {
+                const std::string dir = portal_dir();
+                if (!read_first_line(dir + "/selected").empty()) {
+                    if (!row.empty() && row[0] == '<') {
+                        clear_portal_selection(); // "< Back to AP list"
+                    }
+                    return false;
+                }
+                if (!row.empty() && row[0] == '<') {
+                    evil_portal_page() = EvilPortalPage::Main;
+                    return false;
+                }
+                // Row 0 is the scan action; rows >= 1 are the discovered APs.
+                const int target = item_index - 1;
+                const auto targets = read_lines(dir + "/targets");
+                if (target >= 0 && target < static_cast<int>(targets.size())) {
+                    write_file(dir + "/selected", targets[static_cast<size_t>(target)]);
+                }
+                return false;
             }
-        } else if (item_index == static_count) {
-            // "< Back to AP list".
-            std::remove((dir + "/selected").c_str());
         }
+        return false;
     }
 
     if (label == "System / Clock") {
@@ -1908,11 +2200,24 @@ bool on_category_back(int category_index) {
         return true;
     }
     if (label == "Wi-Fi") {
-        if (read_first_line(portal_dir() + "/selected").empty()) {
-            return false;
+        switch (evil_portal_page()) {
+            case EvilPortalPage::None:
+                return false; // ordinary Wi-Fi list: leave the category
+            case EvilPortalPage::PasswordMode:
+                evil_portal_page() = EvilPortalPage::Main;
+                return true;
+            case EvilPortalPage::Clone:
+                if (!read_first_line(portal_dir() + "/selected").empty()) {
+                    clear_selected(portal_dir());
+                    return true; // back to the AP list inside Clone
+                }
+                evil_portal_page() = EvilPortalPage::Main;
+                return true;
+            case EvilPortalPage::Main:
+                evil_portal_page() = EvilPortalPage::None;
+                clear_selected(portal_dir());
+                return true;
         }
-        clear_selected(portal_dir());
-        return true;
     }
     if (label == "System / Clock") {
         if (!tz_picker_open()) {

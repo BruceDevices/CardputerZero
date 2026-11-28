@@ -12,9 +12,10 @@
  *       -o /tmp/portal_check && /tmp/portal_check
  *
  * Checks the Bruce-parity web logic (route table, capture format, CSV files,
- * verify mode) with injected hooks, plus the clone-AP state machine in the
- * Wi-Fi menu (the part that silently breaks if the builder and
- * on_navigation_action disagree on row indexes).
+ * verify mode) with injected hooks, plus the Evil Portal submenu in the Wi-Fi
+ * menu: password-mode persistence (Bruce's evilWifiPasswordMode), the
+ * clone-AP drill-down and the navigation/back state machine (the part that
+ * silently breaks if the builder and on_navigation_action disagree on rows).
  */
 
 #include "evil_portal.h"
@@ -24,6 +25,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <dirent.h>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -489,6 +491,352 @@ void check_pwd_mode_labels() {
     assert(std::string(pwd_mode_label(PwdMode::Length)) == "Length only");
     assert(std::string(counter_label(false)) == "Victims");
     assert(std::string(counter_label(true)) == "Attempt");
+}
+
+// --- Evil Portal submenu (Wi-Fi > Evil Portal) -----------------------------
+
+int wifi_category_index() {
+    const auto& cat = model::tool_catalog();
+    for (size_t i = 0; i < cat.size(); ++i) {
+        if (std::string(cat[i].label) == "Wi-Fi") return static_cast<int>(i);
+    }
+    return -1;
+}
+
+int find_action(const model::ToolCategory& category, const std::string& label) {
+    for (size_t i = 0; i < category.actions.size(); ++i) {
+        if (label == category.actions[i].label) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+int find_action_prefix(const model::ToolCategory& category, const std::string& prefix) {
+    for (size_t i = 0; i < category.actions.size(); ++i) {
+        if (std::string(category.actions[i].label).rfind(prefix, 0) == 0) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+bool argv_has_pair(const std::vector<std::string>& argv, const std::string& flag,
+                   const std::string& value) {
+    for (size_t i = 0; i + 1 < argv.size(); ++i) {
+        if (argv[i] == flag && argv[i + 1] == value) return true;
+    }
+    return false;
+}
+
+std::string default_pwd_token(const model::ToolCategory& main) {
+    const int row = find_action(main, "Default (Google)");
+    assert(row >= 0);
+    for (size_t i = 0; i + 1 < main.actions[static_cast<size_t>(row)].argv.size(); ++i) {
+        if (main.actions[static_cast<size_t>(row)].argv[i] == "--pwd-mode") {
+            return main.actions[static_cast<size_t>(row)].argv[i + 1];
+        }
+    }
+    return "";
+}
+
+void write_text(const std::string& path, const std::string& body) {
+    std::ofstream out(path, std::ios::trunc);
+    out << body;
+}
+
+std::string saved_env(const char* name) {
+    const char* value = std::getenv(name);
+    return value ? value : "";
+}
+
+void restore_env(const char* name, const std::string& value) {
+    if (!value.empty()) {
+        ::setenv(name, value.c_str(), 1);
+    } else {
+        ::unsetenv(name);
+    }
+}
+
+void check_evil_portal_submenu(const std::string& home) {
+    const std::string conf = home + "/evil_portal.conf";
+    const std::string saved_conf = saved_env("BRUCE_EVIL_PORTAL_CONF");
+    const std::string saved_home = saved_env("HOME");
+    const std::string saved_sudo = saved_env("SUDO_USER");
+
+    ::unlink(conf.c_str());
+    ::setenv("BRUCE_EVIL_PORTAL_CONF", conf.c_str(), 1);
+    std::system("rm -rf /tmp/bruce-portal");
+
+    const int idx = wifi_category_index();
+    assert(idx >= 0);
+
+    // Wi-Fi normal list: one Evil Portal navigation row, no old portal rows.
+    {
+        const auto& wifi = wifi_category();
+        const int portal = find_action(wifi, "Evil Portal >");
+        assert(portal >= 0);
+        assert(wifi.actions[static_cast<size_t>(portal)].argv.empty());
+        for (const auto& a : wifi.actions) {
+            assert(std::string(a.label).rfind("Evil Portal:", 0) != 0);
+        }
+    }
+
+    // Enter the Evil Portal submenu.
+    {
+        const auto& wifi = wifi_category();
+        model::on_navigation_action(idx, find_action(wifi, "Evil Portal >"));
+        const auto& main = wifi_category();
+        assert(main.actions.size() == 6);
+        assert(std::string(main.actions[0].label) == "Default (Google)");
+        assert(std::string(main.actions[1].label) == "Router Update (verify pwd)");
+        assert(std::string(main.actions[2].label) == "Custom HTML");
+        assert(std::string(main.actions[3].label) == "Clone an AP >");
+        assert(std::string(main.actions[4].label).rfind("Password mode:", 0) == 0);
+        assert(std::string(main.actions[5].label) == "< Back to Wi-Fi");
+        assert(argv_has_pair(main.actions[0].argv, "--pwd-mode", "full"));
+        assert(argv_has_pair(main.actions[1].argv, "--pwd-mode", "full"));
+        assert(argv_has_pair(main.actions[2].argv, "--pwd-mode", "full"));
+        assert(main.actions[3].argv.empty());
+        assert(main.actions[4].argv.empty());
+        assert(main.actions[5].argv.empty());
+    }
+
+    // Password mode: all four values persist and re-drive the launch argv.
+    const char* tokens[] = {"full", "first_last", "hidden", "length"};
+    const char* labels[] = {"Full", "p******d", "*hidden*", "Length only"};
+    for (int mode = 0; mode < 4; ++mode) {
+        const auto& main = wifi_category();
+        const int pwd_row = find_action_prefix(main, "Password mode:");
+        assert(pwd_row >= 0);
+        model::on_navigation_action(idx, pwd_row);
+        const auto& picker = wifi_category();
+        assert(picker.actions.size() == 5);
+        assert(std::string(picker.actions[0].label) == "Save 'password' (full)");
+        assert(std::string(picker.actions[1].label) == "Save 'p******d' (first/last)");
+        assert(std::string(picker.actions[2].label) == "Save '*hidden*'");
+        assert(std::string(picker.actions[3].label) == "Save length (length only)");
+        assert(std::string(picker.actions[4].label) == "< Back");
+        model::on_navigation_action(idx, mode);
+        const auto& after = wifi_category();
+        assert(after.actions.size() == 6);
+        assert(std::string(after.actions[static_cast<size_t>(pwd_row)].label)
+                   .find(labels[mode]) != std::string::npos);
+        assert(argv_has_pair(after.actions[0].argv, "--pwd-mode", tokens[mode]));
+        assert(argv_has_pair(after.actions[1].argv, "--pwd-mode", tokens[mode]));
+        assert(argv_has_pair(after.actions[2].argv, "--pwd-mode", tokens[mode]));
+        const std::string expected =
+            "# Bruce CardputerZero Evil Portal settings\nevilWifiPasswordMode=" +
+            std::to_string(mode) + "\n";
+        assert(slurp(conf) == expected);
+    }
+
+    // Reload + strict parse order (first valid wins; invalid/unknown ignored).
+    struct ParseCase {
+        const char* body;
+        const char* token;
+    };
+    const ParseCase parse_cases[] = {
+        {"evilWifiPasswordMode=2\n", "hidden"},
+        {"evilWifiPasswordMode=9\nevilWifiPasswordMode=2\n", "hidden"},
+        {"evilWifiPasswordMode=2\nevilWifiPasswordMode=3\n", "hidden"},
+        {"foo=bar\nevilWifiPasswordMode=1\n", "first_last"},
+        {"# comment\n\nevilWifiPasswordMode=0\n", "full"},
+        {"evilWifiPasswordMode=2junk\n", "full"},
+        {"evilWifiPasswordMode=\n", "full"},
+        {"evilWifiPasswordMode=-1\n", "full"},
+        {"evilWifiPasswordMode=999999999999999999999\n", "full"},
+    };
+    for (const ParseCase& c : parse_cases) {
+        write_text(conf, c.body);
+        assert(default_pwd_token(wifi_category()) == c.token);
+    }
+    write_text(conf, "evilWifiPasswordMode=2\n");
+    {
+        const auto& main = wifi_category();
+        const int pwd_row = find_action_prefix(main, "Password mode:");
+        assert(pwd_row >= 0);
+        assert(std::string(main.actions[static_cast<size_t>(pwd_row)].label)
+                   .find("*hidden*") != std::string::npos);
+    }
+
+    // Save failure: missing override parent (this also runs as root).
+    {
+        const std::string bad = home + "/missing-dir/evil_portal.conf";
+        ::unlink(bad.c_str());
+        ::setenv("BRUCE_EVIL_PORTAL_CONF", bad.c_str(), 1);
+        const auto& main = wifi_category(); // load fails -> Full
+        assert(default_pwd_token(main) == "full");
+        model::on_navigation_action(idx, find_action_prefix(main, "Password mode:"));
+        assert(wifi_category().actions.size() == 5);
+        model::on_navigation_action(idx, 2); // Hidden, save must fail
+        assert(!model::take_navigation_error(idx).empty());
+        assert(wifi_category().actions.size() == 5); // still the picker
+        struct stat st {};
+        assert(::stat(bad.c_str(), &st) != 0);
+        model::on_navigation_action(idx, 4); // < Back
+        const auto& after = wifi_category();
+        assert(after.actions.size() == 6);
+        assert(default_pwd_token(after) == "full");
+        ::setenv("BRUCE_EVIL_PORTAL_CONF", conf.c_str(), 1);
+        wifi_category();
+    }
+
+    // Save failure: read-only directory with an existing value (non-root only).
+    if (::geteuid() != 0) {
+        const std::string ro = home + "/ro-conf";
+        std::system(("rm -rf " + ro).c_str());
+        assert(::mkdir(ro.c_str(), 0755) == 0);
+        const std::string ro_conf = ro + "/evil_portal.conf";
+        write_text(ro_conf, "evilWifiPasswordMode=2\n");
+        assert(::chmod(ro.c_str(), 0555) == 0);
+        ::setenv("BRUCE_EVIL_PORTAL_CONF", ro_conf.c_str(), 1);
+        const auto& main = wifi_category();
+        assert(default_pwd_token(main) == "hidden");
+        model::on_navigation_action(idx, find_action_prefix(main, "Password mode:"));
+        model::on_navigation_action(idx, 3); // Length -> save fails
+        assert(!model::take_navigation_error(idx).empty());
+        assert(wifi_category().actions.size() == 5);
+        assert(slurp(ro_conf) == "evilWifiPasswordMode=2\n");
+        model::on_navigation_action(idx, 4); // back
+        assert(default_pwd_token(wifi_category()) == "hidden");
+        assert(::chmod(ro.c_str(), 0755) == 0);
+        std::system(("rm -rf " + ro).c_str());
+        ::setenv("BRUCE_EVIL_PORTAL_CONF", conf.c_str(), 1);
+        wifi_category();
+    }
+
+    // Save failure: rename onto an existing directory; temp file must be removed.
+    {
+        const std::string dest = home + "/confdir";
+        std::system(("rm -rf " + dest).c_str());
+        assert(::mkdir(dest.c_str(), 0755) == 0);
+        ::setenv("BRUCE_EVIL_PORTAL_CONF", dest.c_str(), 1);
+        const auto& main = wifi_category(); // load of a directory -> Full
+        assert(default_pwd_token(main) == "full");
+        model::on_navigation_action(idx, find_action_prefix(main, "Password mode:"));
+        model::on_navigation_action(idx, 2);
+        assert(!model::take_navigation_error(idx).empty());
+        assert(wifi_category().actions.size() == 5);
+        DIR* d = ::opendir(home.c_str());
+        assert(d != nullptr);
+        bool temp_left = false;
+        while (dirent* entry = ::readdir(d)) {
+            const std::string name = entry->d_name;
+            if (name.rfind(".evil_portal.conf.", 0) == 0) temp_left = true;
+        }
+        ::closedir(d);
+        assert(!temp_left);
+        model::on_navigation_action(idx, 4);
+        assert(default_pwd_token(wifi_category()) == "full");
+        std::system(("rm -rf " + dest).c_str());
+        ::setenv("BRUCE_EVIL_PORTAL_CONF", conf.c_str(), 1);
+        wifi_category();
+    }
+
+    // Default path (~/.bruce/evil_portal.conf) with HOME isolation: never touch
+    // the invoking user's real config.
+    {
+        const std::string fake_home = home + "/fake-home";
+        std::system(("rm -rf " + fake_home).c_str());
+        assert(::mkdir(fake_home.c_str(), 0755) == 0);
+        ::unsetenv("SUDO_USER");
+        ::unsetenv("BRUCE_EVIL_PORTAL_CONF");
+        ::setenv("HOME", fake_home.c_str(), 1);
+        const auto& main = wifi_category();
+        assert(default_pwd_token(main) == "full");
+        model::on_navigation_action(idx, find_action_prefix(main, "Password mode:"));
+        model::on_navigation_action(idx, 2); // Hidden; save succeeds -> Main
+        const std::string fake_conf = fake_home + "/.bruce/evil_portal.conf";
+        assert(slurp(fake_conf) ==
+               "# Bruce CardputerZero Evil Portal settings\nevilWifiPasswordMode=2\n");
+        assert(default_pwd_token(wifi_category()) == "hidden");
+        restore_env("SUDO_USER", saved_sudo);
+        restore_env("HOME", saved_home);
+        ::setenv("BRUCE_EVIL_PORTAL_CONF", conf.c_str(), 1);
+        wifi_category();
+        std::system(("rm -rf " + fake_home).c_str());
+    }
+
+    // Clone flow inside the Evil Portal submenu (current mode: Hidden).
+    write_text(conf, "evilWifiPasswordMode=2\n");
+    ::setenv("BRUCE_EVIL_PORTAL_CONF", conf.c_str(), 1);
+    {
+        const auto& main = wifi_category();
+        assert(std::string(main.actions[0].label) == "Default (Google)");
+        const int clone = find_action(main, "Clone an AP >");
+        assert(clone >= 0);
+        model::on_navigation_action(idx, clone);
+        const auto& clone_view = wifi_category();
+        assert(clone_view.actions.size() == 3);
+        assert(std::string(clone_view.actions[0].label) == "Scan nearby APs");
+        assert(clone_view.actions[0].needs_root);
+        assert(std::string(clone_view.actions[1].label) == "(no APs yet - run the scan above)");
+        assert(std::string(clone_view.actions[2].label) == "< Back to Evil Portal");
+        ::mkdir("/tmp/bruce-portal", 0755);
+        write_text("/tmp/bruce-portal/targets", "6\tHomeNet\n11\tCafe Guest\n");
+        const auto& targets = wifi_category();
+        assert(targets.actions.size() == 4);
+        assert(std::string(targets.actions[1].label).find("HomeNet") != std::string::npos);
+        assert(std::string(targets.actions[2].label).find("Cafe Guest") != std::string::npos);
+        assert(targets.actions[1].argv.empty() && targets.actions[2].argv.empty());
+
+        // Row path: select a target, check the clone argv, then "< Back to AP list".
+        model::on_navigation_action(idx, 2); // Cafe Guest
+        const auto& selected = wifi_category();
+        assert(selected.actions.size() == 2);
+        assert(std::string(selected.actions[0].label) == "< Back to AP list");
+        assert(selected.actions[0].argv.empty());
+        const auto& run = selected.actions[1];
+        assert(run.argv.size() == 7);
+        assert(run.argv[1] == "--evil-portal" && run.argv[2] == "clone");
+        assert(run.argv[3] == "--pwd-mode" && run.argv[4] == "hidden");
+        assert(run.argv[5] == "Cafe Guest" && run.argv[6] == "11");
+        assert(slurp("/tmp/bruce-portal/selected").find("Cafe Guest") != std::string::npos);
+        model::on_navigation_action(idx, 0); // "< Back to AP list"
+        assert(wifi_category().actions.size() == 4);
+        assert(slurp("/tmp/bruce-portal/selected").empty());
+
+        // Row path: the AP list's "< Back to Evil Portal".
+        model::on_navigation_action(idx, 3);
+        const auto& main2 = wifi_category();
+        assert(main2.actions.size() == 6);
+
+        // Hardware Back through both Clone states: selected -> AP list -> Main.
+        model::on_navigation_action(idx, find_action(main2, "Clone an AP >"));
+        assert(wifi_category().actions.size() == 4);
+        model::on_navigation_action(idx, 2); // Cafe Guest again
+        assert(wifi_category().actions.size() == 2);
+        assert(slurp("/tmp/bruce-portal/selected").find("Cafe Guest") != std::string::npos);
+        assert(model::on_category_back(idx)); // selected -> AP list
+        assert(wifi_category().actions.size() == 4);
+        assert(slurp("/tmp/bruce-portal/selected").empty());
+        assert(model::on_category_back(idx)); // AP list -> Main
+        const auto& main3 = wifi_category();
+        assert(main3.actions.size() == 6);
+
+        // Row path: Main's "< Back to Wi-Fi" closes the submenu.
+        model::on_navigation_action(idx, find_action(main3, "< Back to Wi-Fi"));
+        const auto& wifi = wifi_category();
+        assert(find_action(wifi, "Evil Portal >") >= 0);
+        assert(!model::on_category_back(idx)); // ordinary Wi-Fi list -> leave
+    }
+
+    // Hardware Back inside the picker closes one level at a time.
+    {
+        const auto& wifi = wifi_category();
+        model::on_navigation_action(idx, find_action(wifi, "Evil Portal >"));
+        const auto& main = wifi_category();
+        model::on_navigation_action(idx, find_action_prefix(main, "Password mode:"));
+        assert(wifi_category().actions.size() == 5);
+        assert(model::on_category_back(idx)); // PasswordMode -> Main
+        assert(wifi_category().actions.size() == 6);
+        assert(model::on_category_back(idx)); // Main -> None
+        assert(find_action(wifi_category(), "Evil Portal >") >= 0);
+    }
+
+    // Cleanup.
+    ::unlink(conf.c_str());
+    std::system("rm -rf /tmp/bruce-portal");
+    restore_env("BRUCE_EVIL_PORTAL_CONF", saved_conf);
+    restore_env("SUDO_USER", saved_sudo);
+    restore_env("HOME", saved_home);
 }
 
 } // namespace
@@ -1600,18 +1948,16 @@ int main() {
     check_pwd_mode_cli_error();
     check_pwd_mode_labels();
 
-    // --- Wi-Fi menu: Evil Portal rows + clone-AP drill-down -----------------
+    // --- Wi-Fi menu: Evil Portal submenu + unchanged scan/rogue rows ---------
     std::system("rm -rf /tmp/bruce-portal");
     {
         const auto& wifi = wifi_category();
-        const size_t static_count = wifi.actions.size() - 2; // scan + "(no APs yet)"
         // The catalog builds the scan command from wifi_interface() (real NIC;
         // "wlan0" on the device, first phy80211 NIC otherwise) - compute the
         // expected interface the same way instead of hardcoding "wlan0", so
         // this passes on hosts whose Wi-Fi NIC is not wlan0.
         const std::string scan_cmd = "iw dev " + model::wifi_interface() + " scan";
-        // The static fixes are present.
-        bool have_scan_root = false, have_driver = false, have_portal = false;
+        bool have_scan_root = false, have_driver = false;
         for (const auto& a : wifi.actions) {
             const std::string sh = a.argv.size() >= 3 && a.argv[0] == "sh" ? a.argv[2] : "";
             if (std::string(a.label) == "Scan nearby networks") {
@@ -1621,13 +1967,9 @@ int main() {
                 have_driver = sh.find("driver=nl80211") != std::string::npos &&
                               sh.find("dnsmasq") != std::string::npos;
             }
-            if (std::string(a.label).rfind("Evil Portal:", 0) == 0) {
-                have_portal = a.argv.size() >= 2 && a.argv[0].find("--evil-portal") == std::string::npos;
-            }
         }
         assert(have_scan_root);
         assert(have_driver);
-        assert(have_portal);
 
         // Root escalation: the scan row (and every other root-needing shell
         // row) must launch through the sudoers-authorized binary's --root-sh
@@ -1646,63 +1988,8 @@ int main() {
                 break;
             }
         }
-        // Unscanned state: scan row runnable, "(no APs yet)" runnable.
-        assert(wifi.actions[static_count].argv.size() == 3); // sh -c <script>
-        assert(wifi.actions[static_count + 1].argv.size() == 3);
     }
-
-    // Scanned state: scan + one navigation row per AP.
-    {
-        ::mkdir("/tmp/bruce-portal", 0755);
-        std::ofstream o("/tmp/bruce-portal/targets");
-        o << "6\tHomeNet\n11\tCafe Guest\n";
-    }
-    int wifi_idx = -1;
-    {
-        const auto& cat = model::tool_catalog();
-        for (size_t i = 0; i < cat.size(); ++i) {
-            if (std::string(cat[i].label) == "Wi-Fi") wifi_idx = static_cast<int>(i);
-        }
-    }
-    assert(wifi_idx >= 0);
-    const size_t wifi_static =
-        wifi_category().actions.size() - 3; // fixed rows (same in every state)
-    {
-        const auto& wifi = wifi_category();
-        assert(wifi.actions[wifi_static + 1].argv.empty()); // Clone "HomeNet"
-        assert(std::string(wifi.actions[wifi_static + 1].label).find("HomeNet") != std::string::npos);
-        assert(std::string(wifi.actions[wifi_static + 2].label).find("Cafe Guest") !=
-               std::string::npos);
-
-        // Tap the 2nd AP row -> selected, re-entry offers back + clone run.
-        model::on_navigation_action(wifi_idx, static_cast<int>(wifi_static) + 2);
-    }
-    {
-        const auto& wifi = wifi_category();
-        assert(wifi.actions.size() == wifi_static + 2);
-        assert(wifi.actions[wifi_static].argv.empty()); // "< Back to AP list"
-        const auto& run = wifi.actions[wifi_static + 1];
-        assert(run.argv.size() == 5);
-        assert(run.argv[1] == "--evil-portal" && run.argv[2] == "clone" &&
-               run.argv[3] == "Cafe Guest" && run.argv[4] == "11");
-
-        // Back row clears the selection; target rows come back (like Nmap).
-        model::on_navigation_action(wifi_idx, static_cast<int>(wifi_static));
-    }
-    {
-        const auto& wifi = wifi_category();
-        assert(wifi.actions.size() == wifi_static + 3); // scan + 2 target rows
-        assert(wifi.actions[wifi_static + 1].argv.empty());
-        assert(wifi.actions[wifi_static + 2].argv.empty());
-    }
-    // Back key: on the AP list there is nothing to undo (leave Wi-Fi); in the
-    // clone view it acts like the "< Back to AP list" row.
-    assert(!model::on_category_back(wifi_idx));
-    model::on_navigation_action(wifi_idx, static_cast<int>(wifi_static) + 1);
-    assert(wifi_category().actions.size() == wifi_static + 2);   // clone view
-    assert(model::on_category_back(wifi_idx));
-    assert(wifi_category().actions.size() == wifi_static + 3);   // AP list again
-    assert(!model::on_category_back(wifi_idx));
+    check_evil_portal_submenu(home);
 
     // --- --root-sh: the sudo'd re-exec target runs the script verbatim ------
     {
