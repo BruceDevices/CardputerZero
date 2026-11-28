@@ -457,6 +457,9 @@ target_compile_definitions(${PROJECT_NAME}_platform
         APP_ST25R_SPIDEV="${APP_ST25R_SPIDEV}"
         APP_DRM_DEVICE="${APP_DRM_DEVICE}"
         APP_DRM_CONNECTOR_ID=${APP_DRM_CONNECTOR_ID}
+    PRIVATE
+        # appRelease= in the WiGLE CSV pre-header (platform/wardrive.cpp).
+        APP_VERSION="${PROJECT_VERSION}"
 )
 
 find_package(Threads REQUIRED)

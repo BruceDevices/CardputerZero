@@ -6,11 +6,12 @@
  * Standalone self-check for the tool catalog data. Not part of the CMake
  * build (the model lib globs src/model only). Run manually:
  *
- *   g++ -std=c++17 -Isrc/model src/model/tool_catalog.cpp \
+ *   g++ -std=c++17 -Isrc/model src/model/tool_catalog.cpp src/model/gps_config.cpp \
  *       tests/tool_catalog_selfcheck.cpp -o /tmp/catalog_check && /tmp/catalog_check
  */
 
 #include "tool_catalog.h"
+#include "gps_config.h"
 
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -18,6 +19,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -175,135 +177,225 @@ int main() {
         }
     }
 
-    // GPS rows: gpspipe guard, LoRa+GNSS Cap port/baud, and the in-app installer
-    // carrying gpsd + gpsd-clients.
+    // GPS: Bruce's GpsMenu tree, no gpsd anywhere.
     {
-        const model::ToolCategory* gps = nullptr;
+        namespace gc = model::gps_config;
+        const std::string conf = "/tmp/bruce_gps_catalog_" + std::to_string(::getpid()) + ".conf";
+        std::remove(conf.c_str());
+        ::setenv("BRUCE_GPS_CONF", conf.c_str(), 1);
+        ::unsetenv("GPS_UART");
+        ::unsetenv("GPS_BAUD");
+
+        int gps_idx = -1;
         const model::ToolAction* install = nullptr;
-        for (const auto& category : catalog) {
-            if (std::string(category.label) == "GPS") gps = &category;
-            for (const auto& action : category.actions) {
+        for (size_t c = 0; c < catalog.size(); ++c) {
+            if (std::string(catalog[c].label) == "GPS") gps_idx = static_cast<int>(c);
+            for (const auto& action : catalog[c].actions) {
                 if (std::string(action.label) == "Install optional tools (apt)") install = &action;
+                for (const auto& word : action.argv) {
+                    assert(word.find("gpspipe") == std::string::npos);
+                    assert(word.find("gpsd") == std::string::npos);
+                }
+                assert(std::string(action.description).find("gpsd") == std::string::npos);
             }
         }
-        assert(gps && install);
+        assert(gps_idx >= 0 && install);
         assert(install->needs_root && install->argv.size() == 3);
-        assert(install->argv[2].find(" gpsd gpsd-clients ") != std::string::npos);
+        assert(install->argv[2].find("gpsd") == std::string::npos);
+        const auto& gps = catalog[static_cast<size_t>(gps_idx)];
+        assert(std::string(gps.description) == "Wardriving, GPS Tracker and GPS config");
 
-        const model::ToolAction* fix = nullptr;
-        const model::ToolAction* raw = nullptr;
-        for (const auto& action : gps->actions) {
-            const std::string label(action.label);
-            if (label == "GPS fix (gpspipe)") fix = &action;
-            if (label.rfind("Raw NMEA", 0) == 0) raw = &action;
-        }
-        assert(fix && raw);
-
-        // Bruce firmware's "GPS Tracker" opens GpsAppScreen (in-app serial
-        // reader); it comes after Wardriving, as in the firmware's GPS menu.
-        size_t wardrive_index = gps->actions.size(), tracker_index = gps->actions.size();
-        for (size_t i = 0; i < gps->actions.size(); ++i) {
-            const std::string label(gps->actions[i].label);
-            if (label.rfind("Wardriving", 0) == 0) wardrive_index = i;
-            if (label == "GPS Tracker") tracker_index = i;
-        }
-        assert(tracker_index < gps->actions.size() && wardrive_index < tracker_index);
-        const model::ToolAction& tracker = gps->actions[tracker_index];
-        assert(tracker.gps_app == model::GpsApp::Tracker);
-        assert(!tracker.needs_root && !model::action_needs_root(tracker)); // user-owned GPX files
-        assert(tracker.argv.size() == 3 && tracker.argv[0] == "sh");
-        for (const auto& action : gps->actions) {
-            if (&action != &tracker) assert(action.gps_app == model::GpsApp::None);
-        }
-
-        assert(fix->argv.size() == 3 && fix->argv[0] == "sh");
-        assert(fix->argv[2].rfind("command -v gpspipe ", 0) == 0); // guard runs first
-        assert(fix->argv[2].find("sudo apt install gpsd gpsd-clients") != std::string::npos);
-        assert(fix->argv[2].find("\"Install optional tools (apt)\"") != std::string::npos);
-        assert(fix->argv[2].find("-s 115200 /dev/serial0") != std::string::npos);
-        assert(raw->argv.size() == 3 && raw->argv[0] == "sh");
-        assert(raw->argv[2].find("${GPS_UART:-/dev/serial0}") != std::string::npos);
-        assert(raw->argv[2].find("115200") != std::string::npos);
-        assert(raw->argv[2].find("ttyUSB0 9600") == std::string::npos);
-
-        // Run the scripts for real where nothing GPS-related exists: an empty
-        // PATH hides gpspipe (command/echo are shell builtins), and a bogus
-        // GPS_UART exercises the missing-device branch.
-        auto run_script = [](const std::string& env, const std::string& script, int& rc) {
-            const std::string path = "/tmp/bruce_gps_selfcheck_" + std::to_string(::getpid()) + ".sh";
-            FILE* f = std::fopen(path.c_str(), "w");
-            assert(f);
-            std::fputs(script.c_str(), f);
-            std::fclose(f);
-            FILE* p = ::popen((env + " /bin/sh " + path + " 2>&1").c_str(), "r");
-            assert(p);
-            std::string out;
-            char buf[512];
-            size_t n;
-            while ((n = std::fread(buf, 1, sizeof(buf), p)) > 0) out.append(buf, n);
-            const int st = ::pclose(p);
-            rc = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
-            std::remove(path.c_str());
+        auto labels = [&]() {
+            model::refresh_dynamic_categories(gps_idx);
+            std::vector<std::string> out;
+            for (const auto& a : model::tool_catalog()[static_cast<size_t>(gps_idx)].actions) out.push_back(a.label);
             return out;
         };
-        int rc = 0;
-        std::string out = run_script("PATH=/nonexistent", fix->argv[2], rc);
-        assert(rc == 127);
-        assert(out.find("gpspipe is not installed - run System / Clock > \"Install optional tools (apt)\" "
-                        "or: sudo apt install gpsd gpsd-clients") != std::string::npos);
-        assert(out.find("timeout:") == std::string::npos);
-
-        out = run_script("GPS_UART=/nonexistent/gps0", raw->argv[2], rc);
-        assert(rc == 1);
-        assert(out.find("/nonexistent/gps0 not found") != std::string::npos);
-
-        // Exit-status handling with mock tools first on PATH: a normal timeout
-        // (coreutils 124, BusyBox 143) is success; any other failure prints the
-        // diagnostic AND keeps the original status.
-        const std::string mock = "/tmp/bruce_gps_mock_" + std::to_string(::getpid());
-        assert(::mkdir(mock.c_str(), 0700) == 0);
-        auto write_tool = [&](const char* name, const std::string& body) {
-            const std::string p = mock + "/" + name;
-            FILE* f = std::fopen(p.c_str(), "w");
-            assert(f);
-            std::fprintf(f, "#!/bin/sh\n%s\n", body.c_str());
-            std::fclose(f);
-            assert(::chmod(p.c_str(), 0755) == 0);
+        auto row = [&](size_t i) -> const model::ToolAction& {
+            return model::tool_catalog()[static_cast<size_t>(gps_idx)].actions[i];
         };
-        const std::string env = "PATH=" + mock + ":/usr/bin:/bin";
-        write_tool("gpspipe", "exit 42");
-        write_tool("stty", "exit 0");
+        auto read_conf = [&]() {
+            std::string text;
+            if (FILE* f = std::fopen(conf.c_str(), "r")) {
+                char buf[256];
+                size_t n;
+                while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+                std::fclose(f);
+            }
+            return text;
+        };
+        using V = std::vector<std::string>;
 
-        write_tool("timeout", "shift; \"$@\""); // pass-through: gpspipe's 42 propagates
-        out = run_script(env, fix->argv[2], rc);
-        assert(rc == 42);
-        assert(out.find("gpspipe failed (status 42)") != std::string::npos);
-        assert(out.find("sudo gpsd -n -s 115200 /dev/serial0") != std::string::npos);
+        // Root (GpsMenu::optionsMenu): header follows the configured baud.
+        assert(labels() == (V{"Wardriving", "GPS Tracker", "Config", "Main Menu"}));
+        assert(model::category_header(gps_idx) == "GPS (9600 bps)"); // Bruce default
+        gc::set_board_default(gc::board_default(/*cap_lora=*/true));
+        assert(model::category_header(gps_idx) == "GPS (115200 bps)");
+        assert(model::category_header(0) == catalog[0].label);
+        assert(row(1).gps_app == model::GpsApp::Tracker);
+        assert(!row(1).needs_root && !model::action_needs_root(row(1))); // user-owned GPX files
+        assert(row(0).argv.empty() && row(2).argv.empty() && row(3).argv.empty());
+        assert(!model::on_category_back(gps_idx));       // root: Back leaves the category
+        assert(model::on_navigation_action(gps_idx, 3)); // "Main Menu" leaves too
+        assert(labels()[0] == "Wardriving");
 
-        for (const char* normal : {"exit 124", "exit 143", "exit 0"}) {
-            write_tool("timeout", normal);
-            out = run_script(env, fix->argv[2], rc);
-            assert(rc == 0);
-            assert(out.find("gpspipe failed") == std::string::npos);
-            out = run_script(env + " GPS_UART=/dev/null", raw->argv[2], rc);
-            assert(rc == 0);
-            assert(out.find("read failed") == std::string::npos);
+        // Wardriving submenu -> Bruce's Wardriving on GpsAppScreen: the root
+        // child `--wardrive <mode> --ui` with the configured port/baud, the
+        // app user's home (never the root child's own $HOME) and the Wi-Fi
+        // interface in argv.
+        assert(!model::on_navigation_action(gps_idx, 0));
+        assert(model::category_header(gps_idx) == "Wardriving");
+        assert(labels() == (V{"Scan WiFi Networks", "Scan BLE Devices", "Scan Both", "Back"}));
+        const char* modes[] = {"wifi", "ble", "both"};
+        const std::string home_env = std::getenv("HOME") ? std::getenv("HOME") : "";
+        for (size_t i = 0; i < 3; ++i) {
+            const auto& a = row(i);
+            assert(a.argv.size() == 12 && a.argv[1] == "--wardrive" && a.argv[2] == modes[i]);
+            assert(a.argv[3] == "--ui");
+            assert(a.argv[4] == "--port" && a.argv[5] == "/dev/serial0");
+            assert(a.argv[6] == "--baud" && a.argv[7] == "115200");
+            assert(a.argv[8] == "--home" && !a.argv[9].empty());
+            assert(home_env.empty() || a.argv[9] == home_env);
+            assert(a.argv[10] == "--iface" && a.argv[11] == model::wifi_interface());
+            assert(a.needs_root && model::action_needs_root(a) == (::geteuid() != 0));
+            assert(a.gps_app == model::GpsApp::Wardriving);
         }
+        {
+            // HOME unset: the passwd entry of the app user, not "".
+            const std::string saved = home_env;
+            ::unsetenv("HOME");
+            labels();
+            assert(!row(0).argv[9].empty());
+            if (!saved.empty()) ::setenv("HOME", saved.c_str(), 1);
+            labels();
+        }
+        ::setenv("GPS_UART", "/dev/ttyUSB7", 1); // env override wins over the config
+        labels();
+        assert(row(0).argv[5] == "/dev/ttyUSB7");
+        ::unsetenv("GPS_UART");
+        assert(model::on_category_back(gps_idx)); // Back key -> GPS menu
+        assert(labels()[0] == "Wardriving");
+        model::on_navigation_action(gps_idx, 0);
+        labels();
+        model::on_navigation_action(gps_idx, 3); // "Back" row
+        assert(labels()[3] == "Main Menu");
 
-        write_tool("timeout", "exit 1"); // cat failed
-        out = run_script(env + " GPS_UART=/dev/null", raw->argv[2], rc);
-        assert(rc == 1);
-        assert(out.find("read failed on /dev/null (status 1)") != std::string::npos);
-        assert(out.find("(no $G") == std::string::npos); // stops, no trailing echo
+        // Config > Baudrate: Bruce's five values, the current one marked; a
+        // pick is saved at once.
+        model::on_navigation_action(gps_idx, 2);
+        assert(model::category_header(gps_idx) == "GPS Config");
+        assert(labels() == (V{"Baudrate", "GPS Port", "Back"}));
+        model::on_navigation_action(gps_idx, 0);
+        assert(model::category_header(gps_idx) == "Baudrate");
+        assert(labels() == (V{"9600 bps", "19200 bps", "38400 bps", "57600 bps", "115200 bps  *"}));
+        assert(model::preferred_selection(gps_idx) == 4);
+        assert(model::on_category_back(gps_idx)); // Back -> Config
+        assert(labels()[0] == "Baudrate");
+        model::on_navigation_action(gps_idx, 0);
+        labels();
+        assert(!model::on_navigation_action(gps_idx, 0)); // 9600
+        assert(read_conf().find("gpsBaudrate=9600\n") != std::string::npos);
+        assert(model::category_header(gps_idx) == "GPS (9600 bps)"); // back on the GPS menu
+        assert(labels()[0] == "Wardriving");
+        model::on_navigation_action(gps_idx, 0);
+        assert(row((labels(), 0)).argv[7] == "9600");
+        model::on_category_back(gps_idx);
 
-        write_tool("stty", "exit 3");
-        out = run_script(env + " GPS_UART=/dev/null", raw->argv[2], rc);
-        assert(rc == 3);
-        assert(out.find("cannot configure /dev/null (status 3)") != std::string::npos);
-        assert(out.find("reading /dev/null") == std::string::npos);
+        // Config > GPS Port: "Port = ...", "Save Config" disabled until changed.
+        model::refresh_gps_category({"/dev/ttyACM0", "/dev/serial/by-id/usb-u-blox_GNSS-if00"});
+        model::on_navigation_action(gps_idx, 2);
+        labels();
+        model::on_navigation_action(gps_idx, 1);
+        assert(model::category_header(gps_idx) == "GPS Port");
+        assert(labels() == (V{"Port = /dev/serial0", "Save Config", "Main Menu"}));
+        assert(row(1).dimmed && !row(0).dimmed);
+        assert(!model::on_navigation_action(gps_idx, 1)); // disabled: nothing happens
+        assert(labels()[1] == "Save Config");
+        model::on_navigation_action(gps_idx, 0); // the picker
+        assert(model::category_header(gps_idx) == "Select GPS Port");
+        assert(labels() == (V{"Auto", "/dev/ttyACM0", "/dev/serial/by-id/usb-u-blox_GNSS-if00",
+                              "/dev/serial0 (not present)"}));
+        assert(model::preferred_selection(gps_idx) == 3);
+        model::on_navigation_action(gps_idx, 0); // Auto
+        assert(labels() == (V{"Port = Auto", "Save Config", "Main Menu"}));
+        assert(!row(1).dimmed);
+        assert(model::on_category_back(gps_idx)); // Back discards -> Config
+        model::on_navigation_action(gps_idx, 1);
+        assert(labels()[0] == "Port = /dev/serial0"); // nothing was saved
+        model::on_navigation_action(gps_idx, 0);
+        labels();
+        model::on_navigation_action(gps_idx, 0); // Auto again
+        labels();
+        assert(model::on_navigation_action(gps_idx, 2)); // "Main Menu": leave, discard
+        assert(read_conf().find("gpsPort=/dev/serial0\n") != std::string::npos);
+        assert(labels()[0] == "Wardriving");
+        model::on_navigation_action(gps_idx, 2);
+        labels();
+        model::on_navigation_action(gps_idx, 1);
+        labels();
+        model::on_navigation_action(gps_idx, 0);
+        labels();
+        model::on_navigation_action(gps_idx, 1); // /dev/ttyACM0
+        assert(labels()[0] == "Port = /dev/ttyACM0");
+        assert(!model::on_navigation_action(gps_idx, 1)); // Save Config
+        assert(read_conf() == "# Bruce CardputerZero GPS settings (GPS > Config)\n"
+                              "gpsBaudrate=9600\ngpsPort=/dev/ttyACM0\n");
+        assert(labels()[0] == "Wardriving"); // saved -> GPS menu
+        model::on_navigation_action(gps_idx, 0);
+        assert(row((labels(), 0)).argv[5] == "/dev/ttyACM0");
+        model::on_category_back(gps_idx);
+        labels();
 
-        for (const char* t : {"gpspipe", "stty", "timeout"}) std::remove((mock + "/" + t).c_str());
-        ::rmdir(mock.c_str());
+        // The header shows the baud the features will really use: $GPS_BAUD
+        // over the saved 9600 (the Baudrate list still marks the saved one).
+        ::setenv("GPS_BAUD", "57600", 1);
+        assert(model::category_header(gps_idx) == "GPS (57600 bps)");
+        ::unsetenv("GPS_BAUD");
+        assert(model::category_header(gps_idx) == "GPS (9600 bps)");
+        assert(model::take_navigation_error(gps_idx).empty());
+
+        // A save that fails (the config's parent is a regular file -> ENOTDIR,
+        // also as root): an error for the popup, the edited port kept and
+        // "Save Config" still enabled; fixing the path and saving again works.
+        const std::string bad = conf + "/gps.conf";
+        ::setenv("BRUCE_GPS_CONF", bad.c_str(), 1);
+        model::on_navigation_action(gps_idx, 2); // Config
+        labels();
+        model::on_navigation_action(gps_idx, 1); // GPS Port
+        assert(labels()[0] == "Port = /dev/serial0"); // unreadable config -> board default
+        model::on_navigation_action(gps_idx, 0);
+        labels();
+        model::on_navigation_action(gps_idx, 2); // the by-id node
+        assert(labels()[0] == "Port = /dev/serial/by-id/usb-u-blox_GNSS-if00");
+        assert(!model::on_navigation_action(gps_idx, 1)); // Save Config -> fails
+        const std::string err = model::take_navigation_error(gps_idx);
+        assert(err == "Cannot save GPS config: Not a directory");
+        assert(model::take_navigation_error(gps_idx).empty()); // taken once
+        assert(model::category_header(gps_idx) == "GPS Port");  // not sent back to the GPS menu
+        assert(labels()[0] == "Port = /dev/serial/by-id/usb-u-blox_GNSS-if00");
+        assert(!row(1).dimmed); // retry possible
+        ::setenv("BRUCE_GPS_CONF", conf.c_str(), 1);
+        assert(!model::on_navigation_action(gps_idx, 1)); // retry -> saved
+        assert(model::take_navigation_error(gps_idx).empty());
+        assert(read_conf().find("gpsPort=/dev/serial/by-id/usb-u-blox_GNSS-if00\n") != std::string::npos);
+        assert(labels()[0] == "Wardriving");
+        // Baudrate: a failed save stays on the list with the error.
+        ::setenv("BRUCE_GPS_CONF", bad.c_str(), 1);
+        model::on_navigation_action(gps_idx, 2);
+        labels();
+        model::on_navigation_action(gps_idx, 0);
+        labels();
+        assert(!model::on_navigation_action(gps_idx, 1)); // 19200
+        assert(model::take_navigation_error(gps_idx).rfind("Cannot save GPS config: ", 0) == 0);
+        assert(model::category_header(gps_idx) == "Baudrate");
+        ::setenv("BRUCE_GPS_CONF", conf.c_str(), 1);
+        assert(read_conf().find("gpsBaudrate=9600\n") != std::string::npos); // unchanged
+        model::on_category_back(gps_idx);
+        model::on_category_back(gps_idx);
+        labels();
+
+        std::remove(conf.c_str());
+        ::unsetenv("BRUCE_GPS_CONF");
     }
 
     std::printf("tool_catalog self-check passed: %zu categories\n", catalog.size());

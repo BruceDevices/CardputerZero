@@ -8,6 +8,17 @@ CardputerZero. No prior CMake knowledge needed — copy/paste the commands.
 > device, and install it with `apt`. `apt` also pulls in the security tools the
 > app launches (curl, netcat, smbclient, iw, bluez, rfkill, …) automatically.
 
+> **Don't want to build?** A prebuilt beta `.deb` of the latest `main` or `dev` is
+> published on every push. On the CardputerZero, run:
+>
+> ```bash
+> curl -fsSL https://github.com/BruceDevices/CardputerZero/releases/download/beta/install.sh | bash
+> ```
+> after you have it downloaded, simply run the script and wait it download and install.
+>
+> and skip to [Step 5](#step-5--run-it). See the
+> [README](README.md#install-the-beta-build) for the manual download.
+
 ---
 
 ## What you need
@@ -135,8 +146,8 @@ sudo apt install ./BruceCardputerZero_0.1.0_bruce1_arm64.deb
 > installs cleanly** — a missing CLI tool never blocks it. The tools the menu
 > drives (curl, netcat-openbsd, smbclient, iw, wireless-tools, bluez, rfkill,
 > iproute2, nmap, i2c-tools, gpiod, flashrom, **rtl-sdr, rtl-433** for Sub-GHz,
-> **libnfc-bin/libnfc-examples** for PN532, **gpsd/gpsd-clients** for wardrive,
-> **hostapd/dnsmasq** for Evil Portal, qrencode) are **Recommends**:
+> **libnfc-bin/libnfc-examples** for PN532, **hostapd/dnsmasq** for Evil
+> Portal, qrencode) are **Recommends**:
 > `apt install ./pkg.deb` pulls them in automatically, so every menu feature
 > works with zero manual `apt` (use `--no-install-recommends` to skip them;
 > note `dpkg -i` installs the app but does **not** pull Recommends — always use
@@ -145,6 +156,21 @@ sudo apt install ./BruceCardputerZero_0.1.0_bruce1_arm64.deb
 > network at that point). Heavier / offensive tooling (aircrack-ng, mdk4,
 > arp-scan) and `responder` are **Suggests** — install per feature, e.g.
 > `sudo apt install aircrack-ng mdk4`.
+> GPS needs **no extra package**: GPS Tracker and Wardriving read the GPS serial
+> port themselves (gpsd is not used). Set the port/baud under GPS > Config
+> (saved to `~/.bruce/gps.conf`); a USB GPS needs the user in the `dialout`
+> group (`sudo usermod -aG dialout $USER`, then log in again). The port/baud
+> actually used are, highest first: the console's explicit arguments
+> (`--gps-tracker <port> <baud>`, `--wardrive wifi --port <node> --baud <bps>`),
+> then the `GPS_UART` / `GPS_BAUD` environment variables, then
+> `~/.bruce/gps.conf`, then the board default (`/dev/serial0` at 115200 on the
+> LoRa+GNSS Cap, else 9600 in the app; the console commands assume 115200).
+> The GPS menu header shows the baud in effect.
+> GPS > Wardriving (Bruce's Wardriving) runs as root for the scans and writes
+> WiGLE 1.6 CSVs (upload them on wigle.net) to `~/BruceWardriving`, owned by
+> you; put MACs to watch for in `~/BruceWardriving/alert.txt` (a sample is
+> created on the first run). The Wi-Fi pass uses `iw`, the BLE pass
+> `bluetoothctl` (both preinstalled on Raspberry Pi OS).
 > The RFID menu's **PN532** entries use libnfc (auto-installed above); point it
 > at your reader in `/etc/nfc/libnfc.conf`
 > (e.g. `device.connstring = "pn532_i2c:/dev/i2c-1"`). The ST25R3916 / CC1101

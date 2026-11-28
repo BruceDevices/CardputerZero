@@ -6,6 +6,9 @@
 
 #include "tool_catalog.h"
 
+#include "gps_config.h"
+#include "id_parse.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cctype>
@@ -16,6 +19,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
+#include <pwd.h>
 #include <string>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -223,16 +227,12 @@ std::vector<ToolAction> build_rf_actions(bool cc1101_present, int cs_gpio, int g
     return actions;
 }
 
-// --- GPS rows ----------------------------------------------------------------
+// --- GPS menu (Bruce firmware GpsMenu) --------------------------------------
 //
-// "gpspipe missing" guard (same style as the RTL-SDR rows). Store installs may
-// skip Recommends (gpsd, gpsd-clients), so point at the in-app installer first.
-constexpr const char* kGpspipeMissingSh =
-    "command -v gpspipe >/dev/null 2>&1 || { echo 'gpspipe is not installed - run System / Clock > "
-    "\"Install optional tools (apt)\" or: sudo apt install gpsd gpsd-clients'; exit 127; }; ";
-
-// The LoRa+GNSS Cap's receiver (ATGM336H) is on the HAT UART (/dev/serial0) at
-// 115200 8N1. The Raw NMEA row honours $GPS_UART like `--gps-detect` does.
+// The GPS category is an in-place drill-down (like the timezone picker): one
+// in-memory view state, rows rebuilt from it on every menu entry, navigation
+// rows with an empty argv. Labels, order and headers follow Bruce 1.17's
+// GpsMenu.cpp / settings.cpp; see build_gps_actions().
 
 // --- Nmap guided flow: discover hosts -> pick host -> Fast/Full port scan -----
 //
@@ -1001,12 +1001,12 @@ std::vector<ToolAction> build_system_clock_actions() {
         {"Uptime + load", "uptime", {"uptime"}},
         {"Install optional tools (apt)",
          "apt-get install nmap + the Suggests set (aircrack-ng, mdk4, hostapd, arp-scan, "
-         "dnsmasq, gpsd, ...). Needs root: passwordless with the sudoers rule, else asks for the sudo password.",
+         "dnsmasq, ...). Needs root: passwordless with the sudoers rule, else asks for the sudo password.",
          {"sh", "-c",
           "export DEBIAN_FRONTEND=noninteractive; "
           "apt-get update 2>&1; "
           "apt-get install -y nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq "
-          "v4l-utils lirc alsa-utils dsniff gpsd gpsd-clients 2>&1; echo; echo 'done.'"},
+          "v4l-utils lirc alsa-utils dsniff 2>&1; echo; echo 'done.'"},
          true},
         {"QR code (this device URL)", "qrencode -t UTF8",
          {"sh", "-c", "ip=$(hostname -I 2>/dev/null | awk '{print $1}'); "
@@ -1064,6 +1064,311 @@ ToolAction gps_tracker_action() {
                       {"sh", "-c", "echo 'GPS Tracker runs on its own screen: open it from the GPS menu.'"}};
     action.gps_app = GpsApp::Tracker;
     return action;
+}
+
+namespace gpscfg = model::gps_config;
+
+// Which level of Bruce's GPS menu tree the category shows.
+enum class GpsView { Root, Wardriving, Config, Baudrate, Port, PortPicker };
+
+struct GpsMenuState {
+    GpsView view = GpsView::Root;
+    // GPS Port submenu (Bruce setUARTPinsMenu): the edited value and whether
+    // it changed since the submenu opened ("Save Config" is enabled then).
+    std::string port;
+    bool changed = false;
+    // Port picker rows, captured when the picker is built so the selected
+    // row maps back to the same node (index 0 = Auto).
+    std::vector<std::string> picker;
+    // Error from the last navigation row (a failed save), for the screen's
+    // error popup; taken (and cleared) by take_navigation_error().
+    std::string error;
+};
+
+GpsMenuState& gps_state() {
+    static GpsMenuState state;
+    return state;
+}
+
+std::vector<std::string>& gps_port_candidates() {
+    static std::vector<std::string> ports;
+    return ports;
+}
+
+// Label storage for the dynamic GPS rows (ToolAction::label is const char*).
+// Cleared on each rebuild; no rebuild happens while a screen holding a row is
+// open (same contract as the timezone picker).
+const char* gps_own(std::string s, bool reset = false) {
+    static std::deque<std::string> pool;
+    if (reset) {
+        pool.clear();
+        return nullptr;
+    }
+    pool.push_back(std::move(s));
+    return pool.back().c_str();
+}
+
+ToolAction gps_nav(const char* label, const char* description) {
+    return ToolAction{label, description, {}};
+}
+
+// The app user's home for ~/BruceWardriving: the wardriving child runs as
+// root, so it gets the directory in argv and never looks at its own $HOME.
+std::string app_user_home() {
+    // The app itself started with plain `sudo` (HOME is then root's): the
+    // invoking user's home, so the wardriving files are theirs. The child
+    // checks the home's owner against $SUDO_UID anyway.
+    if (::geteuid() == 0) {
+        uint32_t id = 0;
+        if (model::parse_id(std::getenv("SUDO_UID"), id)) {
+            if (const passwd* pw = ::getpwuid(static_cast<uid_t>(id)); pw && pw->pw_dir) {
+                return pw->pw_dir;
+            }
+        }
+    }
+    if (const char* home = std::getenv("HOME"); home && home[0]) {
+        return home;
+    }
+    if (const passwd* pw = ::getpwuid(::getuid()); pw && pw->pw_dir) {
+        return pw->pw_dir;
+    }
+    return "/tmp";
+}
+
+// GpsMenu::wardrivingMenu() rows: Bruce's Wardriving(scanWiFi, scanBLE) on
+// GpsAppScreen, run as the root child `--wardrive <mode> --ui`. The
+// configured port/baud (after $GPS_UART / $GPS_BAUD) and the user's home
+// travel in argv, so the root child never reads the user's config or HOME.
+ToolAction wardrive_action(const char* label, const char* mode, const char* description) {
+    const auto eff = gpscfg::resolve(gpscfg::load());
+    ToolAction action{label, description,
+                      {self_exe_path(), "--wardrive", mode, "--ui", "--port", eff.port, "--baud",
+                       std::to_string(eff.baud), "--home", app_user_home(), "--iface", wifi_interface()},
+                      /*needs_root=*/true};
+    action.gps_app = GpsApp::Wardriving;
+    return action;
+}
+
+std::vector<ToolAction> build_gps_actions() {
+    gps_own("", /*reset=*/true);
+    GpsMenuState& st = gps_state();
+    std::vector<ToolAction> acts;
+    switch (st.view) {
+        case GpsView::Root:
+            // GpsMenu::optionsMenu(): Wardriving / GPS Tracker / Config + Main Menu.
+            acts.push_back(gps_nav("Wardriving", "Scan Wi-Fi / BLE and log them with GPS positions"));
+            acts.push_back(gps_tracker_action());
+            acts.push_back(gps_nav("Config", "GPS baudrate and serial port"));
+            acts.push_back(gps_nav("Main Menu", "Back to the main menu"));
+            break;
+        case GpsView::Wardriving:
+            // GpsMenu::wardrivingMenu().
+            acts.push_back(wardrive_action("Scan WiFi Networks", "wifi",
+                                           "Log Wi-Fi networks with GPS positions to ~/BruceWardriving (WiGLE CSV)"));
+            acts.push_back(wardrive_action("Scan BLE Devices", "ble",
+                                           "Log BLE devices with GPS positions to ~/BruceWardriving (WiGLE CSV)"));
+            acts.push_back(wardrive_action("Scan Both", "both",
+                                           "Log Wi-Fi networks and BLE devices to ~/BruceWardriving (WiGLE CSV)"));
+            acts.push_back(gps_nav("Back", "Back to the GPS menu"));
+            break;
+        case GpsView::Config:
+            // GpsMenu::configMenu(): Baudrate / GPS Pins / Back.
+            acts.push_back(gps_nav("Baudrate", "Serial speed of the GPS receiver"));
+            acts.push_back(gps_nav("GPS Port", "Serial port of the GPS (HAT UART, USB GPS or Auto)"));
+            acts.push_back(gps_nav("Back", "Back to the GPS menu"));
+            break;
+        case GpsView::Baudrate: {
+            // setGpsBaudrateMenu(): the five values, the current one marked.
+            const int current = gpscfg::load().baud;
+            for (const int b : gpscfg::baud_rates()) {
+                std::string label = std::to_string(b) + " bps";
+                if (b == current) {
+                    label += "  *";
+                }
+                acts.push_back(gps_nav(gps_own(label), "Set the GPS baudrate (saved at once)"));
+            }
+            break;
+        }
+        case GpsView::Port: {
+            // setUARTPinsMenu(): "RX = n" / "TX = n" become one "Port = <node>".
+            acts.push_back(gps_nav(gps_own("Port = " + st.port), "Pick the GPS serial port"));
+            ToolAction save = gps_nav("Save Config", "Save the GPS port to ~/.bruce/gps.conf");
+            save.dimmed = !st.changed;
+            acts.push_back(std::move(save));
+            acts.push_back(gps_nav("Main Menu", "Leave without saving"));
+            break;
+        }
+        case GpsView::PortPicker: {
+            st.picker.clear();
+            st.picker.push_back(gpscfg::kAutoPort);
+            for (const auto& p : gps_port_candidates()) {
+                st.picker.push_back(p);
+            }
+            // Keep the configured node selectable even while it is unplugged.
+            if (!gpscfg::is_auto(st.port) &&
+                std::find(st.picker.begin(), st.picker.end(), st.port) == st.picker.end()) {
+                st.picker.push_back(st.port);
+            }
+            for (const auto& p : st.picker) {
+                const bool missing = !gpscfg::is_auto(p) &&
+                    std::find(gps_port_candidates().begin(), gps_port_candidates().end(), p) ==
+                        gps_port_candidates().end();
+                acts.push_back(gps_nav(gps_own(missing ? p + " (not present)" : p),
+                                       gpscfg::is_auto(p)
+                                           ? "Probe the serial ports for NMEA when a GPS feature starts"
+                                           : "Use this serial port for the GPS"));
+            }
+            break;
+        }
+    }
+    return acts;
+}
+
+std::string gps_header() {
+    switch (gps_state().view) {
+        case GpsView::Root:
+            // The baud the GPS features will really use: $GPS_BAUD, else the
+            // saved value, else the board default.
+            return "GPS (" + std::to_string(gpscfg::resolve(gpscfg::load()).baud) + " bps)";
+        case GpsView::Wardriving:
+            return "Wardriving";
+        case GpsView::Config:
+            return "GPS Config";
+        case GpsView::Baudrate:
+            return "Baudrate";
+        case GpsView::Port:
+            return "GPS Port";
+        case GpsView::PortPicker:
+            return "Select GPS Port";
+    }
+    return "GPS";
+}
+
+// False on failure, with the popup text left in gps_state().error.
+bool save_gps_config(const gpscfg::GpsConfig& cfg) {
+    std::string err;
+    if (!gpscfg::save(cfg, &err)) {
+        std::fprintf(stderr, "gps: cannot save %s: %s\n", gpscfg::config_path().c_str(), err.c_str());
+        // The popup keeps only the reason ("Permission denied", "No space
+        // left on device"): the full path is long and names the user's home.
+        const size_t colon = err.rfind(": ");
+        gps_state().error =
+            "Cannot save GPS config: " + (colon == std::string::npos ? err : err.substr(colon + 2));
+        return false;
+    }
+    return true;
+}
+
+// Returns true when the row leaves the category ("Main Menu").
+bool gps_navigation(int item) {
+    GpsMenuState& st = gps_state();
+    switch (st.view) {
+        case GpsView::Root:
+            if (item == 0) {
+                st.view = GpsView::Wardriving;
+            } else if (item == 2) {
+                st.view = GpsView::Config;
+            } else if (item == 3) {
+                return true; // addOptionToMainMenu()
+            }
+            return false;
+        case GpsView::Wardriving:
+            if (item == 3) {
+                st.view = GpsView::Root;
+            }
+            return false;
+        case GpsView::Config:
+            if (item == 0) {
+                st.view = GpsView::Baudrate;
+            } else if (item == 1) {
+                st.port = gpscfg::load().port;
+                st.changed = false;
+                st.view = GpsView::Port;
+            } else if (item == 2) {
+                st.view = GpsView::Root;
+            }
+            return false;
+        case GpsView::Baudrate: {
+            const auto& rates = gpscfg::baud_rates();
+            if (item >= 0 && item < static_cast<int>(rates.size())) {
+                auto cfg = gpscfg::load();
+                cfg.baud = gpscfg::validate_baud(rates[static_cast<size_t>(item)]); // setGpsBaudrate() saves
+                if (!save_gps_config(cfg)) {
+                    return false; // stay on the list (error popup), pick again to retry
+                }
+                st.view = GpsView::Root; // the new "GPS (<baud> bps)" header shows at once
+            }
+            return false;
+        }
+        case GpsView::Port:
+            if (item == 0) {
+                st.view = GpsView::PortPicker;
+            } else if (item == 1) {
+                if (!st.changed) {
+                    return false; // "Save Config" is disabled until something changed
+                }
+                auto cfg = gpscfg::load();
+                cfg.port = st.port;
+                if (!save_gps_config(cfg)) {
+                    return false; // keep the edited port and "Save Config" enabled for a retry
+                }
+                st.changed = false;
+                st.view = GpsView::Root;
+            } else if (item == 2) {
+                st.view = GpsView::Root;
+                return true; // "Main Menu": discard
+            }
+            return false;
+        case GpsView::PortPicker:
+            if (item >= 0 && item < static_cast<int>(st.picker.size())) {
+                st.port = st.picker[static_cast<size_t>(item)];
+                st.changed = true; // Bruce marks the submenu changed on any pick
+            }
+            st.view = GpsView::Port;
+            return false;
+    }
+    return false;
+}
+
+bool gps_back() {
+    GpsMenuState& st = gps_state();
+    switch (st.view) {
+        case GpsView::Root:
+            return false;
+        case GpsView::Wardriving:
+        case GpsView::Config:
+            st.view = GpsView::Root;
+            return true;
+        case GpsView::Baudrate:
+        case GpsView::Port:
+            st.view = GpsView::Config;
+            return true;
+        case GpsView::PortPicker:
+            st.view = GpsView::Port;
+            return true;
+    }
+    return false;
+}
+
+int gps_preferred_selection() {
+    const GpsMenuState& st = gps_state();
+    if (st.view == GpsView::Baudrate) {
+        const int current = gpscfg::load().baud;
+        const auto& rates = gpscfg::baud_rates();
+        for (size_t i = 0; i < rates.size(); ++i) {
+            if (rates[i] == current) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    if (st.view == GpsView::PortPicker) {
+        for (size_t i = 0; i < st.picker.size(); ++i) {
+            if (st.picker[i] == st.port) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    return -1;
 }
 
 ToolAction ble_scan_action() {
@@ -1353,37 +1658,10 @@ std::vector<ToolCategory>& mutable_catalog() {
         },
         {
             "GPS",
-            "Read a GPS on serial/USB via gpsd; feed wardriving",
+            "Wardriving, GPS Tracker and GPS config",
             icon::kGps,
             false,
-            {
-                {"GPS fix (gpspipe)", "gpspipe -w (gpsd)",
-                 {"sh", "-c", std::string(kGpspipeMissingSh) +
-                  "timeout 20 gpspipe -w 2>&1; rc=$?; "
-                  // 124 = coreutils timeout, 143 = BusyBox (SIGTERM): normal end.
-                  "case \"$rc\" in 0|124|143) exit 0;; esac; "
-                  "echo \"gpspipe failed (status $rc) - is gpsd running? For the LoRa+GNSS Cap: "
-                  "sudo gpsd -n -s 115200 /dev/serial0\"; exit \"$rc\""}},
-                {"Raw NMEA (serial0 @115200)", "stty 115200; cat /dev/serial0 ($GPS_UART overrides)",
-                 {"sh", "-c",
-                  "dev=\"${GPS_UART:-/dev/serial0}\"; "
-                  "[ -e \"$dev\" ] || { echo \"$dev not found - is the LoRa+GNSS Cap attached? "
-                  "(a USB GPS: set GPS_UART, e.g. /dev/ttyUSB0)\"; exit 1; }; "
-                  "[ -r \"$dev\" ] || { echo \"cannot read $dev - add this user to the dialout group: "
-                  "sudo usermod -aG dialout $(id -un) (then log in again)\"; exit 1; }; "
-                  "stty -F \"$dev\" 115200 raw -echo 2>&1 || { rc=$?; echo \"cannot configure $dev (status $rc)\"; exit \"$rc\"; }; "
-                  "echo \"reading $dev @115200 for 15s...\"; "
-                  "timeout 15 cat \"$dev\" 2>&1; rc=$?; "
-                  "case \"$rc\" in 0|124|143) ;; *) echo \"read failed on $dev (status $rc)\"; exit \"$rc\";; esac; "
-                  "echo '(no $G... lines above = no NMEA: check the Cap seating / antenna)'"}},
-                {"Wardriving -> WiGLE CSV",
-                 intern_iface_text("Scan Wi-Fi + GPS fix and log APs in WiGLE format "
-                                   "(upload to wigle.net). Needs gpsd running "
-                                   "(Cap: sudo gpsd -n -s 115200 /dev/serial0) and " +
-                                   wifi_interface() + " up."),
-                 {self_exe_path(), "--wardrive", wifi_interface()}},
-                gps_tracker_action(),
-            },
+            build_gps_actions(),
         },
         {
             "Ethernet",
@@ -1480,8 +1758,43 @@ void refresh_dynamic_categories(int category_index) {
             category.actions = build_wifi_actions();
         } else if (label == "System / Clock") {
             category.actions = build_system_clock_actions();
+        } else if (label == "GPS") {
+            category.actions = build_gps_actions();
         }
     }
+}
+
+void refresh_gps_category(const std::vector<std::string>& port_candidates) {
+    gps_port_candidates() = port_candidates;
+    for (auto& category : mutable_catalog()) {
+        if (std::string(category.label) == "GPS") {
+            category.actions = build_gps_actions();
+            return;
+        }
+    }
+}
+
+std::string category_header(int category_index) {
+    const auto& catalog = mutable_catalog();
+    if (category_index < 0 || category_index >= static_cast<int>(catalog.size())) {
+        return "";
+    }
+    const std::string label = catalog[static_cast<size_t>(category_index)].label;
+    if (label == "GPS") {
+        return gps_header();
+    }
+    return label;
+}
+
+int preferred_selection(int category_index) {
+    const auto& catalog = mutable_catalog();
+    if (category_index < 0 || category_index >= static_cast<int>(catalog.size())) {
+        return -1;
+    }
+    if (std::string(catalog[static_cast<size_t>(category_index)].label) == "GPS") {
+        return gps_preferred_selection();
+    }
+    return -1;
 }
 
 void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio) {
@@ -1493,20 +1806,35 @@ void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio) {
     }
 }
 
-void on_navigation_action(int category_index, int item_index) {
+std::string take_navigation_error(int category_index) {
+    const auto& catalog = mutable_catalog();
+    if (category_index < 0 || category_index >= static_cast<int>(catalog.size()) ||
+        std::string(catalog[static_cast<size_t>(category_index)].label) != "GPS") {
+        return "";
+    }
+    std::string err;
+    err.swap(gps_state().error);
+    return err;
+}
+
+bool on_navigation_action(int category_index, int item_index) {
     if (category_index < 0) {
-        return;
+        return false;
     }
     const auto& catalog = mutable_catalog();
     if (category_index >= static_cast<int>(catalog.size())) {
-        return;
+        return false;
     }
     const std::string label = catalog[static_cast<size_t>(category_index)].label;
+
+    if (label == "GPS") {
+        return gps_navigation(item_index);
+    }
 
     if (label == "Nmap") {
         // Mirror build_nmap_actions()'s row layout to map the tapped row to an action.
         if (!ensure_nmap_dir().empty()) {
-            return; // unsafe dir: don't read or write state there
+            return false; // unsafe dir: don't read or write state there
         }
         const std::string dir = nmap_dir();
         NmapHost sel;
@@ -1526,7 +1854,7 @@ void on_navigation_action(int category_index, int item_index) {
                 std::fprintf(stderr, "nmap: cannot remove %s: %s\n", sel.c_str(), std::strerror(errno));
             }
         }
-        return;
+        return false;
     }
 
     if (label == "Wi-Fi") {
@@ -1534,7 +1862,7 @@ void on_navigation_action(int category_index, int item_index) {
         // build_portal_rows(): [scan][no-APs] / [scan][AP...] / [back][clone].
         const int static_count = static_cast<int>(build_wifi_static_actions().size());
         if (item_index < static_count) {
-            return;
+            return false;
         }
         const std::string dir = portal_dir();
         const std::string selected = read_first_line(dir + "/selected");
@@ -1556,7 +1884,7 @@ void on_navigation_action(int category_index, int item_index) {
         // opens it, "<  Back" closes it. Zone rows are runnable (not nav rows).
         const auto& acts = catalog[static_cast<size_t>(category_index)].actions;
         if (item_index < 0 || item_index >= static_cast<int>(acts.size())) {
-            return;
+            return false;
         }
         const std::string row = acts[static_cast<size_t>(item_index)].label;
         if (row.rfind("Set timezone", 0) == 0) {
@@ -1564,8 +1892,9 @@ void on_navigation_action(int category_index, int item_index) {
         } else if (!row.empty() && row[0] == '<') {
             tz_picker_open() = false;
         }
-        return;
+        return false;
     }
+    return false;
 }
 
 bool on_category_back(int category_index) {
@@ -1602,6 +1931,9 @@ bool on_category_back(int category_index) {
         }
         tz_picker_open() = false;
         return true;
+    }
+    if (label == "GPS") {
+        return gps_back();
     }
     return false;
 }

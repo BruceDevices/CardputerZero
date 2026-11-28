@@ -1,12 +1,17 @@
 #include "linux_input.h"
 
+#include "esc_key_tracker.h"
+
 #include <array>
 #include <cstdint>
 #include <cstring>
 
 #if USE_DESKTOP
 #include <SDL.h>
+
+#include <atomic>
 #else
+#include <algorithm>
 #include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
@@ -14,6 +19,7 @@
 #include <string>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <vector>
 #endif
 
 #ifndef APP_KEY_INPUT_DEVICE
@@ -37,6 +43,48 @@ GlobalKeyListener global_key_listener = nullptr;
 void* global_key_listener_user_data = nullptr;
 uint32_t last_global_key = 0;
 uint32_t last_global_tick = 0;
+
+// Physical ESC state (hold-to-return-home hint), fed straight from the raw
+// key sources so Backspace/grave (also Back) never count as ESC. LVGL thread
+// only; see esc_key_tracker.h for the lost-release recovery.
+EscKeyTracker g_esc_tracker;
+
+#if USE_DESKTOP
+// SDL event watches may run on whichever thread pushes the event, so the watch
+// only records ESC here; the LVGL thread applies it from the keyboard indev's
+// read cycle (key_event_cb), which already runs every refresh - no extra timer.
+// Two lock-free slots: the latest state, plus a release generation bumped on
+// every key-up/cancel. The generation keeps release boundaries that the latest
+// state alone would merge: up+down between two reads must still end the old
+// hold (and restart the 500 ms clock), not look like one continuous hold.
+constexpr int kSdlEscSource = -1;
+constexpr int kSdlEscNone = -1;
+std::atomic<int> g_sdl_esc_pending{kSdlEscNone};
+std::atomic<uint32_t> g_sdl_esc_releases{0};
+uint32_t g_sdl_esc_releases_seen = 0; // LVGL thread only
+
+// Watch side (any thread). A release bumps the generation before publishing
+// the state, so a drain that sees the new state also sees the release.
+void post_sdl_esc(bool down) {
+    if (!down) {
+        g_sdl_esc_releases.fetch_add(1, std::memory_order_acq_rel);
+    }
+    g_sdl_esc_pending.store(down ? 1 : 0, std::memory_order_release);
+}
+
+// LVGL thread.
+void drain_sdl_esc() {
+    const int pending = g_sdl_esc_pending.exchange(kSdlEscNone, std::memory_order_acq_rel);
+    const uint32_t releases = g_sdl_esc_releases.load(std::memory_order_acquire);
+    if (releases != g_sdl_esc_releases_seen) {
+        g_sdl_esc_releases_seen = releases;
+        g_esc_tracker.set(kSdlEscSource, false); // end the hold that was released
+    }
+    if (pending != kSdlEscNone) {
+        g_esc_tracker.set(kSdlEscSource, pending != 0);
+    }
+}
+#endif
 
 // Debounce for the Cardputer's matrix keyboard: one physical tap can bounce
 // into several press/release pairs, each firing a nav action. Ignore repeats of
@@ -161,6 +209,10 @@ void route_key_state(uint32_t key, bool pressed) {
 void key_event_cb(lv_event_t* event) {
     LV_UNUSED(event);
 
+#if USE_DESKTOP
+    drain_sdl_esc();
+#endif
+
     auto* indev = lv_indev_active();
     if (!indev) {
         return;
@@ -180,6 +232,19 @@ struct EvdevKeypad {
     bool shift{false}; // left/right shift held while typing (text mode)
     bool sym{false};   // sym layer active (held, or latched by the keyboard firmware)
 };
+
+// Live keypads, for the ESC hardware check during a hold (reconcile_esc_key).
+std::vector<EvdevKeypad*> g_keypads;
+
+// Current hardware state of KEY_ESC on `fd`: 1 down, 0 up, -1 query failed.
+int read_hardware_esc(int fd) {
+    unsigned long key_bits[(KEY_MAX / (sizeof(unsigned long) * 8)) + 1] = {};
+    if (ioctl(fd, EVIOCGKEY(sizeof(key_bits)), key_bits) < 0) {
+        return -1;
+    }
+    const auto bits_per_word = sizeof(unsigned long) * 8;
+    return (key_bits[KEY_ESC / bits_per_word] >> (KEY_ESC % bits_per_word)) & 1UL ? 1 : 0;
+}
 
 uint32_t map_evdev_key(uint16_t code) {
     switch (code) {
@@ -340,9 +405,25 @@ void evdev_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
     }
 
     input_event input{};
-    while (read(keypad->fd, &input, sizeof(input)) == sizeof(input)) {
+    ssize_t n = 0;
+    while ((n = read(keypad->fd, &input, sizeof(input))) == sizeof(input)) {
+        if (input.type == EV_SYN) {
+            // Kernel queue overflowed: ESC events may be lost. Re-read the
+            // real key state at the next SYN_REPORT (evdev resync protocol).
+            if (input.code == SYN_DROPPED) {
+                g_esc_tracker.syn_dropped(keypad->fd);
+            } else if (input.code == SYN_REPORT && g_esc_tracker.resync_pending(keypad->fd)) {
+                g_esc_tracker.resynced(keypad->fd, read_hardware_esc(keypad->fd));
+            }
+            continue;
+        }
         if (input.type != EV_KEY) {
             continue;
+        }
+        // Raw physical ESC, any layer (the launcher's 3 s watchdog also reads
+        // plain KEY_ESC). value 2 = autorepeat, not a state change.
+        if (input.code == KEY_ESC) {
+            g_esc_tracker.key(keypad->fd, input.value);
         }
         if (input.code == KEY_LEFTSHIFT || input.code == KEY_RIGHTSHIFT) {
             keypad->shift = input.value != 0;
@@ -364,6 +445,10 @@ void evdev_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
         data->continue_reading = true;
         break;
     }
+    // Device gone or broken (ENODEV etc.): its ESC can't be held any more.
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        g_esc_tracker.remove(keypad->fd);
+    }
 
     data->key = keypad->key;
     data->state = keypad->state;
@@ -376,6 +461,8 @@ void evdev_delete_cb(lv_event_t* event) {
         return;
     }
 
+    g_esc_tracker.remove(keypad->fd);
+    g_keypads.erase(std::remove(g_keypads.begin(), g_keypads.end(), keypad), g_keypads.end());
     if (keypad->fd >= 0) {
         close(keypad->fd);
     }
@@ -397,6 +484,7 @@ lv_indev_t* create_keypad_from_fd(int fd) {
     lv_indev_set_read_cb(indev, evdev_read_cb);
     lv_indev_set_driver_data(indev, keypad);
     lv_indev_add_event_cb(indev, evdev_delete_cb, LV_EVENT_DELETE, nullptr);
+    g_keypads.push_back(keypad);
     attach_key_router(indev);
     return indev;
 }
@@ -456,12 +544,32 @@ void discover_keypads(lv_display_t* display) {
 
 #if USE_DESKTOP
 // LVGL's stock SDL keyboard maps only control/text keys, so PrintScreen never
-// reaches the key router through it. Watch SDL events directly; the watch runs
-// on the main thread during lv_timer_handler's SDL poll, before LVGL sees the
-// event, and the key never re-enters the indev pipeline (no double dispatch).
+// reaches the key router through it. Watch SDL events directly; for OS input
+// the watch runs on the main thread during lv_timer_handler's SDL poll, before
+// LVGL sees the event, and the key never re-enters the indev pipeline (no
+// double dispatch). An event pushed from another thread runs the watch on that
+// thread, so ESC only records state (post_sdl_esc) and never touches LVGL.
 int sdl_key_watch(void* user_data, SDL_Event* event) {
     LV_UNUSED(user_data);
-    if (!event || (event->type != SDL_KEYDOWN && event->type != SDL_KEYUP)) {
+    if (!event) {
+        return 0;
+    }
+    // Losing the window or going to the background ends any ESC hold, in case
+    // SDL does not synthesize the key-up.
+    if ((event->type == SDL_WINDOWEVENT && event->window.event == SDL_WINDOWEVENT_FOCUS_LOST) ||
+        event->type == SDL_APP_WILLENTERBACKGROUND) {
+        post_sdl_esc(false);
+        return 0;
+    }
+    if (event->type != SDL_KEYDOWN && event->type != SDL_KEYUP) {
+        return 0;
+    }
+    // Physical ESC for the hold hint, tracked from the raw SDL down/up pair;
+    // LVGL's SDL keyboard still delivers it as Back.
+    if (event->key.keysym.sym == SDLK_ESCAPE) {
+        if (!event->key.repeat) {
+            post_sdl_esc(event->type == SDL_KEYDOWN);
+        }
         return 0;
     }
     if (event->key.keysym.sym != SDLK_PRINTSCREEN) {
@@ -527,6 +635,33 @@ void clear_global_key_listener(GlobalKeyListener listener, void* user_data) {
         global_key_listener = nullptr;
         global_key_listener_user_data = nullptr;
     }
+}
+
+void set_esc_key_listener(EscKeyListener listener, void* user_data) {
+    g_esc_tracker.set_listener(listener, user_data);
+}
+
+void clear_esc_key_listener(EscKeyListener listener, void* user_data) {
+    g_esc_tracker.clear_listener(listener, user_data);
+}
+
+void reconcile_esc_key() {
+#if USE_DESKTOP
+    drain_sdl_esc();
+#else
+    // Hardware truth per keypad: a release lost without a SYN_DROPPED (or a
+    // device that stopped answering) can't keep the hold alive.
+    for (auto* keypad : g_keypads) {
+        if (keypad && !g_esc_tracker.resync_pending(keypad->fd)) {
+            const int hardware = read_hardware_esc(keypad->fd);
+            if (hardware < 0) {
+                g_esc_tracker.remove(keypad->fd);
+            } else {
+                g_esc_tracker.set(keypad->fd, hardware != 0);
+            }
+        }
+    }
+#endif
 }
 
 } // namespace platform

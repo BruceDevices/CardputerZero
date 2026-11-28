@@ -5,8 +5,48 @@ a purple/black [LVGL](https://lvgl.io/) menu that launches Wi-Fi, Bluetooth,
 RF, network and SMB tooling from the device screen. Built on the M5Stack
 CardputerZero LVGL template.
 
-> **👉 Just want to install it? See [INSTALL.md](INSTALL.md) for a
-> copy-paste, step-by-step guide.** The sections below are for developers.
+> **👉 Just want to install it? See [Install the beta build](#install-the-beta-build)
+> below, or [INSTALL.md](INSTALL.md) to build it yourself.** The other sections
+> are for developers.
+
+## Install the beta build
+
+Every push to `main` is built by CI and published to the rolling
+[**beta** release](https://github.com/BruceDevices/CardputerZero/releases/tag/beta),
+always under the same file name, so these links always give you the latest
+build. Run the commands **on the CardputerZero** (it needs internet access).
+
+**Option 1 — one-line installer:**
+
+```bash
+curl -fsSL https://github.com/BruceDevices/CardputerZero/releases/download/beta/install.sh | bash
+```
+
+Prefer to read the script first? Download it, check it, then run it:
+
+```bash
+curl -fsSLO https://github.com/BruceDevices/CardputerZero/releases/download/beta/install.sh
+less install.sh
+bash install.sh
+```
+
+**Option 2 — download and install the `.deb` by hand:**
+
+```bash
+curl -fLO https://github.com/BruceDevices/CardputerZero/releases/download/beta/bruce-cardputerzero_beta_arm64.deb
+sudo apt update
+sudo apt install --reinstall ./bruce-cardputerzero_beta_arm64.deb
+```
+
+Use `apt install ./…`, not `dpkg -i`: apt also installs the tools the menus run
+(curl, iw, bluez, nmap, hostapd, …). To update, run the same commands again —
+`--reinstall` is needed because every beta build has the same version number,
+so without it apt would skip the update.
+Then start **BruceCardputerZero** from APPLaunch, or run `bruce_cardputerzero`.
+See [INSTALL.md](INSTALL.md#step-5--run-it) for autostart, keys and
+troubleshooting.
+
+> The beta build is untested: it is whatever `main` was at the last push.
 
 > ⚠️ **For authorized security testing, CTF and research only.** Several
 > menu entries (Responder, port scans, packet capture) are only legal against

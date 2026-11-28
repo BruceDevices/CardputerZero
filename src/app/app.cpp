@@ -12,10 +12,12 @@
 #include "asset_manager.h"
 #include "boot_anim.h"
 #include "bruce_module.h"
+#include "gps_config.h"
 #include "logger.h"
 #include "linux_input.h"
 #include "screen_manager.h"
 #include "base_viewmodel.h"
+#include "esc_hold_hint.h"
 #include "theme.h"
 #include "screenshot_service.h"
 #include "toast.h"
@@ -227,6 +229,11 @@ int Application::run() {
     // Detect the connected CAP and fill the BruceModule pin registry (Subjects
     // need lv_init() done above). Prints the module summary to the terminal.
     hal::detect_cap();
+    // GPS board default (Bruce: per-board gpsBaudrate): the LoRa+GNSS Cap's
+    // receiver runs at 115200, anything else gets Bruce's 9600. Used until
+    // the user saves GPS > Config (~/.bruce/gps.conf).
+    model::gps_config::set_board_default(
+        model::gps_config::board_default(hal::modules().kind == hal::CapKind::CapLora));
 
     auto* display = init_display();
     if (!display) {
@@ -249,6 +256,10 @@ int Application::run() {
     // Global PrintScreen shortcut: owns the toast on lv_layer_top() for the
     // app's lifetime and unregisters its listener when the loop exits.
     ScreenshotController screenshot_shortcuts(view_model);
+
+    // "Hold ESC 3s to return home" banner after 0.5 s of physical ESC, over
+    // every screen. Display only: APPLaunch itself ends the app at 3 s.
+    view::widgets::EscHoldHint esc_hold_hint(lv_layer_top());
 
     // Bruce boot animation: the shark lunges toward the screen over the menu,
     // then fades out. Non-blocking; driven by the LVGL timer loop below.

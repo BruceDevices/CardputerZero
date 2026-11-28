@@ -8,7 +8,7 @@ real device could still shell out to it) AND a `sim` script of output lines the
 *simulator* streams instead. The pygame build has no radios, no wlan0, no CAP,
 so it never runs the real argv — it plays the canned `sim` lines. Offensive /
 credential-capturing rows (Evil Portal, deauth, beacon/BLE spam, Responder, MAC
-flood, DHCP starvation, wardrive) are simulated as STATUS-ONLY stubs that
+flood, DHCP starvation) are simulated as STATUS-ONLY stubs that
 perform nothing; they exist so the menu matches the device, not to carry out an
 attack on a desktop.
 
@@ -194,25 +194,6 @@ def _host_info(ip, tag, mac, vendor, ports, progress=False):
     else:
         lines.append("No open ports found")
     return lines
-
-# Mirrors kGpspipeMissingSh in src/model/tool_catalog.cpp.
-_GPSPIPE_MISSING_SH = ("command -v gpspipe >/dev/null 2>&1 || { echo 'gpspipe is not installed - run System / Clock > "
-                       "\"Install optional tools (apt)\" or: sudo apt install gpsd gpsd-clients'; exit 127; }; ")
-
-
-# Mirrors the "Raw NMEA (serial0 @115200)" row in src/model/tool_catalog.cpp.
-_GPS_RAW_NMEA_SH = (
-    "dev=\"${GPS_UART:-/dev/serial0}\"; "
-    "[ -e \"$dev\" ] || { echo \"$dev not found - is the LoRa+GNSS Cap attached? "
-    "(a USB GPS: set GPS_UART, e.g. /dev/ttyUSB0)\"; exit 1; }; "
-    "[ -r \"$dev\" ] || { echo \"cannot read $dev - add this user to the dialout group: "
-    "sudo usermod -aG dialout $(id -un) (then log in again)\"; exit 1; }; "
-    "stty -F \"$dev\" 115200 raw -echo 2>&1 || { rc=$?; echo \"cannot configure $dev (status $rc)\"; exit \"$rc\"; }; "
-    "echo \"reading $dev @115200 for 15s...\"; "
-    "timeout 15 cat \"$dev\" 2>&1; rc=$?; "
-    "case \"$rc\" in 0|124|143) ;; *) echo \"read failed on $dev (status $rc)\"; exit \"$rc\";; esac; "
-    "echo '(no $G... lines above = no NMEA: check the Cap seating / antenna)'")
-
 
 def _ok(*lines):
     return list(lines) + ["", "[process exited 0]"]
@@ -542,22 +523,69 @@ CATALOG = [
     ]),
 
     # ── GPS ───────────────────────────────────────────────────────────────────
-    Category("GPS", "Read a GPS on serial/USB via gpsd; feed wardriving", IC["gps"], [
-        Action("GPS fix (gpspipe)", "gpspipe -w (gpsd)",
-               ["sh", "-c", _GPSPIPE_MISSING_SH + "timeout 20 gpspipe -w 2>&1; rc=$?; "
-                "case \"$rc\" in 0|124|143) exit 0;; esac; "
-                "echo \"gpspipe failed (status $rc) - is gpsd running? For the LoRa+GNSS Cap: "
-                "sudo gpsd -n -s 115200 /dev/serial0\"; exit \"$rc\""],
-               _ok('{"class":"TPV","lat":37.7749,"lon":-122.4194,"alt":15.2,"mode":3}')),
-        Action("Raw NMEA (serial0 @115200)", "stty 115200; cat /dev/serial0 ($GPS_UART overrides)",
-               ["sh", "-c", _GPS_RAW_NMEA_SH],
-               _ok("reading /dev/serial0 @115200 for 15s...",
-                   "$GNRMC,123519,A,3747.49,N,12225.16,W,0.0,0.0,270926,,,A,V*2C",
-                   "$GNGGA,123519,3747.49,N,12225.16,W,1,08,0.9,15.2,M,,M,,*55",
-                   "(no $G... lines above = no NMEA: check the Cap seating / antenna)")),
-        Action("Wardriving -> WiGLE CSV", "scan Wi-Fi + GPS fix -> WiGLE CSV (upload to wigle.net)",
-               ["self", "--wardrive", "wlan0"],
-               _stub("would scan Wi-Fi + read a GPS fix and append WiGLE rows to ~/.bruce/wardrive.csv")),
+    # Mirrors build_gps_actions() in src/model/tool_catalog.cpp: Bruce
+    # firmware's GpsMenu (Wardriving / GPS Tracker / Config / Main Menu). The
+    # C++ menu shows the header "GPS (<baud> bps)" (the baud in effect:
+    # $GPS_BAUD > ~/.bruce/gps.conf > board default) and drills into the
+    # submenus in place; the simulator shows them as options menus with canned
+    # values (board default: LoRa+GNSS Cap, 115200). Simulator limits: no
+    # "GPS (<baud> bps)" header, no root "Main Menu" row, nothing is saved,
+    # "Save Config" is never greyed, no Auto probe or save-error popup.
+    Category("GPS", "Wardriving, GPS Tracker and GPS config", IC["gps"], [
+        # The C++ rows open GpsAppScreen running Bruce's Wardriving as the root
+        # child `--wardrive <mode> --ui`; the simulator plays the screens it
+        # shows (synthetic data).
+        Action("Wardriving", "Scan Wi-Fi / BLE and log them with GPS positions",
+               [], [], items=[
+                   Item("Scan WiFi Networks", _ok(
+                       "WARDRIVING",
+                       "Found WiFi: 0",
+                       "Distance: 0.00km  ET: 00:00:00",
+                       "Initializing...",
+                       "Waiting for GPS data",
+                       "[ Waiting GPS: 0s ]",
+                       "GPS location not updated",
+                       "  Date: 2026-11-22   Time: 15:20:02",
+                       "  Sat:  0   HDOP: 25.50",
+                       "GPS location updated",
+                       "Coord: 0.012345, 0.067890",
+                       "Start Scanning...",
+                       "Scan done. WiFi: 3",
+                       "File: 261122_152002_wardriving",
+                       "(simulated: canned screens, no GPS / radio scan, nothing written to ~/BruceWardriving)")),
+                   Item("Scan BLE Devices", _ok(
+                       "WARDRIVING",
+                       "Found BLE: 0",
+                       "Distance: 0.00km  ET: 00:00:00",
+                       "Initializing...",
+                       "Waiting for GPS data",
+                       "[ Waiting GPS: 0s ]",
+                       "GPS location not updated",
+                       "  Date: 2026-11-22   Time: 15:20:02",
+                       "  Sat:  0   HDOP: 25.50",
+                       "GPS location updated",
+                       "Coord: 0.012345, 0.067890",
+                       "Start Scanning...",
+                       "Scan done. BLE: 5",
+                       "File: 261122_152002_wardriving",
+                       "(simulated: canned screens, no GPS / radio scan, nothing written to ~/BruceWardriving)")),
+                   Item("Scan Both", _ok(
+                       "WARDRIVING",
+                       "Found WiFi: 0 BLE: 0",
+                       "Distance: 0.00km  ET: 00:00:00",
+                       "Initializing...",
+                       "Waiting for GPS data",
+                       "[ Waiting GPS: 0s ]",
+                       "GPS location not updated",
+                       "  Date: 2026-11-22   Time: 15:20:02",
+                       "  Sat:  0   HDOP: 25.50",
+                       "GPS location updated",
+                       "Coord: 0.012345, 0.067890",
+                       "Start Scanning...",
+                       "Scan done. WiFi: 3 BLE: 5",
+                       "File: 261122_152002_wardriving",
+                       "(simulated: canned screens, no GPS / radio scan, nothing written to ~/BruceWardriving)")),
+               ]),
         # The C++ row opens GpsAppScreen (Bruce firmware GPS Tracker, in-app
         # serial NMEA reader); the simulator plays the screens it shows.
         Action("GPS Tracker", "Log your route as GPX to ~/BruceGPS (Bruce firmware GPS Tracker)",
@@ -567,10 +595,28 @@ CATALOG = [
                    "GPS location not updated",
                    "  Date: 2026-11-22", "  Time: 15:20:02", "  Sat:  0", "  HDOP: 25.50",
                    "GPS location updated",
-                   "  Coord: 35.681236, 139.767125",
+                   "  Coord: 0.012345, 0.067890",
                    "  File: 261122_152002_gps_tracker",
                    "  GPS Coordinates: 1", "  Distance: 0.00km",
                    "(simulated: no GPS on the desktop, nothing written to ~/BruceGPS)")),
+        Action("Config", "GPS baudrate and serial port", [], [], items=[
+            Item("Baudrate", children=[
+                Item("9600 bps", ["gpsBaudrate=9600 (simulated: not saved)"]),
+                Item("19200 bps", ["gpsBaudrate=19200 (simulated: not saved)"]),
+                Item("38400 bps", ["gpsBaudrate=38400 (simulated: not saved)"]),
+                Item("57600 bps", ["gpsBaudrate=57600 (simulated: not saved)"]),
+                Item("115200 bps  *", ["gpsBaudrate=115200 (current)"]),
+            ]),
+            Item("GPS Port", children=[
+                Item("Port = /dev/serial0", children=[
+                    Item("Auto", ["Probe the serial ports for NMEA when a GPS feature starts"]),
+                    Item("/dev/serial0", ["LoRa+GNSS Cap (HAT UART)"]),
+                    Item("/dev/ttyACM0", ["USB GPS (simulated)"]),
+                ]),
+                Item("Save Config", ["(enabled once the port changed)"]),
+                Item("Main Menu", ["Back to the main menu"]),
+            ]),
+        ]),
     ]),
 
     # ── Ethernet ──────────────────────────────────────────────────────────────
@@ -611,13 +657,13 @@ CATALOG = [
                _ok(" 14:32:07 up 2 days,  3:11,  load average: 0.08, 0.12, 0.10")),
         Action("Install optional tools (apt)",
                "apt-get install nmap + the Suggests set (aircrack-ng, mdk4, hostapd, arp-scan, "
-               "dnsmasq, gpsd, ...). Needs root: passwordless with the sudoers rule, else asks for the sudo password.",
-               ["sh", "-c", "apt-get install -y nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq ... gpsd gpsd-clients"],
+               "dnsmasq, ...). Needs root: passwordless with the sudoers rule, else asks for the sudo password.",
+               ["sh", "-c", "apt-get install -y nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq ..."],
                _ok("[sim] on the device this runs via sudo ... --root-sh apt-get install -y ...",
                    "[sim] passwordless with the sudoers rule (deploy.sh); store installs ask for the sudo password",
                    "Reading package lists... Done",
                    "The following NEW packages will be installed:",
-                   "  nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq gpsd gpsd-clients",
+                   "  nmap aircrack-ng mdk4 hostapd arp-scan dnsmasq",
                    "Setting up aircrack-ng ... done.", "done."), needs_root=True),
         Action("QR code (this device URL)", "qrencode -t UTF8", ["sh", "-c", "qrencode -t UTF8 http://ip:8080"],
                _ok("█████████████████████", "████ ▄▄▄▄▄ █▀ █ ████", "████ █   █ █▀▀▀█ ████",

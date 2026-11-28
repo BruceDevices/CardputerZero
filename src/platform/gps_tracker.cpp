@@ -9,8 +9,10 @@
 
 #include "gps_tracker.h"
 
+#include "gps_port.h"
 #include "gps_session.h"
 
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstdarg>
@@ -57,6 +59,8 @@ bool starts_with(const std::string& s, const char* prefix) {
 
 #if defined(__linux__)
 volatile sig_atomic_t g_stop = 0;
+// Cancels a running Auto port probe (lock-free, so safe in the handler).
+std::atomic<bool> g_cancel_probe{false};
 // First SIGINT/SIGTERM: orderly stop (release the UART, close the track within
 // the shutdown deadline). A second one forces the exit at once.
 void on_signal(int sig) {
@@ -64,6 +68,7 @@ void on_signal(int sig) {
         _exit(128 + sig);
     }
     g_stop = 1;
+    g_cancel_probe.store(true);
 }
 
 uint64_t now_ms() {
@@ -91,7 +96,23 @@ std::vector<ScreenLine> fit_lines(const std::vector<ScreenLine>& lines, size_t m
     }
     out.swap(compact);
 
-    // 2. Merge Bruce's paired detail lines, bottom-most pair first.
+    // 2. Wardriving: once "Scan done. ..." is printed, the "Start Scanning..."
+    //    above it is history (the firmware shows both).
+    for (size_t i = 0; out.size() > max_lines && i + 1 < out.size(); ++i) {
+        if (out[i].text != "Start Scanning...") {
+            continue;
+        }
+        bool done = false;
+        for (size_t j = i + 1; j < out.size(); ++j) {
+            done = done || starts_with(out[j].text, "Scan done.");
+        }
+        if (done) {
+            out.erase(out.begin() + static_cast<long>(i));
+        }
+        break;
+    }
+
+    // 3. Merge Bruce's paired detail lines, bottom-most pair first.
     static const char* const kPairs[][2] = {
         {"Sat:", "HDOP:"},
         {"Date:", "Time:"},
@@ -110,7 +131,17 @@ std::vector<ScreenLine> fit_lines(const std::vector<ScreenLine>& lines, size_t m
         }
     }
 
-    // 3. Clip the bottom, as text beyond the firmware's display edge is lost.
+    // 4. Wardriving: "GPS location updated" goes when the "Coord: ..." line
+    //    right after it says the same (a MAC cache clear or an extra line
+    //    would otherwise push "Scan done." off the screen).
+    for (size_t i = 0; out.size() > max_lines && i + 1 < out.size(); ++i) {
+        if (out[i].text == "GPS location updated" && starts_with(out[i + 1].text, "Coord:")) {
+            out.erase(out.begin() + static_cast<long>(i));
+            break;
+        }
+    }
+
+    // 5. Clip the bottom, as text beyond the firmware's display edge is lost.
     if (out.size() > max_lines) {
         out.resize(max_lines);
     }
@@ -531,6 +562,23 @@ int gps_tracker_main(int argc, char** argv) {
     }
     if (argc >= 2 && argv[1] && std::atoi(argv[1]) > 0) {
         baud = std::atoi(argv[1]);
+    }
+
+    // GPS Port = Auto: probe the candidates first (the root refusal below
+    // still comes before any port is opened).
+    if (port == "Auto" && ::geteuid() != 0) {
+        const auto ports = auto_order("/dev/serial0", port_candidates());
+        std::printf("Auto: searching GPS on %zu port(s)...\n", ports.size());
+        // Bruce's Baudrate list (model::gps_config::baud_rates()).
+        const ProbeResult res =
+            auto_detect(ports, baud, {9600, 19200, 38400, 57600, 115200}, 1500, &g_cancel_probe);
+        if (res.kind != ProbeResult::Kind::Found) {
+            std::printf("[error] %s\n", res.message.c_str());
+            return 1;
+        }
+        std::printf("Auto: %s\n", res.message.c_str());
+        port = res.port;
+        baud = res.baud;
     }
 
     const Tracker::Options options = tracker_options_from_env();

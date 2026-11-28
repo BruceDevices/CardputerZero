@@ -1,0 +1,120 @@
+SetDiscoveryFilter success
+Discovery started
+[[0;93mCHG[0m] Controller 02:00:5E:10:00:01 Discovering: yes
+[[0;92mNEW[0m] [1;30mDevice 02:00:5E:10:00:02 02-00-5E-10-00-02[0m
+[[0;92mNEW[0m] Device 02:00:5E:10:00:03 02-00-5E-10-00-03
+[[0;92mNEW[0m] Device 02:00:5E:10:00:04 02-00-5E-10-00-04
+[[0;92mNEW[0m] [1;30mDevice 02:00:5E:10:00:05 Name-05[0m
+[[0;92mNEW[0m] Device 02:00:5E:10:00:06 02-00-5E-10-00-06
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffac (-84)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 ManufacturerData.Key: 0x0600 (1536)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 ManufacturerData.Value:
+  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  00 00
+[[0;92mNEW[0m] [1;30mDevice 02:00:5E:10:00:07 02-00-5E-10-00-07[0m
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb5 (-75)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffac (-84)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb5 (-75)
+[[0;92mNEW[0m] Device 02:00:5E:10:00:08 02-00-5E-10-00-08
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;92mNEW[0m] Device 02:00:5E:10:00:09 02-00-5E-10-00-09
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;92mNEW[0m] Device 02:00:5E:10:00:0A 02-00-5E-10-00-0A
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb1 (-79)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb1 (-79)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb2 (-78)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb3 (-77)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:07 RSSI: 0xffffffac (-84)
+[[0;92mNEW[0m] Device 02:00:5E:10:00:0B 02-00-5E-10-00-0B
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0A RSSI: 0xffffffaf (-81)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:04 RSSI: 0xffffffa8 (-88)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb2 (-78)
+[[0;92mNEW[0m] Device 02:00:5E:10:00:0C 02-00-5E-10-00-0C
+[[0;93mCHG[0m] Device 02:00:5E:10:00:03 RSSI: 0xffffffaf (-81)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0B RSSI: 0xffffffb9 (-71)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb1 (-79)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffaf (-81)
+[[0;92mNEW[0m] [1;30mDevice 02:00:5E:10:00:0D 02-00-5E-10-00-0D[0m
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb0 (-80)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb2 (-78)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffaf (-81)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb3 (-77)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0C RSSI: 0xffffffc1 (-63)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb1 (-79)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb1 (-79)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:09 RSSI: 0xffffffad (-83)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffaf (-81)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb0 (-80)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:09 RSSI: 0xffffffac (-84)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0C RSSI: 0xffffffc1 (-63)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:03 RSSI: 0xffffffb2 (-78)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffac (-84)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffac (-84)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:08 RSSI: 0xffffffac (-84)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:09 RSSI: 0xffffffab (-85)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffab (-85)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:09 RSSI: 0xffffffaa (-86)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:08 RSSI: 0xffffffb0 (-80)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb1 (-79)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0A RSSI: 0xffffffae (-82)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:03 RSSI: 0xffffffaf (-81)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:08 RSSI: 0xffffffb2 (-78)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0C RSSI: 0xffffffbe (-66)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:07 RSSI: 0xffffffaa (-86)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:09 RSSI: 0xffffffaf (-81)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb0 (-80)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0B RSSI: 0xffffffb9 (-71)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0B ManufacturerData.Key: 0x0969 (2409)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0B ManufacturerData.Value:
+  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  00
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb0 (-80)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0C RSSI: 0xffffffbe (-66)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb0 (-80)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:07 RSSI: 0xffffffad (-83)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffad (-83)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:09 RSSI: 0xffffffab (-85)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffab (-85)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffab (-85)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0A RSSI: 0xffffffb2 (-78)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:08 RSSI: 0xffffffac (-84)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffab (-85)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffac (-84)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:08 RSSI: 0xffffffac (-84)
+[[0;92mNEW[0m] [1;30mDevice 02:00:5E:10:00:0E 02-00-5E-10-00-0E[0m
+[[0;93mCHG[0m] Device 02:00:5E:10:00:08 RSSI: 0xffffffac (-84)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb5 (-75)
+[[0;92mNEW[0m] [1;30mDevice 02:00:5E:10:00:0F 02-00-5E-10-00-0F[0m
+[[0;93mCHG[0m] Device 02:00:5E:10:00:09 RSSI: 0xffffffad (-83)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffac (-84)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:07 RSSI: 0xffffffae (-82)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb1 (-79)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0C RSSI: 0xffffffbe (-66)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb2 (-78)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb8 (-72)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0A RSSI: 0xffffffae (-82)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb5 (-75)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb2 (-78)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0B RSSI: 0xffffffba (-70)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0B ManufacturerData.Key: 0x0969 (2409)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:0B ManufacturerData.Value:
+  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  00
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:05 RSSI: 0xffffffb1 (-79)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb6 (-74)
+[[0;92mNEW[0m] Device 02:00:5E:10:00:10 02-00-5E-10-00-10
+[[0;93mCHG[0m] Device 02:00:5E:10:00:08 RSSI: 0xffffffaf (-81)
+[[0;93mCHG[0m] Device 02:00:5E:10:00:06 RSSI: 0xffffffb1 (-79)

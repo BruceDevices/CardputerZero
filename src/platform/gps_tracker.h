@@ -50,9 +50,11 @@ struct ScreenFrame {
 
 // Adapt a frame's lines to a screen that shows at most `max_lines` body lines.
 // Bruce text is kept verbatim; when it does not fit, blank lines are dropped
-// first, then Bruce's paired detail lines are merged onto one line
-// ("Date:"+"Time:", "Sat:"+"HDOP:", "GPS Coordinates:"+"Distance:"), and as a
-// last resort the bottom is clipped, as on the firmware's display.
+// first, then Wardriving's "Start Scanning..." once "Scan done. ..." follows,
+// then Bruce's paired detail lines are merged onto one line ("Date:"+"Time:",
+// "Sat:"+"HDOP:", "GPS Coordinates:"+"Distance:"), then Wardriving's "GPS
+// location updated" right above its "Coord:" line, and as a last resort the
+// bottom is clipped, as on the firmware's display.
 std::vector<ScreenLine> fit_lines(const std::vector<ScreenLine>& lines, size_t max_lines);
 
 // GPX 1.1 pieces, byte-identical to the firmware's add_initial_file_data /
@@ -195,8 +197,10 @@ bool begin_tracker(Session& session, Tracker& tracker, const std::string& port, 
 const char* tracker_root_refusal();
 
 // `<self> --gps-tracker [port] [baud]`: the same tracker on the console (SSH
-// testing on the device). Port/baud default to $GPS_UART / $GPS_BAUD, else
-// /dev/serial0 @ 115200 (LoRa+GNSS Cap). Refuses to run as root.
+// testing on the device). main() fills missing args from GPS > Config
+// (~/.bruce/gps.conf, after $GPS_UART / $GPS_BAUD), else /dev/serial0 @ 115200
+// (LoRa+GNSS Cap). Port "Auto" probes the candidate ports for NMEA first.
+// Refuses to run as root.
 int gps_tracker_main(int argc, char** argv);
 
 } // namespace platform::gps

@@ -2,20 +2,35 @@ name: Build .deb
 
 # Cross-compiles the CardputerZero app for aarch64 and publishes the Debian
 # package as a build artifact. Runs on pushes/PRs and on demand; tags also get
-# the .deb attached to a GitHub Release.
+# the .deb attached to a GitHub Release. Every build of main also refreshes the
+# rolling "beta" pre-release with a fixed-name .deb (and install.sh), so the
+# download URL never changes:
+#   https://github.com/<owner>/<repo>/releases/download/beta/bruce-cardputerzero_beta_arm64.deb
 on:
   push:
-    branches: [main]
+    branches: 
+      - main
+      - dev
+      
     tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+# Serialise beta publishes so two quick pushes can't interleave uploads.
+concurrency:
+  group: build-deb-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BETA_TAG: beta
+  BETA_DEB: bruce-cardputerzero_beta_arm64.deb
+
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # for attaching the .deb to a Release on tags
+      contents: write  # for attaching the .deb to Releases (tags + beta)
 
     steps:
       - name: Checkout
@@ -69,3 +84,38 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.pkg.outputs.path }}
+
+      # Rolling "beta" pre-release: same tag, same asset name, replaced on every
+      # build of main. The tag is force-moved to the built commit (pushes made
+      # with GITHUB_TOKEN don't re-trigger workflows, and 'beta' doesn't match
+      # the 'v*' tag filter anyway).
+      - name: Publish to the "beta" release (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PKG: ${{ steps.pkg.outputs.path }}
+        run: |
+          set -euo pipefail
+          cp "$PKG" "dist/${BETA_DEB}"
+
+          git tag -f "$BETA_TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/${BETA_TAG}"
+
+          notes="Rolling beta build of \`main\`, updated automatically on every push.
+
+          - Commit: ${GITHUB_SHA}
+          - Package: $(basename "$PKG")
+          - Built: $(date -u +'%Y-%m-%d %H:%M UTC')
+
+          Install on the CardputerZero:
+          \`\`\`bash
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/${BETA_TAG}/install.sh | bash
+          \`\`\`"
+
+          if gh release view "$BETA_TAG" >/dev/null 2>&1; then
+            gh release edit "$BETA_TAG" --prerelease --title "Beta (latest main)" --notes "$notes"
+          else
+            gh release create "$BETA_TAG" --prerelease --title "Beta (latest main)" \
+              --notes "$notes" --verify-tag
+          fi
+          gh release upload "$BETA_TAG" "dist/${BETA_DEB}" install.sh --clobber

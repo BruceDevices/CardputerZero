@@ -11,7 +11,7 @@
  *   g++ -std=c++17 -pthread -Isrc/platform tests/gps_reader_selfcheck.cpp \
  *       src/platform/gps_parser.cpp src/platform/gps_session.cpp \
  *       src/platform/gps_tracker.cpp src/platform/gpx_writer.cpp \
- *       src/platform/uart_speed.cpp -lutil -o /tmp/gps_reader_check && /tmp/gps_reader_check
+ *       src/platform/gps_port.cpp src/platform/uart_speed.cpp -lutil -o /tmp/gps_reader_check && /tmp/gps_reader_check
  *
  * The packaged executable is checked by tests/gps_tracker_cli_check.sh.
  *

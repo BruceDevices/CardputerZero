@@ -6,7 +6,9 @@
 
 #include "gps_app_screen.h"
 
-#include "bruce_module.h"
+#include "gps_config.h"
+#include "gps_port.h"
+#include "linux_input.h"
 #include "logger.h"
 #include "theme.h"
 #include "ui_const.h"
@@ -14,6 +16,8 @@
 #include <cctype>
 #include <cstdlib>
 #include <ctime>
+#include <thread>
+#include <unistd.h>
 
 namespace screen {
 namespace {
@@ -50,25 +54,9 @@ std::string upper(std::string s) {
     return s;
 }
 
-// Port: $GPS_UART, else the HAT UART. Baud: $GPS_BAUD, else what the startup
-// NMEA probe found, else the board default - 115200 for the LoRa+GNSS Cap
-// (like Bruce's per-board defaults), Bruce's 9600 otherwise.
-void resolve_port(std::string& port, int& baud) {
-    port = "/dev/serial0";
-    if (const char* env = std::getenv("GPS_UART"); env && env[0]) {
-        port = env;
-    }
-    if (const char* env = std::getenv("GPS_BAUD"); env && std::atoi(env) > 0) {
-        baud = std::atoi(env);
-        return;
-    }
-    const auto& mods = hal::modules();
-    if (mods.gps.baud > 0) {
-        baud = mods.gps.baud;
-    } else {
-        baud = mods.kind == hal::CapKind::CapLora ? 115200 : 9600;
-    }
-}
+// Auto: each candidate x baud gets this long to show one valid sentence (the
+// receivers send a burst at least once a second).
+constexpr int kAutoProbeMs = 1500;
 
 } // namespace
 
@@ -78,6 +66,12 @@ GpsAppScreen::GpsAppScreen(viewmodel::BaseViewModel& view_model, app::AssetManag
 }
 
 GpsAppScreen::~GpsAppScreen() {
+    runner_.stop(); // Wardriving child: SIGTERM, wait for it to exit
+    if (sudo_group_) {
+        lv_group_delete(sudo_group_);
+        sudo_group_ = nullptr;
+    }
+    cancel_probe();
     if (leave_timer_) {
         lv_timer_delete(leave_timer_);
         leave_timer_ = nullptr;
@@ -137,9 +131,83 @@ void GpsAppScreen::build_widgets() {
 }
 
 void GpsAppScreen::start_feature() {
-    resolve_port(port_, baud_);
+    const int cat = view_model().active_category();
+    const int item = view_model().active_item();
+    const auto& catalog = model::tool_catalog();
+    if (cat >= 0 && static_cast<size_t>(cat) < catalog.size() && item >= 0 &&
+        static_cast<size_t>(item) < catalog[static_cast<size_t>(cat)].actions.size()) {
+        const auto& action = catalog[static_cast<size_t>(cat)].actions[static_cast<size_t>(item)];
+        if (action.gps_app == model::GpsApp::Wardriving) {
+            start_wardrive(action);
+            return;
+        }
+    }
+    // GPS > Config (~/.bruce/gps.conf, else the board default), with
+    // $GPS_UART / $GPS_BAUD on top.
+    const auto eff = model::gps_config::resolve(model::gps_config::load());
+    port_ = eff.port;
+    baud_ = eff.baud;
     tracker_ = std::make_unique<gps::Tracker>(gps::tracker_options_from_env());
 
+    if (model::gps_config::is_auto(port_) && ::geteuid() != 0) {
+        start_probe();
+        return;
+    }
+    open_port();
+}
+
+// Auto: probe the candidate ports on a worker thread (each one is opened only
+// for its probe window) while the screen shows "Searching GPS..."; the UI
+// thread only polls the job's done flag from the tick timer.
+void GpsAppScreen::start_probe() {
+    phase_ = Phase::Probing;
+    probe_ = std::make_shared<ProbeJob>();
+    const auto ports = gps::auto_order(model::gps_config::current_board_default().port, gps::port_candidates());
+    LOG_INFO("gps: Auto port: probing {} candidate(s) at {} bps first", ports.size(), baud_);
+    auto job = probe_;
+    const int baud = baud_;
+    std::thread([job, ports, baud]() {
+        job->result = gps::auto_detect(ports, baud, model::gps_config::baud_rates(), kAutoProbeMs, &job->cancel);
+        job->done.store(true);
+    }).detach(); // holds its own reference: Back never waits for a probe window
+
+    lv_label_set_text(title_, "GPS TRACKER");
+    lv_obj_set_style_bg_color(popup_, view::palette(view_model().is_dark_mode()).primary, 0);
+    lv_obj_set_style_text_font(popup_label_, &lv_font_montserrat_14, 0);
+    lv_label_set_text(popup_label_, "Searching GPS...");
+    lv_obj_remove_flag(popup_, LV_OBJ_FLAG_HIDDEN);
+    tick_timer_ = lv_timer_create(tick_cb, kTickMs, this);
+}
+
+void GpsAppScreen::cancel_probe() {
+    if (probe_) {
+        probe_->cancel.store(true);
+        probe_.reset();
+    }
+}
+
+void GpsAppScreen::finish_probe() {
+    const gps::ProbeResult result = probe_->result;
+    probe_.reset();
+    if (tick_timer_) {
+        lv_timer_delete(tick_timer_);
+        tick_timer_ = nullptr;
+    }
+    phase_ = Phase::Running;
+    if (result.kind == gps::ProbeResult::Kind::Found) {
+        LOG_INFO("gps: Auto port: {}", result.message);
+        port_ = result.port;
+        baud_ = result.baud;
+        open_port();
+        return;
+    }
+    LOG_INFO("gps: Auto port: {}", result.message);
+    tracker_->fail_open(result.message, /*not_found=*/false); // waits for OK: the text is long
+    render();
+    begin_closing(/*by_back=*/false);
+}
+
+void GpsAppScreen::open_port() {
     // Shared entry with --gps-tracker: refuses root before the UART is opened.
     if (!gps::begin_tracker(session_, *tracker_, port_, baud_, now_ms())) {
         LOG_INFO("gps: GPS Tracker not started on {} @ {}: {}", port_, baud_, tracker_->frame().popup_text);
@@ -155,6 +223,12 @@ void GpsAppScreen::start_feature() {
 
 void GpsAppScreen::tick() {
     if (!tracker_) {
+        return;
+    }
+    if (phase_ == Phase::Probing) {
+        if (probe_ && probe_->done.load()) {
+            finish_probe();
+        }
         return;
     }
     if (phase_ == Phase::Running) {
@@ -183,10 +257,12 @@ void GpsAppScreen::tick() {
 }
 
 void GpsAppScreen::render() {
-    if (!tracker_) {
-        return;
+    if (tracker_) {
+        render_frame(tracker_->frame());
     }
-    const gps::ScreenFrame& frame = tracker_->frame();
+}
+
+void GpsAppScreen::render_frame(const gps::ScreenFrame& frame) {
     if (frame.version == rendered_version_ && rendered_version_ != 0) {
         return;
     }
@@ -288,7 +364,42 @@ void GpsAppScreen::leave() {
         lv_timer_delete(leave_timer_);
         leave_timer_ = nullptr;
     }
+    if (wardriving_) {
+        close_sudo_dialog();
+        // First Back on a running screen: the run's result has not been
+        // handled yet - whether the child still runs, or already exited and
+        // its last output waits for the next poll. OK / Back on an error the
+        // screen already shows (phase Done) just leaves.
+        const bool undelivered = phase_ == Phase::Running;
+        phase_ = Phase::Done;
+        closed_by_back_ = true;
+        // ESC: SIGTERM to the child (sudo relays it). The child stops within
+        // ~100 ms, also during a scan or an Auto probe (at most ~2.5 s more
+        // when storage is still syncing); stop() waits for it and removes the
+        // poll timer, so the rest of its output is drained here.
+        runner_.stop();
+        gps::set_connected(false);
+        if (undelivered && platform::wardrive::storage_error_after_back(decoder_, runner_.take_pending_output())) {
+            LOG_INFO("gps: Wardriving ended: storage (after Back)");
+            render_frame(decoder_.frame());
+            nav_bar().set_icon(2, "OK", back_cb, this);
+            return;
+        }
+        view_model().go_back();
+        return;
+    }
     switch (phase_) {
+        case Phase::Probing:
+            // Nothing opened yet: stop the probe (it exits within ~100 ms on
+            // its own thread) and leave at once.
+            cancel_probe();
+            if (tick_timer_) {
+                lv_timer_delete(tick_timer_);
+                tick_timer_ = nullptr;
+            }
+            phase_ = Phase::Done;
+            view_model().go_back();
+            return;
         case Phase::Running:
             begin_closing(/*by_back=*/true); // ESC: end() + ~GPSTracker()
             return;
@@ -320,6 +431,231 @@ void GpsAppScreen::leave_cb(lv_timer_t* timer) {
 }
 
 void GpsAppScreen::back_cb(lv_event_t* event) {
+    auto* self = static_cast<GpsAppScreen*>(lv_event_get_user_data(event));
+    if (self) {
+        self->leave();
+    }
+}
+
+// --- Wardriving (child process) ---------------------------------------------------
+
+void GpsAppScreen::start_wardrive(const model::ToolAction& action) {
+    wardriving_ = true;
+    phase_ = Phase::Running;
+    local_frame_ = gps::ScreenFrame{};
+    local_frame_.title = "Wardriving";
+    local_frame_.version = 1u << 30; // distinct from the child's frame versions
+    render_frame(local_frame_);
+
+    const bool needs_root = model::action_needs_root(action);
+    pending_argv_ = needs_root ? model::sudo_argv_with_password(action) : action.argv;
+    if (needs_root && !model::sudo_passwordless()) {
+        show_sudo_dialog();
+        return;
+    }
+    launch_wardrive(model::launch_argv(action), "");
+}
+
+void GpsAppScreen::launch_wardrive(const std::vector<std::string>& argv, const std::string& stdin_payload) {
+    child_output_.clear();
+    decoder_ = platform::wardrive::FrameDecoder{};
+    phase_ = Phase::Running;
+    std::string mode;
+    for (size_t i = 0; i + 1 < argv.size(); ++i) {
+        if (argv[i] == "--wardrive") {
+            mode = argv[i + 1];
+        }
+    }
+    LOG_INFO("gps: Wardriving ({}){}", mode, stdin_payload.empty() ? "" : " with the sudo password");
+    if (!runner_.start(argv, &GpsAppScreen::process_cb, this, stdin_payload)) {
+        wardrive_failed("Failed to start Wardriving");
+    }
+}
+
+void GpsAppScreen::process_cb(void* owner, const std::string& text, bool exited) {
+    auto* self = static_cast<GpsAppScreen*>(owner);
+    if (!self) {
+        return;
+    }
+    if (!text.empty()) {
+        self->on_wardrive_output(text);
+    }
+    if (exited) {
+        self->on_wardrive_exit();
+    }
+}
+
+void GpsAppScreen::on_wardrive_output(const std::string& text) {
+    if (child_output_.size() < 16384) {
+        child_output_ += text;
+    }
+    if (decoder_.feed(text)) {
+        gps::set_connected(decoder_.gps_connected()); // drawGpsSmall() while gpsConnected
+        if (decoder_.any_frame()) {
+            render_frame(decoder_.frame());
+        }
+    }
+}
+
+void GpsAppScreen::on_wardrive_exit() {
+    gps::set_connected(false);
+    if (closed_by_back_ || phase_ == Phase::Done) {
+        return;
+    }
+    for (const auto& l : decoder_.log()) {
+        LOG_INFO("gps: wardrive: {}", l);
+    }
+    // sudo refused (no passwordless rule) or rejected the password: the same
+    // on-device prompt as the other root screens.
+    if (!decoder_.any_frame()) {
+        const bool refused = child_output_.find("a password is required") != std::string::npos ||
+                             child_output_.find("a terminal is required") != std::string::npos;
+        const bool rejected = used_password_ && (child_output_.find("incorrect password") != std::string::npos ||
+                                                 child_output_.find("Sorry, try again") != std::string::npos);
+        if (rejected || (!used_password_ && refused)) {
+            show_sudo_dialog();
+            return;
+        }
+    }
+    phase_ = Phase::Done;
+    const std::string& reason = decoder_.end_reason();
+    LOG_INFO("gps: Wardriving ended: {}", reason.empty() ? "no end marker" : reason);
+    if (reason == "stopped") {
+        view_model().go_back();
+        return;
+    }
+    if (reason == "notfound") {
+        // Firmware: displayError("GPS not Found!") then straight back to the menu.
+        leave_timer_ = lv_timer_create(leave_cb, kNotFoundHoldMs, this);
+        lv_timer_set_repeat_count(leave_timer_, 1);
+        return;
+    }
+    if (reason.empty()) {
+        // The child never finished (crash, sudo or exec error): show its last line.
+        // (Bruce's own Serial lines - "ERR: ...", "MESSAGE: ..." - are not it.)
+        std::string last;
+        for (const auto& l : decoder_.log()) {
+            if (l.rfind("ERR: ", 0) != 0 && l.rfind("MESSAGE: ", 0) != 0) {
+                last = l;
+            }
+        }
+        wardrive_failed(last.empty() ? "Wardriving stopped unexpectedly" : last);
+        return;
+    }
+    // Open / storage errors: displayError(msg, true) waits for a key.
+    nav_bar().set_icon(2, "OK", back_cb, this);
+}
+
+void GpsAppScreen::wardrive_failed(const std::string& message) {
+    phase_ = Phase::Done;
+    local_frame_ = decoder_.any_frame() ? decoder_.frame() : local_frame_;
+    local_frame_.popup = gps::PopupKind::Error;
+    local_frame_.popup_text = message;
+    local_frame_.version = (1u << 30) + 1 + decoder_.frame().version;
+    render_frame(local_frame_);
+    nav_bar().set_icon(2, "OK", back_cb, this);
+}
+
+// --- sudo password prompt (mirrors BleScanScreen / ToolRunScreen) ------------------
+
+void GpsAppScreen::show_sudo_dialog() {
+    if (sudo_modal_) {
+        return;
+    }
+    platform::set_text_input_mode(true);
+
+    sudo_modal_ = lv_obj_create(root());
+    lv_obj_set_size(sudo_modal_, view::kScreenWidth, view::kScreenHeight);
+    lv_obj_set_pos(sudo_modal_, 0, 0);
+    lv_obj_set_style_bg_color(sudo_modal_, lv_obj_get_style_bg_color(root(), LV_PART_MAIN), 0);
+    lv_obj_set_style_bg_opa(sudo_modal_, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(sudo_modal_, 0, 0);
+    lv_obj_set_style_pad_all(sudo_modal_, 0, 0);
+    lv_obj_clear_flag(sudo_modal_, LV_OBJ_FLAG_SCROLLABLE);
+
+    auto* title = lv_label_create(sudo_modal_);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_label_set_text(title, "Sudo password needed");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+    sudo_ta_ = lv_textarea_create(sudo_modal_);
+    lv_obj_set_size(sudo_ta_, LV_PCT(88), 34);
+    lv_obj_align(sudo_ta_, LV_ALIGN_TOP_MID, 0, 34);
+    lv_textarea_set_one_line(sudo_ta_, true);
+    lv_textarea_set_password_mode(sudo_ta_, true);
+    lv_obj_set_style_text_font(sudo_ta_, &lv_font_montserrat_14, 0);
+    lv_obj_add_event_cb(sudo_ta_, sudo_submit_cb, LV_EVENT_READY, this);
+
+    auto* hint = lv_label_create(sudo_modal_);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
+    lv_label_set_text(hint, "device default is often 'pi'");
+    lv_obj_align_to(hint, sudo_ta_, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+
+    auto* keys = lv_label_create(sudo_modal_);
+    lv_obj_set_style_text_font(keys, &lv_font_montserrat_12, 0);
+    lv_label_set_text(keys, "ESC cancel - Enter OK");
+    lv_obj_align_to(keys, hint, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
+
+    nav_bar().set_icon(0, view::NAV_BACK, sudo_cancel_cb, this);
+    nav_bar().set_icon(2, view::NAV_RUN, sudo_submit_cb, this);
+    nav_bar().set_enabled(1, false);
+    nav_bar().set_enabled(3, false);
+    nav_bar().set_enabled(4, false);
+
+    sudo_group_ = lv_group_create();
+    lv_group_add_obj(sudo_group_, sudo_ta_);
+    lv_group_focus_obj(sudo_ta_);
+    for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev; indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_KEYPAD) {
+            lv_indev_set_group(indev, sudo_group_);
+        }
+    }
+}
+
+void GpsAppScreen::close_sudo_dialog() {
+    if (!sudo_modal_) {
+        return;
+    }
+    for (lv_indev_t* indev = lv_indev_get_next(nullptr); indev; indev = lv_indev_get_next(indev)) {
+        if (lv_indev_get_type(indev) == LV_INDEV_TYPE_KEYPAD) {
+            lv_indev_set_group(indev, nullptr);
+        }
+    }
+    lv_group_delete(sudo_group_);
+    sudo_group_ = nullptr;
+    lv_obj_delete(sudo_modal_);
+    sudo_modal_ = nullptr;
+    sudo_ta_ = nullptr;
+    platform::set_text_input_mode(false);
+    nav_bar().set_enabled(4, true);
+    // Back to the run screen's nav: Back only.
+    configure_common_nav(view::NAV_BACK, back_cb, this);
+    for (size_t slot = 1; slot <= 3; ++slot) {
+        nav_bar().set_icon(slot, "", nullptr, nullptr);
+    }
+}
+
+void GpsAppScreen::submit_sudo_dialog() {
+    if (!sudo_modal_) {
+        return;
+    }
+    const std::string password = lv_textarea_get_text(sudo_ta_);
+    if (password.empty()) {
+        return;
+    }
+    close_sudo_dialog();
+    used_password_ = true;
+    launch_wardrive(pending_argv_, password + "\n");
+}
+
+void GpsAppScreen::sudo_submit_cb(lv_event_t* event) {
+    auto* self = static_cast<GpsAppScreen*>(lv_event_get_user_data(event));
+    if (self) {
+        self->submit_sudo_dialog();
+    }
+}
+
+void GpsAppScreen::sudo_cancel_cb(lv_event_t* event) {
     auto* self = static_cast<GpsAppScreen*>(lv_event_get_user_data(event));
     if (self) {
         self->leave();
