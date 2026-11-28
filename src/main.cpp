@@ -16,6 +16,7 @@
 #include "root_sh.h"
 #include "rfid_st25r.h"
 #include "rfid_mfrc522.h"
+#include "rfid_pn532.h"
 #include "wardrive.h"
 
 #include <algorithm>
@@ -106,6 +107,10 @@ int main(int argc, char** argv) {
     }
     if (argc >= 2 && std::strcmp(argv[1], "--rfid2-write") == 0) {
         return platform::rfid2_write_main(argc - 2, argv + 2);
+    }
+    // PN532 (I2C 0x24 or SPI): native GetFirmwareVersion presence probe.
+    if (argc >= 2 && std::strcmp(argv[1], "--pn532-detect") == 0) {
+        return platform::pn532_detect_main(argc - 2, argv + 2);
     }
     // Bruce GPS Tracker on the console (same core as the GPS Tracker screen):
     // `--gps-tracker [port] [baud]`, GPX to ~/BruceGPS. For SSH testing.

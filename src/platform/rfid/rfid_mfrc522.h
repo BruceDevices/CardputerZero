@@ -29,6 +29,12 @@ namespace platform {
 // "/dev/i2c-1@0x28"), else $RFID2_I2C / auto-scan. All print a human-readable
 // report and return 0 on success, non-zero otherwise.
 
+// Quick presence probe: scan every I2C bus for an MFRC522/WS1850S at 0x28 (or
+// $RFID2_I2C_ADDR) and confirm its VersionReg. Opens/closes its own handle;
+// returns false off Linux. Used by the menu to show the RFID2 rows only when
+// the reader is actually connected.
+bool rfid2_present();
+
 int rfid2_detect_main(int argc, char** argv);  // --rfid2-detect [spec]
 int rfid2_read_main(int argc, char** argv);    // --rfid2-read   [spec]
 int rfid2_dump_main(int argc, char** argv);    // --rfid2-dump   [spec]

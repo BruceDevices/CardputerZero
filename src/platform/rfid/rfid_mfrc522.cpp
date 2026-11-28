@@ -582,6 +582,25 @@ std::string arg_spec(int argc, char** argv, int at) {
 
 // ===== Subcommand entry points ===============================================
 
+bool rfid2_present() {
+#if defined(__linux__)
+    uint8_t addr = APP_RFID2_I2C_ADDR;
+    if (const char* env = std::getenv("RFID2_I2C_ADDR")) {
+        if (env[0]) addr = static_cast<uint8_t>(std::strtol(env, nullptr, 0));
+    }
+    for (const auto& bus : i2c_buses()) {
+        std::string discard;
+        if (open_one(bus, addr, discard)) {
+            close_chip();
+            return true;
+        }
+    }
+    return false;
+#else
+    return false;
+#endif
+}
+
 int rfid2_detect_main(int argc, char** argv) {
 #if defined(__linux__)
     std::string report = "M5 RFID2 (MFRC522 / WS1850S) detection\n";

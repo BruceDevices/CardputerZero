@@ -112,6 +112,13 @@ std::string nmap_state_dir();
 void refresh_rf_category(bool cc1101_present, int cs_gpio, int gdo0_gpio);
 std::string rf_recordings_dir();
 
+// Rebuild the "RFID" category so each module's actions appear only when that
+// module was detected: ST25R3916 (CAP over SPI or an I2C unit at 0x50), the M5
+// RFID2 / MFRC522 (I2C), and a PN532 (I2C or SPI). The view probes the hardware
+// and passes the three presence flags in; a per-module "Detect" row stays
+// visible either way so the operator can (re)probe from the menu.
+void refresh_rfid_category(bool st25r_present, bool rfid2_present, bool pn532_present);
+
 // A ToolAction with an empty argv is a navigation row (not a launchable tool):
 // selecting it mutates dynamic state instead of running a process. Screens route
 // such a row here, then re-enter the same category to show the updated list -

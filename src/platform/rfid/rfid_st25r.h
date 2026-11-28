@@ -63,6 +63,12 @@ std::string to_hex(const uint8_t* data, size_t len, bool colons = false);
 //   "i2c:/dev/i2c-1@0x50" - I2C on that bus at that address
 // All print a human-readable report and return 0 on success, non-zero otherwise.
 
+// Quick, side-effect-light presence probe for an ST25R3916 wired on I2C at 0x50
+// (an external NFC unit, not the CAP). Scans every I2C bus and reads
+// IC_IDENTITY. The SPI/CAP case is reported by hal::has_st25r() instead, so the
+// menu ORs the two. Returns false off Linux. Opens and closes its own handle.
+bool st25r_present_i2c();
+
 int rfid_read_main(int argc, char** argv);           // --rfid-read [spidev]
 int rfid_dump_main(int argc, char** argv);            // --rfid-dump [spidev]
 int rfid_write_main(int argc, char** argv);           // --rfid-write <page> <hex4> [spidev]

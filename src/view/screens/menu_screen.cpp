@@ -10,6 +10,9 @@
 #include "bindings.h"
 #include "bruce_module.h"
 #include "gps_port.h"
+#include "rfid_mfrc522.h"
+#include "rfid_pn532.h"
+#include "rfid_st25r.h"
 #include "theme.h"
 #include "tool_catalog.h"
 #include "ui_const.h"
@@ -178,6 +181,21 @@ void MenuScreen::build_list(lv_obj_t* content) {
         // (a readdir of /dev; no port is opened here).
         model::refresh_gps_category(platform::gps::port_candidates());
     }
+    bool rfid_category = false;
+    bool rfid_st25r = false, rfid_rfid2 = false, rfid_pn532 = false;
+    if (category_index_ >= 0 &&
+        category_index_ < static_cast<int>(pre_refresh_catalog.size()) &&
+        std::string(pre_refresh_catalog[static_cast<size_t>(category_index_)].label) == "RFID") {
+        // Show each module's tag actions only when it is actually present. The
+        // CAP's ST25R (SPI) comes from the same HAL probe the RF menu uses; an
+        // I2C ST25R unit, the RFID2 (MFRC522) and a PN532 are probed natively.
+        rfid_category = true;
+        hal::redetect();
+        rfid_st25r = hal::has_st25r() || platform::st25r_present_i2c();
+        rfid_rfid2 = platform::rfid2_present();
+        rfid_pn532 = platform::pn532_present();
+        model::refresh_rfid_category(rfid_st25r, rfid_rfid2, rfid_pn532);
+    }
     const auto& catalog = model::tool_catalog();
 
     auto* header = lv_label_create(content);
@@ -187,6 +205,13 @@ void MenuScreen::build_list(lv_obj_t* content) {
     const auto& category = catalog[static_cast<size_t>(category_index_)];
     if (std::string(category.label) == "Sub-GHz / RF" && !hal::has_cc1101()) {
         lv_label_set_text(header, "Sub-GHz / RF (CC1101 not detected)");
+    } else if (rfid_category) {
+        std::string tags;
+        if (rfid_st25r) tags += tags.empty() ? "ST25R" : ", ST25R";
+        if (rfid_rfid2) tags += tags.empty() ? "RFID2" : ", RFID2";
+        if (rfid_pn532) tags += tags.empty() ? "PN532" : ", PN532";
+        lv_label_set_text(header, tags.empty() ? "RFID (no module detected)"
+                                               : ("RFID (" + tags + ")").c_str());
     } else {
         lv_label_set_text(header, model::category_header(category_index_).c_str());
     }

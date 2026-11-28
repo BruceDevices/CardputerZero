@@ -684,6 +684,21 @@ size_t scan_once(std::string& report, uint8_t* uid, size_t uidcap, uint8_t& sak,
 } // namespace
 #endif
 
+bool st25r_present_i2c() {
+#if defined(__linux__)
+    for (const auto& bus : i2c_buses()) {
+        std::string discard;
+        if (try_open_i2c(bus, kI2cAddr, discard)) {
+            close_chip();
+            return true;
+        }
+    }
+    return false;
+#else
+    return false;
+#endif
+}
+
 int rfid_read_main(int argc, char** argv) {
 #if defined(__linux__)
     std::string report = "RFID read (ISO14443A)\n";

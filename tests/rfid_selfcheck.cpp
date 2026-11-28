@@ -6,9 +6,9 @@
  * Standalone self-check for the ISO14443A protocol helpers. Not part of the
  * CMake build. Run manually:
  *
- *   g++ -std=c++17 -Isrc/platform tests/rfid_selfcheck.cpp \
- *       src/platform/rfid_st25r.cpp src/platform/cap_bringup.cpp \
- *       -o /tmp/rfid_check && /tmp/rfid_check
+ *   g++ -std=c++17 -Isrc/platform -Isrc/platform/rfid tests/rfid_selfcheck.cpp \
+ *       src/platform/rfid/rfid_st25r.cpp src/platform/rfid/rfid_i2c.cpp \
+ *       src/platform/cap_bringup.cpp -o /tmp/rfid_check && /tmp/rfid_check
  *
  * CRC_A is the part that silently breaks every write/select if wrong, so it is
  * checked against an independent bit-by-bit reference over random inputs rather
