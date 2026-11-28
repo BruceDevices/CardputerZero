@@ -62,6 +62,18 @@ struct FakeSys {
     bool port_free_val = true;
     bool connected_val = false;
 
+    // AP readiness inputs (drive the REAL wait/parse logic in PortalNet).
+    bool pid_alive_val = true;               // hostapd pidfile's process is alive
+    std::string ap_log = "wlan0: AP-ENABLED\n"; // default: AP up
+    std::vector<std::string> ap_log_seq;     // if set, consumed per read (last entry repeats)
+    size_t ap_log_i = 0;
+    std::string next_ap_log() {
+        if (ap_log_seq.empty()) return ap_log;
+        const std::string s = ap_log_seq[std::min(ap_log_i, ap_log_seq.size() - 1)];
+        ++ap_log_i;
+        return s;
+    }
+
     // Modeled firewall state.
     bool nft_table = false;
     std::set<std::string> ipt; // keys like "udp:1053", "tcp:1053"
@@ -159,6 +171,11 @@ struct FakeSys {
         };
         e.wait_connected = [this](const std::string&) { return connected_val; };
         e.kill_pidfile = [this](const std::string& n) { log.push_back("kill:" + n); };
+        e.read_file = [this](const std::string& p) {
+            return has(p, "hostapd.log") ? next_ap_log() : std::string();
+        };
+        e.pid_alive = [this](const std::string&) { return pid_alive_val; };
+        e.sleep_ms = [](int) {};
         return e;
     }
 };
@@ -232,11 +249,23 @@ int main() {
     }
 
     // --- config generators --------------------------------------------------
-    const std::string hap = hostapd_conf("wlan0", "My \"Net\"", 6);
+    const std::string hap = hostapd_conf("wlan0", "My \"Net\"", 6, "JP");
     assert(hap.find("driver=nl80211") != std::string::npos); // mandatory line
     assert(hap.find("interface=wlan0") != std::string::npos);
     assert(hap.find("ssid=My \\\"Net\\\"") != std::string::npos);
     assert(hap.find("channel=6") != std::string::npos);
+    // brcmfmac needs a regdom to beacon: country_code + ieee80211d.
+    assert(hap.find("\ncountry_code=JP\n") != std::string::npos);
+    assert(hap.find("\nieee80211d=1\n") != std::string::npos);
+    assert(hostapd_conf("wlan0", "x", 1, "").find("country_code") == std::string::npos);
+
+    // country-code validation + `iw reg get` parsing.
+    assert(valid_country("US") && valid_country("jp") && !valid_country("USA") &&
+           !valid_country("U1") && !valid_country("U"));
+    assert(parse_reg_country("global\ncountry JP: DFS-JP\n\t(2402 - 2482 @ 40)\n") == "JP");
+    assert(parse_reg_country("country gb: DFS-ETSI\n") == "GB"); // lowercased input -> upper
+    assert(parse_reg_country("global\ncountry 00: DFS-UNSET\n").empty()); // world / unset
+    assert(parse_reg_country("").empty());
     const std::string dns = dnsmasq_conf("wlan0", "192.168.4.1");
     assert(dns.find("address=/#/192.168.4.1") != std::string::npos); // DNS hijack
     assert(dns.find("dhcp-range=192.168.4.10,192.168.4.50") != std::string::npos);
@@ -326,23 +355,68 @@ int main() {
         o.gateway = "192.168.4.1";
         return o;
     }();
+    // Drive the production precondition: iw present + a readable regdom, then
+    // resolve_country (US). start() refuses to act until a country is resolved,
+    // so every lifecycle case goes through the real resolve path (no shortcut).
+    auto prepare = [](FakeSys& fs, PortalNet& net) {
+        fs.tools.push_back("iw");
+        fs.output["iw reg get"] = "country US:\n";
+        std::string e;
+        assert(net.resolve_country("", e));
+    };
 
-    {   // hostapd never comes up: no addr assignment, no dnsmasq, no DNAT.
-        FakeSys fs; // present empty -> no pidfiles appear
+    {   // regdom guard: start() with NO resolved country issues NOTHING.
+        FakeSys fs;
+        fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1"); // deliberately NOT prepared
+        const StartResult r = net.start(lopts);
+        assert(!r.ok() && !r.regdom && fs.log.empty()); // not a single command issued
+    }
+
+    {   // hostapd never reaches AP-ENABLED (pid dead): regdom set, then bail
+        // before addressing / DNS / DNAT.
+        FakeSys fs;
+        fs.pid_alive_val = false; // hostapd pid never alive -> never ready
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
         const StartResult r = net.start(lopts);
-        assert(!r.hostapd && !r.dnsmasq && !r.dnat && !r.ok());
-        assert(!fs.ran("ip addr replace")); // bailed before addressing
+        assert(r.regdom && !r.hostapd && !r.dnsmasq && !r.dnat && !r.ok());
+        assert(fs.ran("iw reg set US"));     // regdom set before hostapd
+        assert(!fs.ran("ip addr replace"));  // but bailed before addressing
         assert(!fs.ran("dnsmasq -C"));
         assert(!fs.ran("nft -f") && !fs.nft_table && fs.ipt.empty());
     }
 
-    {   // hostapd up, dnsmasq never: every candidate port tried, DNAT skipped.
+    {   // readiness honours the LAST AP event: enabled-then-disabled is NOT up.
         FakeSys fs;
-        fs.present = {"hostapd.pid"}; // dnsmasq.pid never present
+        fs.ap_log = "wlan0: AP-ENABLED\nwlan0: AP-DISABLED\n";
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
+        const StartResult r = net.start(lopts);
+        assert(!r.hostapd); // the disable cancels the earlier enable
+    }
+
+    {   // FAILED regdom set: no hostapd / addressing / DNS / DNAT follows.
+        FakeSys fs;
+        fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
+        fs.fail = {"iw reg set"}; // the global regdom request fails
+        const StartResult r = net.start(lopts);
+        assert(!r.regdom && !r.ok());
+        assert(!fs.ran("hostapd -B") && !fs.ran("ip addr replace") && !fs.ran("dnsmasq -C") &&
+               !fs.ran("nft -f"));
+    }
+
+    {   // hostapd up, dnsmasq never: every candidate port tried, DNAT skipped.
+        FakeSys fs;
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
         const StartResult r = net.start(lopts);
         assert(r.hostapd && !r.dnsmasq && !r.dnat);
         assert(fs.count("dnsmasq -C") == (int)dns_port_candidates().size()); // retried each
@@ -350,11 +424,11 @@ int main() {
     }
 
     {   // AP-restart failure propagates through verify(): restart not ok.
-        FakeSys fs;
-        fs.present = {"hostapd.pid"}; // dnsmasq fails when bringing the AP back
-        fs.connected_val = true;      // password would verify
+        FakeSys fs;              // dnsmasq.pid never present -> restart can't finish
+        fs.connected_val = true; // password would verify
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
         StartResult restart;
         const bool connected = net.verify(lopts, "pw", restart);
         assert(connected);                   // wait_connected said COMPLETED
@@ -369,10 +443,11 @@ int main() {
         FakeSys fs;
         fs.tools = {"iptables"};
         fs.present = {"hostapd.pid", "dnsmasq.pid"};
-        fs.fail = {"-A PREROUTING -i wlan0 -d 192.168.4.1 -p tcp",  // 2nd add fails
-                   "-D PREROUTING -i wlan0 -d 192.168.4.1 -p udp"}; // udp rollback delete fails
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
+        fs.fail = {"-A PREROUTING -i wlan0 -d 192.168.4.1 -p tcp",  // 2nd add fails
+                   "-D PREROUTING -i wlan0 -d 192.168.4.1 -p udp"}; // udp rollback delete fails
         const StartResult r = net.start(lopts);
         assert(r.hostapd && r.dnsmasq && !r.dnat);        // firewall install failed
         assert(fs.ipt.count("udp:1053") == 1);            // udp rule really survives
@@ -393,6 +468,7 @@ int main() {
         fs.connected_val = true;
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
         assert(net.start(lopts).ok());                    // running on 1053
         assert(fs.ipt.count("udp:1053") && fs.ipt.count("tcp:1053"));
         fs.fail = {"-D PREROUTING -i wlan0 -d 192.168.4.1 -p udp",
@@ -413,6 +489,7 @@ int main() {
         fs.present = {"hostapd.pid", "dnsmasq.pid"}; // tools default {"nft"}
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
         assert(net.start(lopts).ok());
         assert(net.state().dnat == DnatBackend::Nft && fs.nft_table);
         assert(net.cleanup());                 // confirmed removal
@@ -425,11 +502,12 @@ int main() {
     {   // FINDING 3 state: a FAILED delete keeps ownership and retries.
         FakeSys fs;
         fs.present = {"hostapd.pid", "dnsmasq.pid"};
-        fs.fail = {"nft delete table"}; // delete never takes -> table survives
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
         assert(net.start(lopts).ok());
-        const int del_before = fs.count("nft delete table"); // from start()'s stale reconcile
+        fs.fail = {"nft delete table"}; // delete never takes -> table survives
+        const int del_before = fs.count("nft delete table");
         assert(!net.cleanup());                 // not clean (table still present)
         assert(!net.cleanup());                 // retried, not given up
         assert(fs.nft_table);                   // really still there
@@ -441,10 +519,11 @@ int main() {
         // "absent": we must retain ownership rather than claim a clean teardown.
         FakeSys fs;
         fs.present = {"hostapd.pid", "dnsmasq.pid"};
-        fs.fail = {"nft list table"}; // presence probe errors out
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
         assert(net.start(lopts).ok());
+        fs.fail = {"nft list table"}; // presence probe errors out
         assert(!net.cleanup());                     // Unknown state -> not fully clean
         assert(!fs.nft_table);                      // (actually gone, but we can't confirm)
         assert(net.state().dnat_rules.size() == 1); // ownership retained on unknown
@@ -453,10 +532,11 @@ int main() {
     {   // FINDING 2b: BOTH delete and inspection fail -> ownership retained.
         FakeSys fs;
         fs.present = {"hostapd.pid", "dnsmasq.pid"};
-        fs.fail = {"nft delete table", "nft list table"};
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
         assert(net.start(lopts).ok());
+        fs.fail = {"nft delete table", "nft list table"};
         assert(!net.cleanup());
         assert(fs.nft_table);                       // still present
         assert(net.state().dnat_rules.size() == 1); // not dropped
@@ -465,10 +545,11 @@ int main() {
     {   // cleanup counts a failed address flush against "fully clean".
         FakeSys fs;
         fs.present = {"hostapd.pid", "dnsmasq.pid"};
-        fs.fail = {"ip addr flush"}; // checked flush fails
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
         assert(net.start(lopts).ok());
+        fs.fail = {"ip addr flush"}; // checked flush fails
         assert(!net.cleanup()); // DNAT removed, but flush failed -> not fully clean
     }
 
@@ -477,9 +558,10 @@ int main() {
         FakeSys fs;
         fs.tools = {"nft", "iptables"};
         fs.present = {"hostapd.pid", "dnsmasq.pid"};
-        fs.fail = {"nft -f"}; // nft install fails; its rollback delete+probe confirm absence
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
+        fs.fail = {"nft -f"}; // nft install fails; its rollback delete+probe confirm absence
         const StartResult r = net.start(lopts);
         assert(r.ok());                                 // fell back successfully
         assert(net.state().dnat == DnatBackend::Iptables);
@@ -491,9 +573,10 @@ int main() {
         FakeSys fs;
         fs.tools = {"nft", "iptables"};
         fs.present = {"hostapd.pid", "dnsmasq.pid"};
-        fs.fail = {"nft -f", "nft delete table", "nft list table"}; // load fails, rollback unknown
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
+        fs.fail = {"nft -f", "nft delete table", "nft list table"}; // load fails, rollback unknown
         const StartResult r = net.start(lopts);
         assert(!r.dnat);                   // did not fall back
         assert(fs.ipt.empty());            // no iptables rule was attempted
@@ -506,6 +589,7 @@ int main() {
         fs.present = {"hostapd.pid", "dnsmasq.pid"};
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
         assert(net.start(lopts).ok());
         fs.fail_n["nft delete table"] = 1; // teardown's FIRST delete fails, then succeeds
         assert(net.teardown(3));           // bounded retry rides out the transient failure
@@ -515,12 +599,72 @@ int main() {
     {   // SHARED TEARDOWN: a PERSISTENT failure is reported (false), not hidden.
         FakeSys fs;
         fs.present = {"hostapd.pid", "dnsmasq.pid"};
-        fs.fail = {"nft delete table"}; // never clears
         PortalNet net(fs.env());
         net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
         assert(net.start(lopts).ok());
+        fs.fail = {"nft delete table"}; // never clears
         assert(!net.teardown(3));          // persistent -> caller exits nonzero + diagnoses
         assert(fs.nft_table && net.state().dnat_rules.size() == 1);
+    }
+
+    // --- AP-ENABLED readiness parsing (pure) + the real poll via the seam ----
+    assert(ap_event_enabled("wlan0", "wlan0: AP-ENABLED\n"));
+    assert(!ap_event_enabled("wlan0", "wlan0: AP-ENABLED")); // partial line (no newline)
+    assert(!ap_event_enabled("wlan0", "wlan0: AP-ENABLED\nwlan0: AP-DISABLED\n")); // last wins
+    assert(ap_event_enabled("wlan0", "wlan0: AP-DISABLED\nwlan0: AP-ENABLED\n")); // re-enabled
+    assert(!ap_event_enabled("wlan0", "something AP-ENABLED here\n")); // not an exact record
+    assert(!ap_event_enabled("wlan0", "wlan1: AP-ENABLED\n"));         // other interface
+    assert(!ap_event_enabled("wlan0", ""));
+    {   // the REAL await loop via the injected seam: a split write that only
+        // completes on a later poll is still recognized.
+        FakeSys fs;
+        fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        fs.ap_log_seq = {"wlan0: AP-ENAB", "wlan0: AP-ENABLED\n"}; // partial, then complete
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
+        assert(net.start(lopts).hostapd); // poll 1 partial, poll 2 completes -> up
+    }
+    {   // a stale/dead pidfile is never "ready" even with an AP-ENABLED log.
+        FakeSys fs;
+        fs.pid_alive_val = false;
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        prepare(fs, net);
+        assert(!net.start(lopts).hostapd);
+    }
+
+    {   // regdom is GLOBAL: teardown restores the device's ORIGINAL country.
+        // --country JP wins the AP's regdom while the device was US, so the
+        // restore ("iw reg set US") is distinguishable from the set ("...JP").
+        FakeSys fs;
+        fs.tools = {"iw", "nft"};
+        fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        fs.output["iw reg get"] = "country US:\n"; // device's original regdom
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        std::string e;
+        assert(net.resolve_country("JP", e) && net.state().country == "JP" &&
+               net.state().orig_country == "US");
+        assert(net.start(lopts).ok());
+        assert(fs.ran("iw reg set JP") && !fs.ran("iw reg set US")); // set JP, not yet restored
+        assert(net.cleanup());
+        assert(fs.ran("iw reg set US")); // ORIGINAL regdom restored on teardown
+    }
+
+    {   // unknown original regdom (world): nothing to restore, cleanup still clean.
+        FakeSys fs;
+        fs.tools = {"iw", "nft"};
+        fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        fs.output["iw reg get"] = "country 00:\n"; // world -> orig unknown
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        std::string e;
+        assert(net.resolve_country("DE", e) && net.state().orig_country.empty());
+        assert(net.start(lopts).ok());
+        assert(net.cleanup());           // no restore attempted, still fully clean
+        assert(!fs.ran("iw reg set 00")); // never tries to set the world/unset code
     }
 
     {   // capture_ownership parses nmcli; release honors managed state.
@@ -589,6 +733,71 @@ int main() {
         netr.set_interface("wlan0", "192.168.4.1");
         assert(netr.capture_ownership());
         assert(!netr.release_interface());
+    }
+
+    // --- country / regdom resolution (precedence + failure) -----------------
+    {   // --country flag wins over the device regdom.
+        FakeSys fs;
+        fs.tools = {"iw"};
+        fs.output["iw reg get"] = "country JP:\n";
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        std::string err;
+        assert(net.resolve_country("us", err)); // lowercase flag accepted, uppercased
+        assert(net.state().country == "US");
+
+        // No flag -> read the device regdom.
+        FakeSys fs2;
+        fs2.tools = {"iw"};
+        fs2.output["iw reg get"] = "country JP:\n";
+        PortalNet net2(fs2.env());
+        net2.set_interface("wlan0", "192.168.4.1");
+        assert(net2.resolve_country("", err) && net2.state().country == "JP");
+
+        // Unknown regdom (world) and no flag -> fail (and nothing to start on).
+        FakeSys fs3;
+        fs3.tools = {"iw", "nft"};
+        fs3.output["iw reg get"] = "country 00:\n";
+        PortalNet net3(fs3.env());
+        net3.set_interface("wlan0", "192.168.4.1");
+        assert(!net3.resolve_country("", err) && net3.state().country.empty());
+        assert(!fs3.ran("hostapd") && !fs3.ran("nft -f")); // caller never starts
+
+        // No `iw` at all -> fail with a clear message (needed to read AND set).
+        FakeSys fs4;
+        fs4.tools = {"nft"};
+        PortalNet net4(fs4.env());
+        net4.set_interface("wlan0", "192.168.4.1");
+        assert(!net4.resolve_country("US", err));
+
+        // Invalid --country rejected.
+        FakeSys fs5;
+        fs5.tools = {"iw"};
+        PortalNet net5(fs5.env());
+        net5.set_interface("wlan0", "192.168.4.1");
+        assert(!net5.resolve_country("USA", err));
+    }
+
+    {   // start() issues `iw reg set` BEFORE hostapd, and the conf carries the CC.
+        FakeSys fs;
+        fs.tools = {"iw", "nft"};
+        fs.present = {"hostapd.pid", "dnsmasq.pid"};
+        fs.output["iw reg get"] = "country JP:\n";
+        PortalNet net(fs.env());
+        net.set_interface("wlan0", "192.168.4.1");
+        std::string err;
+        assert(net.resolve_country("", err)); // -> JP
+        PortalOptions o = lopts;
+        o.country.clear(); // force use of the resolved net_ country (JP)
+        assert(net.start(o).ok());
+        // regdom set precedes the hostapd launch in the command log.
+        int i_reg = -1, i_hostapd = -1;
+        for (size_t k = 0; k < fs.log.size(); ++k) {
+            if (i_reg < 0 && fs.log[k].find("iw reg set JP") != std::string::npos) i_reg = (int)k;
+            if (i_hostapd < 0 && fs.log[k].find("hostapd -B") != std::string::npos)
+                i_hostapd = (int)k;
+        }
+        assert(i_reg >= 0 && i_hostapd >= 0 && i_reg < i_hostapd);
     }
 
     // --- route table, plain capture mode ------------------------------------

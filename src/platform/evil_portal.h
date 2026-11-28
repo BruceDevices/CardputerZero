@@ -53,7 +53,8 @@ struct PortalOptions {
     std::string html_page;
     std::string output_file = "default_creds.csv";
     bool verify_mode = false;
-    std::string creds_dir; // $HOME/.bruce/BruceEvilCreds (set by evil_portal_main)
+    std::string creds_dir;      // $HOME/.bruce/BruceEvilCreds (set by evil_portal_main)
+    std::string country;        // optional --country <CC>; resolved by PortalNet otherwise
 };
 
 // Live counters shown in the run log (Bruce's screen shows the same numbers).
@@ -124,8 +125,29 @@ std::string ssid_post_page(const std::string& ap_name);
 // --- config generators (hostapd/dnsmasq/wpa_supplicant) ---------------------
 
 // Open-AP config for hostapd (driver line required, or hostapd refuses to
-// start - the bug the old "Rogue open AP" menu entry had).
-std::string hostapd_conf(const std::string& iface, const std::string& ssid, int channel);
+// start - the bug the old "Rogue open AP" menu entry had). A non-empty
+// `country` adds country_code=<CC> + ieee80211d=1: on brcmfmac (Pi onboard
+// wifi) an AP typically will not beacon without a regulatory domain, so this
+// gives it one (not a guarantee of beaconing on every firmware/channel).
+std::string hostapd_conf(const std::string& iface, const std::string& ssid, int channel,
+                         const std::string& country = "");
+
+// A syntactically valid 2-letter country code (ASCII letters). Uppercased
+// forms are canonical; pass the result of to-upper for comparison.
+bool valid_country(const std::string& cc);
+
+// The country from `iw reg get` output: the FIRST "country XX:" record (at a
+// line boundary), uppercased, or "" when unset ("country 00:" / world /
+// absent). This is a simple first-record parser, not a PHY/interface-aware
+// selection - with multiple regulatory sections it is a best-effort read.
+std::string parse_reg_country(const std::string& iw_reg_get_output);
+
+// Does hostapd's log show OUR interface's AP currently enabled? Scans COMPLETE
+// (newline-terminated) lines for exact "<iface>: AP-ENABLED" records and
+// honours the LAST AP-state event, so an AP-ENABLED later cancelled by an
+// AP-DISABLED / INTERFACE-DISABLED reads as NOT enabled. Note: a log event is
+// not itself proof that a beacon is on the air.
+bool ap_event_enabled(const std::string& iface, const std::string& hostapd_log);
 // DHCP + DNS hijack: every name resolves to the gateway, clients get it as
 // router and DNS server - the Linux stand-in for DNSServer.start(53, "*", ip).
 // dnsmasq listens on `dns_port` (an alternate high port) so it can coexist
@@ -188,6 +210,9 @@ struct DnatRule {
 struct NetState {
     std::string iface;
     std::string gateway;
+    std::string country;             // regulatory domain for the AP (resolved before mutation)
+    std::string orig_country;        // device regdom before we changed it ("" = unknown/world)
+    bool regdom_changed = false;     // we issued `iw reg set` and owe a restore
     int dns_port = 0;                // chosen alternate DNS port (0 = none yet)
     DnatBackend dnat = DnatBackend::None; // backend of the CURRENTLY-active redirect (for the log)
     std::vector<DnatRule> dnat_rules;     // rules still owed a (confirmed) removal
@@ -227,6 +252,12 @@ struct PortalEnv {
     std::function<void(const std::string& path, const std::string& content)> write_file;
     std::function<bool(const std::string& iface)> wait_connected;  // verify: poll wpa -> connected?
     std::function<void(const std::string& pid_name)> kill_pidfile; // stop a tracked daemon
+    // AP-readiness primitives (the polling + log parsing lives in PortalNet so
+    // it is unit-testable): read a file's current contents, is the pidfile's
+    // process actually alive, and a (test-noop) inter-poll sleep.
+    std::function<std::string(const std::string& path)> read_file;
+    std::function<bool(const std::string& pid_path)> pid_alive;
+    std::function<void(int ms)> sleep_ms;
 
     int run(const std::string& c) const { return exec(c).status; } // fire-and-check
     bool run_ok(const std::string& c) const { return exec(c).status == 0; }
@@ -238,10 +269,11 @@ PortalEnv default_portal_env();
 // Aggregate readiness of a (re)start: the AP, the resolver, and the DNS
 // redirect must ALL be up, or the portal must not claim success.
 struct StartResult {
-    bool hostapd = false;
+    bool regdom = false;  // `iw reg set <CC>` succeeded (country established first)
+    bool hostapd = false; // AP reached (and still at) AP-ENABLED, pid alive
     bool dnsmasq = false;
     bool dnat = false;
-    bool ok() const { return hostapd && dnsmasq && dnat; }
+    bool ok() const { return regdom && hostapd && dnsmasq && dnat; }
 };
 
 // Owns the AP + captive-DNS + firewall + NetworkManager lifecycle for one run.
@@ -257,6 +289,11 @@ public:
     const NetState& state() const { return net_; }
 
     bool capture_ownership();   // read NM managed-state; false => read failed (do NOT mutate)
+    // Resolve the AP regulatory domain BEFORE any mutation: `cli_country` (from
+    // --country) wins, else the device's current `iw reg get` country. false
+    // (with `err` set) when `iw` is missing or the country is unknown/world -
+    // we must never bring the AP up without a country (brcmfmac won't beacon).
+    bool resolve_country(const std::string& cli_country, std::string& err);
     bool release_interface();   // `managed no`; false => release failed (NM may still own it)
     StartResult start(const PortalOptions& opts);            // bring AP+DNS+DNAT up
     bool stop();                // down for a restart; false => a tracked DNAT rule survived
@@ -271,6 +308,7 @@ private:
     enum class Presence { Present, Absent, Unknown };
 
     bool install_dnat();                      // only after dnsmasq is confirmed up
+    bool await_ap_enabled();                  // poll: pid alive AND AP-ENABLED (bounded window)
     void track_rule(const DnatRule& r);       // record a rule we may have installed
     bool purge_dnat();                        // delete+confirm each tracked rule; keep survivors
     Presence nft_presence();                  // is our nft table there? (status + stderr marker)

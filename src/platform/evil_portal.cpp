@@ -41,6 +41,7 @@
 
 #if defined(__linux__)
 #include <csignal>
+#include <signal.h> // ::kill (pid liveness)
 #include <dirent.h>
 #include <pwd.h>
 #include <sys/types.h>
@@ -407,7 +408,8 @@ HttpRequest parse_http_request(const std::string& raw) {
 // config generators
 // ---------------------------------------------------------------------------
 
-std::string hostapd_conf(const std::string& iface, const std::string& ssid, int channel) {
+std::string hostapd_conf(const std::string& iface, const std::string& ssid, int channel,
+                         const std::string& country) {
     // Open AP. driver=nl80211 is mandatory: without it hostapd falls back to
     // the legacy driver and refuses to start (the old menu entry's bug).
     std::string conf;
@@ -416,10 +418,71 @@ std::string hostapd_conf(const std::string& iface, const std::string& ssid, int 
     conf += "ssid=" + conf_quote(ssid) + "\n";
     if (channel > 0) conf += "channel=" + std::to_string(channel) + "\n";
     conf += "hw_mode=g\n";
+    // On brcmfmac (Pi onboard wifi) an AP typically will not beacon without a
+    // regulatory domain set; country_code + ieee80211d give it one. This is the
+    // needed precondition, not a guarantee of beaconing on every firmware.
+    if (!country.empty()) {
+        conf += "country_code=" + country + "\n";
+        conf += "ieee80211d=1\n";
+    }
     conf += "auth_algs=1\n";
     conf += "wmm_enabled=0\n";
     conf += "logger_syslog=-1\n";
     return conf;
+}
+
+bool valid_country(const std::string& cc) {
+    if (cc.size() != 2) return false;
+    for (char c : cc) {
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) return false;
+    }
+    return true;
+}
+
+std::string parse_reg_country(const std::string& iw_reg_get_output) {
+    // Lines look like "country JP: DFS-JP" (or "global\ncountry 00: DFS-UNSET").
+    const std::string key = "country ";
+    size_t p = iw_reg_get_output.find(key);
+    while (p != std::string::npos) {
+        const size_t s = p + key.size();
+        if (s + 2 <= iw_reg_get_output.size() && iw_reg_get_output[s + 2] == ':') {
+            const std::string cc = iw_reg_get_output.substr(s, 2);
+            if (cc == "00") return "";          // world / regulatory domain unset
+            if (valid_country(cc)) {            // accept a real 2-letter code
+                std::string up = cc;
+                for (char& c : up) {
+                    if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+                }
+                return up;
+            }
+        }
+        p = iw_reg_get_output.find(key, p + 1);
+    }
+    return "";
+}
+
+bool ap_event_enabled(const std::string& iface, const std::string& hostapd_log) {
+    // Consider ONLY complete (newline-terminated) lines; honour the LAST
+    // AP-state event for this interface. Exact "<iface>: <EVENT>" records, so a
+    // substring, a different interface, or a partially-written line never counts.
+    const std::string prefix = iface + ": ";
+    bool enabled = false;
+    size_t pos = 0;
+    while (true) {
+        const size_t nl = hostapd_log.find('\n', pos);
+        if (nl == std::string::npos) break; // trailing partial line: ignore
+        std::string line = hostapd_log.substr(pos, nl - pos);
+        pos = nl + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind(prefix, 0) != 0) continue;
+        const std::string ev = line.substr(prefix.size());
+        if (ev == "AP-ENABLED") {
+            enabled = true;
+        } else if (ev == "AP-DISABLED" || ev == "INTERFACE-DISABLED" || ev == "CTRL-EVENT-TERMINATING") {
+            enabled = false;
+        }
+    }
+    return enabled;
 }
 
 std::string dnsmasq_conf(const std::string& iface, const std::string& gateway, int dns_port) {
@@ -827,6 +890,20 @@ bool wait_wpa_connected(const std::string& iface) {
     return false;
 }
 
+// Is the process named by a pidfile actually alive (not merely a stale file)?
+bool pid_alive(const std::string& pid_path) {
+    std::ifstream in(pid_path);
+    long pid = 0;
+    if (!(in >> pid) || pid <= 1) return false;
+    return ::kill(static_cast<pid_t>(pid), 0) == 0; // signal 0: existence/permission check
+}
+
+std::string read_file_str(const std::string& path) {
+    std::string s;
+    read_file(path, s);
+    return s;
+}
+
 int parse_int(const char* s, int fallback) {
     if (!s || !s[0]) return fallback;
     char* end = nullptr;
@@ -841,7 +918,8 @@ void usage() {
                 "  custom  <file> [ssid]  portal HTML from file; first line\n"
                 "                         <!-- AP=\"Name\" --> names the AP\n"
                 "  clone   <ssid> [chan]  clone a scanned AP ('Clone Portal')\n"
-                "options: --gateway IP (default 192.168.4.1) --iface DEV --channel N\n");
+                "options: --gateway IP (default 192.168.4.1) --iface DEV --channel N\n"
+                "         --country CC (2-letter regdom; else read from `iw reg get`)\n");
 }
 
 int serve_portal(PortalOptions opts, const std::string& iface) {
@@ -857,6 +935,18 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
                     "interface (so it can be restored). Retry, or stop NetworkManager yourself.\n",
                     iface.c_str());
         return 1;
+    }
+
+    // Resolve the AP regulatory domain BEFORE any mutation (the connected AP's
+    // country IE is gone once we take the NIC). Without it brcmfmac reaches
+    // AP-ENABLED but never beacons, so this is fatal rather than a silent no-SSID.
+    {
+        std::string err;
+        if (!net.resolve_country(opts.country, err)) {
+            std::printf("error: %s\n", err.c_str());
+            return 1;
+        }
+        std::printf("[*] wifi country %s (regdom)\n", net.state().country.c_str());
     }
 
     // Single idempotent teardown, established BEFORE the first network mutation
@@ -956,14 +1046,22 @@ int serve_portal(PortalOptions opts, const std::string& iface) {
     }
 
     const StartResult start = net.start(opts);
+    if (!start.regdom) {
+        std::printf("error: could not set the wifi regulatory domain (`iw reg set %s` failed); "
+                    "the AP would not beacon. Try a different --country, or check `iw`.\n",
+                    net.state().country.c_str());
+        teardown();
+        return 1;
+    }
     if (!start.hostapd) {
         std::string hostapd_log;
         read_file(std::string(kWorkDir) + "/hostapd.log", hostapd_log);
         if (!hostapd_log.empty()) {
             std::printf("--- hostapd ---\n%s--- end hostapd ---\n", hostapd_log.c_str());
         }
-        std::printf("error: hostapd failed to start (apt install hostapd; "
-                    "disable Monitor mode / other APs on %s first)\n",
+        std::printf("error: AP did not come up on %s (hostapd never reached AP-ENABLED - no "
+                    "beacon). Check the log above; try a different --country, or disable Monitor "
+                    "mode / other APs on the radio. (apt install hostapd if missing.)\n",
                     iface.c_str());
         teardown();
         return 1;
@@ -1140,6 +1238,9 @@ PortalEnv default_portal_env() {
     env.write_file = [](const std::string& path, const std::string& c) { write_file(path, c); };
     env.wait_connected = [](const std::string& iface) { return wait_wpa_connected(iface); };
     env.kill_pidfile = [](const std::string& name) { kill_pidfile(name.c_str()); };
+    env.read_file = [](const std::string& path) { return read_file_str(path); };
+    env.pid_alive = [](const std::string& pid_path) { return pid_alive(pid_path); };
+    env.sleep_ms = [](int ms) { usleep(static_cast<useconds_t>(ms) * 1000); };
     return env;
 }
 
@@ -1189,6 +1290,41 @@ bool PortalNet::capture_ownership() {
     }
     if (!managed_ok || !uuid_ok) return false; // missing/garbled field => invalid read
     net_.ownership_read_ok = true;
+    return true;
+}
+
+bool PortalNet::resolve_country(const std::string& cli_country, std::string& err) {
+    // We need `iw` both to read the current regdom and to set it before hostapd.
+    if (!env_.have_cmd("iw")) {
+        err = "evil portal needs 'iw' to set the wifi regulatory domain (apt install iw)";
+        return false;
+    }
+    // Read the current regdom BEFORE we release/reconfigure the NIC (the
+    // connected AP's country IE is what set it; it's gone once we take the
+    // interface). Record it as the value to restore on teardown. A failed read
+    // yields "" (unknown) - we do NOT parse output from a failed invocation.
+    const CmdResult reg = env_.exec("iw reg get 2>/dev/null");
+    const std::string device_cc = (reg.status == 0) ? parse_reg_country(reg.out) : "";
+    net_.orig_country = device_cc; // "" => unknown/world: teardown can't restore it
+
+    std::string cc;
+    if (!cli_country.empty()) {
+        if (!valid_country(cli_country)) {
+            err = "--country must be a 2-letter code (e.g. US, JP)";
+            return false;
+        }
+        cc = cli_country;
+        for (char& c : cc) {
+            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        }
+    } else {
+        cc = device_cc;
+    }
+    if (cc.empty()) {
+        err = "could not determine wifi country; pass --country XX (2-letter code)";
+        return false;
+    }
+    net_.country = cc;
     return true;
 }
 
@@ -1300,19 +1436,55 @@ bool PortalNet::install_dnat() {
     return false;
 }
 
+bool PortalNet::await_ap_enabled() {
+    // Poll a bounded window (~3s): the tracked hostapd PID must be ALIVE and the
+    // log's last AP event must be AP-ENABLED. Rereading each poll lets a split
+    // write complete; honouring the last event rejects enabled-then-disabled.
+    const std::string wd = kWorkDir;
+    for (int i = 0; i < 7; ++i) {
+        if (env_.pid_alive(wd + "/hostapd.pid") &&
+            ap_event_enabled(net_.iface, env_.read_file(wd + "/hostapd.log"))) {
+            return true;
+        }
+        if (i < 6) env_.sleep_ms(500);
+    }
+    return false;
+}
+
 StartResult PortalNet::start(const PortalOptions& opts) {
     StartResult res;
     const std::string wd = kWorkDir;
+    // The regulatory domain must be resolved first (serve_portal calls
+    // resolve_country before any mutation, storing a validated code on net_).
+    // Validate/canonicalize here too so a direct caller cannot bypass it (and
+    // never interpolate an unvalidated country into a shell command); without a
+    // valid country refuse to issue a single command rather than start a
+    // (likely non-beaconing) AP.
+    std::string cc = net_.country;
+    for (char& c : cc) {
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    }
+    if (!valid_country(cc) || cc == "00") return res;
+    net_.country = cc;
     // A soft rfkill block (common after boot / when NM releases the radio)
     // silently stops hostapd opening the interface. Clear it first.
     env_.run("rfkill unblock wifi 2>/dev/null");
     env_.run("rfkill unblock wlan 2>/dev/null");
-    env_.write_file(wd + "/hostapd.conf", hostapd_conf(net_.iface, opts.ap_name, opts.channel));
+    // Set the regdom before hostapd (brcmfmac needs it to beacon). This is a
+    // GLOBAL change; check it took, and fail BEFORE touching the AP/addressing/
+    // DNS/DNAT if it did not (AP-ENABLED is not evidence the regdom applied).
+    if (!env_.run_ok("iw reg set " + cc + " 2>/dev/null")) return res; // res.regdom stays false
+    res.regdom = true;
+    net_.regdom_changed = true; // owe a restore on teardown (see cleanup())
+    env_.write_file(wd + "/hostapd.conf",
+                    hostapd_conf(net_.iface, opts.ap_name, opts.channel, cc));
     // Start the AP first: switching the NIC to AP mode flushes any IP, so the
-    // gateway address must be assigned AFTER hostapd. Readiness == pidfile.
+    // gateway address must be assigned AFTER hostapd. Readiness is the tracked
+    // hostapd PID being ALIVE and its log's LAST AP event being AP-ENABLED - a
+    // pidfile alone would call a dead/never-beaconing AP "up".
     env_.run("hostapd -B -P " + wd + "/hostapd.pid " + wd + "/hostapd.conf > " + wd +
              "/hostapd.log 2>&1");
-    res.hostapd = env_.path_exists(wd + "/hostapd.pid");
+    res.hostapd = await_ap_enabled();
     if (!res.hostapd) return res;
 
     env_.run("ip addr flush dev " + net_.iface + " 2>/dev/null");
@@ -1386,6 +1558,17 @@ bool PortalNet::cleanup() {
     for (const auto& c : nm_restore_commands(net_)) {
         if (!env_.run_ok(c)) ok = false;
     }
+    // `iw reg set` is a GLOBAL regulatory change; restore the device's original
+    // regdom if we changed it and know what it was. If the original was unknown
+    // (world/unset or an unreadable `iw reg get`), we cannot restore it - the
+    // regdom is left at the AP's country (documented side effect in REPORT_DNS).
+    if (net_.regdom_changed && !net_.orig_country.empty()) {
+        if (env_.run_ok("iw reg set " + net_.orig_country + " 2>/dev/null")) {
+            net_.regdom_changed = false;
+        } else {
+            ok = false; // couldn't restore the global regdom: not fully clean, retry
+        }
+    }
     if (ok) cleaned_ = true; // only stop retrying once teardown fully succeeded
     return ok;
 }
@@ -1422,6 +1605,13 @@ int evil_portal_main(int argc, char** argv) {
             iface = argv[++i];
         } else if (a == "--channel" && i + 1 < argc) {
             opts.channel = parse_int(argv[++i], opts.channel);
+        } else if (a == "--country" && i + 1 < argc) {
+            const std::string cc = argv[++i];
+            if (!valid_country(cc)) {
+                std::printf("error: --country must be a 2-letter code (e.g. US, JP)\n");
+                return 1;
+            }
+            opts.country = cc; // resolve_country uppercases/re-validates
         } else if (a.rfind("--", 0) == 0) {
             std::printf("error: unknown option %s\n", a.c_str());
             usage();
